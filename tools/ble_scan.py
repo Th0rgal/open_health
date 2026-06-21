@@ -4,11 +4,12 @@
 import argparse
 import asyncio
 from datetime import datetime, timezone
+from typing import Optional
 
 from bleak import BleakScanner
 
 
-def looks_like_oura(name: str | None) -> bool:
+def looks_like_oura(name: Optional[str]) -> bool:
     if not name:
         return False
     lowered = name.lower()
