@@ -103,7 +103,7 @@ fn decode_state_text(body: &[u8]) -> Option<serde_json::Value> {
 /// Celsius. Returns `None` if the length is odd or any value falls outside a
 /// plausible sensor range, leaving the body stored raw rather than mis-decoded.
 fn decode_temperatures(body: &[u8]) -> Option<serde_json::Value> {
-    if body.is_empty() || body.len() % 2 != 0 {
+    if body.is_empty() || !body.len().is_multiple_of(2) {
         return None;
     }
     let mut temps = Vec::with_capacity(body.len() / 2);

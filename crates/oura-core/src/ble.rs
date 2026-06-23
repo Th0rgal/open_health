@@ -80,7 +80,7 @@ pub async fn scan(name_contains: &str, timeout: Duration) -> Result<Vec<Discover
         }
     }
     let _ = adapter.stop_scan().await;
-    found.sort_by(|a, b| b.rssi.cmp(&a.rssi));
+    found.sort_by_key(|d| std::cmp::Reverse(d.rssi));
     Ok(found)
 }
 

@@ -1,55 +1,75 @@
 # open_oura
 
-Reverse-engineering notes and tooling for the Oura Ring 5 BLE protocol.
+Reverse-engineering the Oura ring BLE protocol, and an independent, **cloud-free**
+client that reads your data straight from the ring.
 
-The first goal is to safely map the Ring 5 protocol surface by comparing observed
-BLE services, characteristics, notifications, and packet formats against prior
-community work on Oura BLE behavior.
+Tested live against a Ring 3 Horizon; designed for Ring 3/4/5, which share the same
+GATT layout, packet framing, and authentication flow.
 
-## Prior art
+## What you can recover
 
-- ringverse protocol notes for Oura Ring 4:
-  https://github.com/ringverse/protocol/blob/main/oura/BLE.md
+Straight from the ring, with no Oura account: device info, battery, live heart rate
+(IBI → BPM), latest HR / SpO2, and the full history-event stream — raw
+PPG/IBI/temperature/motion/SpO2 samples plus the ring's **on-device** sleep stages,
+activity MET levels, and HRV.
 
-Those notes describe a tag/length/payload packet format, little-endian fields,
-and known request tags for firmware, battery, time sync, product info, auth,
-events, features, and DFU. This repo should verify what still applies to Ring 5
-before assuming compatibility.
+What you **cannot** get from the ring: the 0–100 Readiness / Sleep / Activity /
+Stress scores and workout auto-classification. Those are computed in Oura's cloud,
+not on the ring — see [`docs/data-recovery-map.md`](docs/data-recovery-map.md).
 
-## Safety rules
+## Repository map
 
-- Prefer passive discovery and read-only requests first.
-- Do not send reset, factory reset, DFU, or firmware-update packets during basic
-  probing.
-- Capture raw hex and timestamps for every experiment.
-- Keep unknown writes behind explicit flags.
+- **`crates/`** — the Rust client: a reusable `oura-core` library and the `oura`
+  CLI. Start here → [`crates/README.md`](crates/README.md).
+- **`tools/`** — Python research bench used for protocol exploration:
+  `oura_protocol.py` (full command matrix, auth, danger-gated ops, JSONL capture)
+  and `oura_realtime_listener.py`.
+- **`docs/`** — protocol and reverse-engineering reference (index below).
+- **`reverse/`, `captures/`** — local-only, gitignored: the decompiled app and raw
+  captures (which may contain serials, MACs, and auth keys).
 
-## Rust client
-
-An independent, cloud-free CLI that reads data straight from the ring lives under
-`crates/` (`oura-core` library + `oura` binary). It connects, authenticates, and
-drains the ring's history events into SQLite, and can stream live heart rate. See
-[`crates/README.md`](crates/README.md). Tested live against a Ring 3 Horizon.
+## Quick start (Rust client)
 
 ```bash
 cargo build --release
 ./target/release/oura scan
+./target/release/oura --key-file key.hex info
 ```
 
-## Planned layout
+See [`crates/README.md`](crates/README.md) for all commands (`scan`, `info`,
+`sync`, `latest`, `live-hr`, `events`) and the auth-key details.
 
-- `docs/` - protocol notes, experiments, captures, and packet tables.
-- `tools/` - local BLE scanners/probers for Ring 5 experiments.
-- `captures/` - ignored by git; local raw captures may contain device-specific
-  identifiers.
-
-## Quick start
+## Research bench (Python)
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python tools/ble_scan.py
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python tools/oura_protocol.py --list
 ```
 
-On macOS, grant Bluetooth permission to the terminal app running the scanner.
+State-changing and destructive commands are hidden behind `--include-state` /
+`--include-danger`. On macOS, grant Bluetooth permission to the terminal.
+
+## Documentation
+
+- [`docs/horizon-ring3-protocol-cheatsheet.md`](docs/horizon-ring3-protocol-cheatsheet.md)
+  — the protocol command reference (requests, responses, auth, features), Ring 3.
+- [`docs/android-app-reversing.md`](docs/android-app-reversing.md) — app internals:
+  BLE constants, the auth operations, key generation, and nonce encryption.
+- [`docs/data-recovery-map.md`](docs/data-recovery-map.md) — what the ring emits vs
+  what only the cloud computes.
+- [`docs/sync-orchestration.md`](docs/sync-orchestration.md) — when and how the app
+  pulls each data channel; the minimal client sync recipe.
+- [`docs/ring-5-observations.md`](docs/ring-5-observations.md) — Ring 5 BLE surface
+  and first-contact findings.
+
+## Safety and secrets
+
+- Prefer passive, read-only requests. reset / DFU / factory-reset / flight-mode are
+  gated behind explicit flags; do not send them during normal use.
+- App-gated operations need the ring's 16-byte auth key (re-sent each connection).
+  Captures and keys are gitignored — never commit a key.
+
+## Prior art
+
+ringverse Oura Ring 4 BLE notes:
+<https://github.com/ringverse/protocol/blob/main/oura/BLE.md>

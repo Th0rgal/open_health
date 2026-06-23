@@ -32,12 +32,7 @@ where
 {
     let mut rx = transport.subscribe();
     // Drop any backlog so we only observe responses to *this* request.
-    loop {
-        match rx.try_recv() {
-            Ok(_) => continue,
-            Err(_) => break,
-        }
-    }
+    while rx.try_recv().is_ok() {}
 
     transport.write(request).await?;
 

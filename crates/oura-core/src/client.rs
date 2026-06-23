@@ -66,7 +66,7 @@ impl<T: Transport> OuraClient<T> {
         Ok(frames.iter().filter_map(|f| Packet::parse(f)).collect())
     }
 
-    fn find<'a>(packets: &'a [Packet], tag: u8) -> Option<&'a Packet> {
+    fn find(packets: &[Packet], tag: u8) -> Option<&Packet> {
         packets.iter().find(|p| p.tag == tag)
     }
 
