@@ -249,12 +249,18 @@ let G=null,vel=[0,0,0],pos=[0,0,0],still=0,trail=[],frames=0,rate=0,mag=0,pitch=
 function feed(d){
  const raw=[d.x,d.y,d.z];
  G=G?add(sc(G,1-set.alpha),sc(raw,set.alpha)):raw.slice();
- // accelerometer measures specific force (points up at rest); true "up" is -G
- const g=norm(sc(G,-1)); mag=len(raw)/set.cpg;
- pitch=Math.atan2(g[2],g[1])*180/Math.PI; roll=Math.atan2(g[0],g[1])*180/Math.PI;
- const lin=sc(sub(raw,G),1/set.cpg), dt=0.02;
- if(len(lin)<set.zupt){if(++still>8)vel=[0,0,0];}else still=0;
- vel=sc(add(vel,sc(lin,9.81*dt)),set.damp);
+ // accelerometer reads +1g along "up" at rest, so up = +G
+ const up=norm(G); mag=len(raw)/set.cpg;
+ pitch=Math.atan2(up[2],up[1])*180/Math.PI; roll=Math.atan2(up[0],up[1])*180/Math.PI;
+ // integrate motion in a gravity-referenced frame (up = world Y) so vertical hand
+ // motion maps to screen-vertical regardless of how the ring is held (yaw unknown)
+ const r0=Math.abs(up[1])<0.9?[0,1,0]:[1,0,0];
+ const right=norm(cross(up,r0)), fwd=cross(right,up);
+ const linS=sc(sub(raw,G),1/set.cpg);
+ const linW=[dot(linS,right),dot(linS,up),dot(linS,fwd)];
+ const dt=0.02;
+ if(len(linW)<set.zupt){if(++still>8)vel=[0,0,0];}else still=0;
+ vel=sc(add(vel,sc(linW,9.81*dt)),set.damp);
  pos=add(pos,sc(vel,dt*set.pscale));
  trail.push(pos.slice()); if(trail.length>800)trail.shift();
  frames++;
