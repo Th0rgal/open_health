@@ -101,6 +101,14 @@ async fn handle(
         return forbidden(&mut sock).await;
     }
     if matches!(path, "/start" | "/stop") {
+        // Require a custom header. Same-origin fetch (our page) can set it; an
+        // <img>/<form>/navigation cannot add headers, and a cross-origin fetch
+        // that tries is blocked by the CORS preflight we never approve. This
+        // closes the no-Origin GET CSRF vector that an Origin check alone misses.
+        if header(&req, "x-oura-viz").is_none() {
+            return forbidden(&mut sock).await;
+        }
+        // Defence in depth: also reject a mismatched Origin when present.
         let origin_ok = header(&req, "origin").is_none_or(|o| {
             o == format!("http://127.0.0.1:{port}") || o == format!("http://localhost:{port}")
         });
@@ -276,7 +284,8 @@ const es=new EventSource('/stream');
 es.onmessage=e=>feed(JSON.parse(e.data));
 
 $('reset').onclick=()=>{trail=[];pos=[0,0,0];vel=[0,0,0];};
-$('start').onclick=async()=>{await fetch('/start');streaming=true;$('start').classList.add('on');$('stop').classList.remove('on');$('status').textContent='streaming';};
-$('stop').onclick=async()=>{await fetch('/stop');streaming=false;$('start').classList.remove('on');$('stop').classList.add('on');$('status').textContent='stopped';};
+const H={headers:{'X-Oura-Viz':'1'}};
+$('start').onclick=async()=>{await fetch('/start',H);streaming=true;$('start').classList.add('on');$('stop').classList.remove('on');$('status').textContent='streaming';};
+$('stop').onclick=async()=>{await fetch('/stop',H);streaming=false;$('start').classList.remove('on');$('stop').classList.add('on');$('status').textContent='stopped';};
 </script>
 </body></html>"##;
