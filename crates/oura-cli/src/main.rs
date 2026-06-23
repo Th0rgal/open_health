@@ -1,7 +1,8 @@
 //! `oura` — a command-line client that reads data directly from an Oura ring over
 //! BLE, with no Oura cloud account. See `--help` for subcommands.
 
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -43,6 +44,10 @@ struct Cli {
 enum Command {
     /// List nearby Oura rings.
     Scan,
+    /// Pair with a factory-reset ring: install a fresh 16-byte auth key and save
+    /// it to `--key-file` (or `oura-<serial>.key`). If the key file already
+    /// exists, that key is re-installed instead of generating a new one.
+    Pair,
     /// Connect and print device info (firmware, serial, battery, capabilities).
     Info,
     /// Drain history events into the database (incremental).
@@ -64,6 +69,10 @@ enum Command {
 
 fn load_key(path: &Option<PathBuf>) -> Result<Option<[u8; 16]>> {
     let Some(path) = path else { return Ok(None) };
+    // A missing file is not an error: `pair` writes it, others treat it as "no key".
+    if !path.exists() {
+        return Ok(None);
+    }
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading key file {}", path.display()))?;
     let bytes = hex::decode(text.trim()).context("key file is not valid hex")?;
@@ -71,6 +80,26 @@ fn load_key(path: &Option<PathBuf>) -> Result<Option<[u8; 16]>> {
         .try_into()
         .map_err(|_| anyhow!("auth key must be exactly 16 bytes"))?;
     Ok(Some(key))
+}
+
+/// Generate a random 16-byte auth key from the OS CSPRNG.
+fn generate_key() -> Result<[u8; 16]> {
+    let mut file = std::fs::File::open("/dev/urandom").context("opening /dev/urandom")?;
+    let mut key = [0u8; 16];
+    file.read_exact(&mut key).context("reading random bytes")?;
+    Ok(key)
+}
+
+/// Persist a key as hex with owner-only permissions.
+fn save_key(path: &Path, key: &[u8; 16]) -> Result<()> {
+    std::fs::write(path, format!("{}\n", hex::encode(key)))
+        .with_context(|| format!("writing key file {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 async fn connect(cli: &Cli) -> Result<OuraClient<BleTransport>> {
@@ -110,6 +139,7 @@ async fn main() -> Result<()> {
 
     match &cli.command {
         Command::Scan => cmd_scan(&cli).await,
+        Command::Pair => cmd_pair(&cli).await,
         Command::Info => cmd_info(&cli, &key).await,
         Command::Sync { sync_time } => cmd_sync(&cli, &key, *sync_time).await,
         Command::Latest => cmd_latest(&cli, &key).await,
@@ -127,6 +157,49 @@ async fn cmd_scan(cli: &Cli) -> Result<()> {
     for d in found {
         println!("{:>5} dBm  {}  ({})", d.rssi, d.name, d.id);
     }
+    Ok(())
+}
+
+async fn cmd_pair(cli: &Cli) -> Result<()> {
+    let client = connect(cli).await?;
+    let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
+
+    // Reuse an existing key file if present; otherwise mint a fresh key.
+    let (key, reused) = match &cli.key_file {
+        Some(p) if p.exists() => (
+            load_key(&cli.key_file)?.expect("key file exists"),
+            true,
+        ),
+        _ => (generate_key()?, false),
+    };
+    let out = cli
+        .key_file
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("oura-{serial}.key")));
+
+    // Persist the key before installing it, so a crash mid-pair never loses the
+    // only copy of a key that may already be live on the ring.
+    save_key(&out, &key)?;
+
+    client
+        .set_auth_key(&key)
+        .await
+        .context("set_auth_key failed (is the ring factory-reset / removed from the app?)")?;
+    println!(
+        "Installed {} auth key on {serial}; saved to {}",
+        if reused { "existing" } else { "new" },
+        out.display()
+    );
+
+    let result = client.authenticate(&key).await.context("verifying auth")?;
+    println!("Authenticated: {result:?}");
+    match client.battery().await {
+        Ok(b) => println!("Battery: {}%", b.percent),
+        Err(e) => println!("Battery: <{e}>"),
+    }
+
+    println!("\nPaired. Use it with:  oura --key-file {} info", out.display());
+    let _ = client.transport().disconnect().await;
     Ok(())
 }
 
