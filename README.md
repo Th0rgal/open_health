@@ -64,6 +64,9 @@ State-changing and destructive commands are hidden behind `--include-state` /
   and first-contact findings.
 - [`docs/firmware-update.md`](docs/firmware-update.md) — the DFU/OTA opcodes and
   why a custom image can't be flashed (encrypted, device-resident key).
+- [`docs/native-decoder.md`](docs/native-decoder.md) — porting event-body decoders
+  from the native `libringeventparser.so` (how the exact byte layouts were
+  recovered with Ghidra).
 
 ## Safety and secrets
 

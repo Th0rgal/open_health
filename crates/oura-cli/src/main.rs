@@ -68,6 +68,8 @@ enum Command {
     },
     /// Show stored event counts from the database (offline).
     Events,
+    /// Re-run decoders over already-stored raw event bodies (offline).
+    Redecode,
     /// Show feature status (HR, SpO2…) and optionally enable measurement.
     Features {
         /// Enable daytime-HR measurement (mode automatic).
@@ -177,6 +179,12 @@ async fn main() -> Result<()> {
         Command::Latest => cmd_latest(&cli, &key).await,
         Command::LiveHr { seconds, raw } => cmd_live_hr(&cli, &key, *seconds, *raw).await,
         Command::Events => cmd_events(&cli).await,
+        Command::Redecode => {
+            let store = Store::open(&cli.db)?;
+            let (decoded, total) = store.redecode()?;
+            println!("Re-decoded {decoded}/{total} stored events.");
+            Ok(())
+        }
         Command::Features {
             enable_hr,
             enable_spo2,

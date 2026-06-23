@@ -172,6 +172,34 @@ impl Store {
         self.insert_reading(serial, "battery_percent", battery.percent as f64, "%")
     }
 
+    /// Re-decode every stored event body with the current decoders, updating
+    /// `decoded_json`. Returns `(rows_with_decode, total_rows)`. Lets new decoders
+    /// be applied to events captured before they existed — no re-sync needed.
+    pub fn redecode(&self) -> Result<(usize, usize)> {
+        let rows: Vec<(i64, i64, Vec<u8>)> = {
+            let mut stmt = self.conn.prepare("SELECT id, tag, body FROM events")?;
+            let collected = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            collected
+        };
+        let total = rows.len();
+        let mut decoded_count = 0;
+        for (id, tag, body) in rows {
+            let decoded = crate::events::decode_event_body(tag as u8, &body)
+                .map(|v| serde_json::to_string(&v).unwrap_or_default());
+            if decoded.is_some() {
+                decoded_count += 1;
+            }
+            let name = crate::events::event_name(tag as u8);
+            self.conn.execute(
+                "UPDATE events SET decoded_json = ?1, name = ?2 WHERE id = ?3",
+                params![decoded, name, id],
+            )?;
+        }
+        Ok((decoded_count, total))
+    }
+
     /// Distinct device serials that have stored events.
     pub fn device_serials(&self) -> Result<Vec<String>> {
         let mut stmt = self

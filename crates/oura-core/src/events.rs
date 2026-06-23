@@ -49,6 +49,12 @@ impl RingEvent {
     }
 }
 
+/// Decode an event body for a given tag. Public entry point for re-decoding
+/// events already stored raw (e.g. after adding new decoders).
+pub fn decode_event_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
+    decode_body(tag, body)
+}
+
 /// Best-effort decode of an event body. Unknown bodies are intentionally left raw
 /// (see module docs). Returns `None` when we don't (yet) understand the layout.
 ///
@@ -64,8 +70,42 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         0x45 | 0x53 => decode_state_text(body),
         // temp_event (7 probes), temp_period, sleep_temp_event: int16 LE centi-°C.
         0x46 | 0x69 | 0x75 => decode_temperatures(body),
+        // hrv_event: N pairs of (u8 avg HR bpm, u8 avg RMSSD ms), one per 5 min.
+        0x5d => decode_hrv(body),
+        // green_ibi_quality_event (Ring 5 tag 0x80): green-LED IBI + quality stream.
+        0x80 => decode_green_ibi_quality(body),
+        // ambient_event / eda: u16 LE samples, one per 5 min.
+        0x59 => decode_u16_samples(body, "ambient"),
+        // ehr_acm_intensity_event: up to 7 u16 LE intensity values.
+        0x74 => decode_u16_samples(body, "intensity"),
+        // activity_information: state byte + per-bin MET levels.
+        0x50 => decode_activity_info(body),
+        // spo2_event: one SpO2 % per sample (1 Hz).
+        0x6f => decode_spo2(body),
+        // sleep_phase_information / details / data: 2-bit hypnogram codes.
+        0x4b | 0x4e | 0x5a => decode_sleep_phases(body),
+        // ibi_and_amplitude_event: 14-byte packed 6× (IBI delta ms, amplitude).
+        0x60 => decode_ibi_amplitude(body),
+        // alert_event: single alert-type byte.
+        0x56 => decode_first_byte(body, "alert_type"),
         _ => None,
     }
+}
+
+/// Decode an `hrv_event` body: pairs of `(avg_hr_bpm, avg_rmssd_ms)`, one sample
+/// per 5-minute window. Layout confirmed from the ring's native parser
+/// (`parse_api_hrv_event`): each sample is two bytes, even body length.
+fn decode_hrv(body: &[u8]) -> Option<serde_json::Value> {
+    if body.is_empty() || !body.len().is_multiple_of(2) {
+        return None;
+    }
+    let hr: Vec<u8> = body.iter().step_by(2).copied().collect();
+    let rmssd: Vec<u8> = body.iter().skip(1).step_by(2).copied().collect();
+    Some(serde_json::json!({
+        "hr_bpm": hr,
+        "rmssd_ms": rmssd,
+        "interval_min": 5,
+    }))
 }
 
 fn decode_ascii(body: &[u8]) -> Option<serde_json::Value> {
@@ -116,6 +156,120 @@ fn decode_temperatures(body: &[u8]) -> Option<serde_json::Value> {
         temps.push((celsius * 100.0).round() / 100.0);
     }
     Some(serde_json::json!({ "temps_c": temps }))
+}
+
+/// `green_ibi_quality_event` (Ring 5 tag `0x80`): green-LED inter-beat intervals
+/// with a quality flag. Per the native `parse_api_green_ibi_quality_event`, each
+/// sample is two bytes: `ibi_ms = (b1 & 7) | (b0 << 3)`, `quality = (b1>>3)&3`,
+/// `flag = b1>>5`. We also surface heart rate from good-quality, plausible beats.
+fn decode_green_ibi_quality(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 2 {
+        return None;
+    }
+    let mut ibi_ms = Vec::new();
+    let mut quality = Vec::new();
+    let mut hr_bpm = Vec::new();
+    for p in body.chunks_exact(2) {
+        let ibi = ((p[1] & 0x07) as u16) | ((p[0] as u16) << 3);
+        let q = (p[1] >> 3) & 0x03;
+        if q == 1 && (300..=2000).contains(&ibi) {
+            hr_bpm.push(60_000u32 / ibi as u32);
+        }
+        ibi_ms.push(ibi);
+        quality.push(q);
+    }
+    Some(serde_json::json!({ "ibi_ms": ibi_ms, "quality": quality, "hr_bpm": hr_bpm }))
+}
+
+/// A body of little-endian `u16` samples under a single key (ambient, intensity).
+fn decode_u16_samples(body: &[u8], key: &str) -> Option<serde_json::Value> {
+    if body.is_empty() || !body.len().is_multiple_of(2) {
+        return None;
+    }
+    let v: Vec<u16> = body
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    Some(serde_json::json!({ key: v }))
+}
+
+/// `activity_information`: a state byte followed by per-bin MET levels. The native
+/// `parse_api_activity_info_event` scales each byte `b<128 -> b*0.1`, else
+/// `12.8 + (b-128)*0.2` MET.
+fn decode_activity_info(body: &[u8]) -> Option<serde_json::Value> {
+    let (&state, mets) = body.split_first()?;
+    let met: Vec<f64> = mets
+        .iter()
+        .map(|&b| {
+            let m = if b < 0x80 {
+                b as f64 * 0.1
+            } else {
+                12.8 + (b as f64 - 128.0) * 0.2
+            };
+            (m * 100.0).round() / 100.0
+        })
+        .collect();
+    Some(serde_json::json!({ "state": state, "met": met }))
+}
+
+/// `spo2_event`: a header byte then one SpO2 % per sample (1 Hz). A trailing
+/// `0xff` is a "continued" sentinel, not a sample.
+fn decode_spo2(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 2 {
+        return None;
+    }
+    let mut end = body.len();
+    if body[end - 1] == 0xff {
+        end -= 1;
+    }
+    let spo2: Vec<u8> = body[1..end].to_vec();
+    if spo2.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({ "spo2_percent": spo2 }))
+}
+
+/// Sleep-stage hypnogram: a header byte then 2-bit phase codes (4 per byte,
+/// MSB-first). Enum from the native `SleepPhase_OSSAv1`.
+fn decode_sleep_phases(body: &[u8]) -> Option<serde_json::Value> {
+    const PHASE: [&str; 4] = ["deep", "light", "rem", "awake"];
+    if body.len() < 2 {
+        return None;
+    }
+    let mut phases = Vec::new();
+    for &b in &body[1..] {
+        for shift in [6u8, 4, 2, 0] {
+            phases.push(PHASE[((b >> shift) & 0x03) as usize]);
+        }
+    }
+    Some(serde_json::json!({ "header": body[0], "phases": phases }))
+}
+
+/// `ibi_and_amplitude_event` (tag `0x60`): a fixed 14-byte packet holding 6
+/// inter-beat intervals (ms) and PPG amplitudes, bit-packed per the native
+/// `parse_api_ibi_and_amplitude_event`. Layout ported from the decompiled bit
+/// extraction; pending validation against real `0x60` captures.
+fn decode_ibi_amplitude(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() != 14 {
+        return None;
+    }
+    let b = body;
+    let ibi_ms = [
+        ((b[6] & 1) as u16) | ((b[0] as u16) << 3) | ((b[12] >> 5) & 6) as u16,
+        ((b[7] & 1) as u16) | ((b[1] as u16) << 3) | ((b[12] >> 3) & 6) as u16,
+        ((b[8] & 1) as u16) | ((b[2] as u16) << 3) | ((b[12] >> 1) & 6) as u16,
+        ((b[9] & 1) as u16) | ((b[3] as u16) << 3) | (((b[12] & 3) << 1) as u16),
+        ((b[10] & 1) as u16) | ((b[4] as u16) << 3) | ((b[13] >> 5) & 6) as u16,
+        ((b[11] & 1) as u16) | ((b[5] as u16) << 3) | ((b[13] >> 3) & 6) as u16,
+    ];
+    let shift = if (b[13] & 0x0f) == 7 { 0 } else { (b[13] & 0x0f) + 1 };
+    let amplitude: Vec<u32> = (0..6).map(|k| ((b[6 + k] >> 1) as u32) << shift).collect();
+    Some(serde_json::json!({ "ibi_ms": ibi_ms, "amplitude": amplitude }))
+}
+
+/// A single leading byte under a named key.
+fn decode_first_byte(body: &[u8], key: &str) -> Option<serde_json::Value> {
+    body.first().map(|&b| serde_json::json!({ key: b }))
 }
 
 /// Map an event tag to its name. Mirrors the Android app's event taxonomy.
@@ -180,6 +334,7 @@ pub fn event_name(tag: u8) -> &'static str {
         0x7a => "tag_event",
         0x7e => "real_step_event_feature_1",
         0x7f => "real_step_event_feature_2",
+        0x80 => "green_ibi_quality_event",
         0x81 => "cva_raw_ppg_data",
         0x82 => "scan_start",
         0x83 => "scan_end",
@@ -262,6 +417,55 @@ mod tests {
         // Captured time_sync body: u32 LE unix time then timezone bytes.
         let v = decode_time_sync(&hex::decode("4fd2376a0000000000").unwrap()).unwrap();
         assert_eq!(v["unix_time"].as_u64().unwrap(), 1_782_043_215);
+    }
+
+    #[test]
+    fn decodes_hrv_event() {
+        // 3 samples: (hr=60,rmssd=40), (hr=62,rmssd=45), (hr=58,rmssd=50)
+        let body = [60u8, 40, 62, 45, 58, 50];
+        let v = decode_hrv(&body).unwrap();
+        assert_eq!(v["hr_bpm"].as_array().unwrap().len(), 3);
+        assert_eq!(v["hr_bpm"][1].as_u64().unwrap(), 62);
+        assert_eq!(v["rmssd_ms"][2].as_u64().unwrap(), 50);
+        assert_eq!(v["interval_min"].as_u64().unwrap(), 5);
+    }
+
+    #[test]
+    fn decodes_green_ibi_quality_real_bytes() {
+        // Captured Ring 5 0x80 body: resting beats ~47-50 bpm at quality 1.
+        let body = hex::decode("9d09940b9d0d9a099a09a62e946e").unwrap();
+        let v = decode_green_ibi_quality(&body).unwrap();
+        let ibi = v["ibi_ms"].as_array().unwrap();
+        assert_eq!(ibi.len(), 7);
+        // first beat: (0x09 & 7) | (0x9d << 3) = 1 | 1256 = 1257 ms
+        assert_eq!(ibi[0].as_u64().unwrap(), 1257);
+        // good-quality beats yield plausible resting HR
+        for hr in v["hr_bpm"].as_array().unwrap() {
+            let h = hr.as_u64().unwrap();
+            assert!((40..=60).contains(&h), "hr {h} out of resting range");
+        }
+    }
+
+    #[test]
+    fn decodes_activity_met() {
+        // state=3, then bytes below/above 128
+        let v = decode_activity_info(&[3, 10, 0x80, 0x90]).unwrap();
+        assert_eq!(v["state"].as_u64().unwrap(), 3);
+        let met = v["met"].as_array().unwrap();
+        assert_eq!(met[0].as_f64().unwrap(), 1.0); // 10 * 0.1
+        assert_eq!(met[1].as_f64().unwrap(), 12.8); // boundary
+        assert_eq!(met[2].as_f64().unwrap(), 12.8 + 16.0 * 0.2); // 0x90-128=16
+    }
+
+    #[test]
+    fn decodes_sleep_phases_codes() {
+        // header byte, then one byte 0b00_01_10_11 = deep,light,rem,awake
+        let v = decode_sleep_phases(&[0x00, 0b00_01_10_11]).unwrap();
+        let p = v["phases"].as_array().unwrap();
+        assert_eq!(p[0], "deep");
+        assert_eq!(p[1], "light");
+        assert_eq!(p[2], "rem");
+        assert_eq!(p[3], "awake");
     }
 
     #[test]
