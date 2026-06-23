@@ -84,6 +84,8 @@ fn decode_body(tag: u8, body: &[u8]) -> Option<serde_json::Value> {
         0x6f => decode_spo2(body),
         // sleep_phase_information / details / data: 2-bit hypnogram codes.
         0x4b | 0x4e | 0x5a => decode_sleep_phases(body),
+        // motion_event: orientation + per-axis average motion + intensity.
+        0x47 => decode_motion(body),
         // ibi_and_amplitude_event: 14-byte packed 6× (IBI delta ms, amplitude).
         0x60 => decode_ibi_amplitude(body),
         // alert_event: single alert-type byte.
@@ -265,6 +267,37 @@ fn decode_ibi_amplitude(body: &[u8]) -> Option<serde_json::Value> {
     let shift = if (b[13] & 0x0f) == 7 { 0 } else { (b[13] & 0x0f) + 1 };
     let amplitude: Vec<u32> = (0..6).map(|k| ((b[6 + k] >> 1) as u32) << shift).collect();
     Some(serde_json::json!({ "ibi_ms": ibi_ms, "amplitude": amplitude }))
+}
+
+/// `motion_event` (tag `0x47`): a compact per-window motion summary. From the
+/// native `parse_api_motion_events`: `b0>>5` = orientation, `b0&0x1f` =
+/// motion-seconds, then three signed `i8` average-axis values scaled ×8, and
+/// optional low/high intensity nibbles. Field names are best-effort (axis order is
+/// inferred from the struct layout).
+fn decode_motion(body: &[u8]) -> Option<serde_json::Value> {
+    if body.len() < 4 {
+        return None;
+    }
+    let mut v = serde_json::json!({
+        "orientation": body[0] >> 5,
+        "motion_seconds": body[0] & 0x1f,
+        "avg_x": (body[1] as i8 as i32) * 8,
+        "avg_y": (body[2] as i8 as i32) * 8,
+        "avg_z": (body[3] as i8 as i32) * 8,
+    });
+    if body.len() >= 5 {
+        if body[4] & 0x40 != 0 {
+            return None;
+        }
+        v["low_intensity"] = (body[4] & 0x3f).into();
+    }
+    if body.len() >= 6 {
+        if body[5] & 0x40 != 0 {
+            return None;
+        }
+        v["high_intensity"] = (body[5] & 0x3f).into();
+    }
+    Some(v)
 }
 
 /// A single leading byte under a named key.
@@ -466,6 +499,17 @@ mod tests {
         assert_eq!(p[1], "light");
         assert_eq!(p[2], "rem");
         assert_eq!(p[3], "awake");
+    }
+
+    #[test]
+    fn decodes_motion_event() {
+        // 0x6f,0x0c,0x1d,0x07,0x0c,0x07 -> orientation 3, axes signed ×8
+        let v = decode_motion(&[0x6f, 0x0c, 0x1d, 0x07, 0x0c, 0x07]).unwrap();
+        assert_eq!(v["orientation"].as_u64().unwrap(), 3);
+        assert_eq!(v["avg_x"].as_i64().unwrap(), 12 * 8);
+        assert_eq!(v["avg_y"].as_i64().unwrap(), 29 * 8);
+        assert_eq!(v["avg_z"].as_i64().unwrap(), 7 * 8);
+        assert_eq!(v["high_intensity"].as_u64().unwrap(), 7);
     }
 
     #[test]
