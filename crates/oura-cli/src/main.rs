@@ -62,9 +62,41 @@ enum Command {
     LiveHr {
         #[arg(long, default_value_t = 30)]
         seconds: u64,
+        /// Also print every raw notification frame (for diagnosing the stream).
+        #[arg(long)]
+        raw: bool,
     },
     /// Show stored event counts from the database (offline).
     Events,
+    /// Show feature status (HR, SpO2…) and optionally enable measurement.
+    Features {
+        /// Enable daytime-HR measurement (mode automatic).
+        #[arg(long)]
+        enable_hr: bool,
+        /// Enable SpO2 measurement (mode automatic).
+        #[arg(long)]
+        enable_spo2: bool,
+    },
+}
+
+fn feature_mode_name(mode: u8) -> &'static str {
+    match mode {
+        0 => "off",
+        1 => "automatic",
+        2 => "requested",
+        3 => "connected_live",
+        _ => "?",
+    }
+}
+
+fn feature_state_name(state: u8) -> &'static str {
+    match state {
+        0 => "idle",
+        1 => "scanning",
+        2 => "measuring",
+        3 => "postprocessing",
+        _ => "?",
+    }
 }
 
 fn load_key(path: &Option<PathBuf>) -> Result<Option<[u8; 16]>> {
@@ -143,9 +175,60 @@ async fn main() -> Result<()> {
         Command::Info => cmd_info(&cli, &key).await,
         Command::Sync { sync_time } => cmd_sync(&cli, &key, *sync_time).await,
         Command::Latest => cmd_latest(&cli, &key).await,
-        Command::LiveHr { seconds } => cmd_live_hr(&cli, &key, *seconds).await,
+        Command::LiveHr { seconds, raw } => cmd_live_hr(&cli, &key, *seconds, *raw).await,
         Command::Events => cmd_events(&cli).await,
+        Command::Features {
+            enable_hr,
+            enable_spo2,
+        } => cmd_features(&cli, &key, *enable_hr, *enable_spo2).await,
     }
+}
+
+async fn cmd_features(
+    cli: &Cli,
+    key: &Option<[u8; 16]>,
+    enable_hr: bool,
+    enable_spo2: bool,
+) -> Result<()> {
+    use oura_core::protocol::{feature, feature_mode};
+    let client = connect(cli).await?;
+    maybe_auth(&client, key).await?;
+
+    if enable_hr {
+        client
+            .set_feature_mode(feature::DAYTIME_HR, feature_mode::AUTOMATIC)
+            .await
+            .context("enabling daytime HR")?;
+        println!("Enabled daytime HR (automatic).");
+    }
+    if enable_spo2 {
+        client
+            .set_feature_mode(feature::SPO2, feature_mode::AUTOMATIC)
+            .await
+            .context("enabling SpO2")?;
+        println!("Enabled SpO2 (automatic).");
+    }
+
+    for (label, id) in [
+        ("daytime HR", feature::DAYTIME_HR),
+        ("exercise HR", feature::EXERCISE_HR),
+        ("SpO2", feature::SPO2),
+        ("resting HR", feature::RESTING_HR),
+    ] {
+        match client.feature_status(id).await {
+            Ok(s) => println!(
+                "{label:>12}: mode={} state={} status={} sub={}",
+                feature_mode_name(s.mode),
+                feature_state_name(s.state),
+                s.status,
+                s.subscription
+            ),
+            Err(e) => println!("{label:>12}: <{e}>"),
+        }
+    }
+
+    let _ = client.transport().disconnect().await;
+    Ok(())
 }
 
 async fn cmd_scan(cli: &Cli) -> Result<()> {
@@ -323,7 +406,7 @@ async fn cmd_latest(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_live_hr(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64) -> Result<()> {
+async fn cmd_live_hr(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64, raw: bool) -> Result<()> {
     let client = connect(cli).await?;
     maybe_auth(&client, key).await?;
     let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
@@ -332,7 +415,7 @@ async fn cmd_live_hr(cli: &Cli, key: &Option<[u8; 16]>, seconds: u64) -> Result<
     println!("Streaming live heart rate for {seconds}s (Ctrl-C to stop early)...");
     let mut count = 0u32;
     client
-        .live_heart_rate(Duration::from_secs(seconds), |s| {
+        .live_heart_rate(Duration::from_secs(seconds), raw, |s| {
             count += 1;
             println!("  {} bpm (IBI {} ms)", s.bpm, s.ibi_ms);
             if let Some(store) = &store {

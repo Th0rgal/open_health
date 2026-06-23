@@ -3,8 +3,9 @@
 Reverse-engineering the Oura ring BLE protocol, and an independent, **cloud-free**
 client that reads your data straight from the ring.
 
-Tested live against a Ring 3 Horizon; designed for Ring 3/4/5, which share the same
-GATT layout, packet framing, and authentication flow.
+Tested live against a Ring 3 Horizon **and a Ring 5** (pairing, auth, and event
+sync confirmed on both); designed for Ring 3/4/5, which share the same GATT layout,
+packet framing, and authentication flow.
 
 ## What you can recover
 

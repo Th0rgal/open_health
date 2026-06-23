@@ -35,6 +35,31 @@ pub struct SyncOutcome {
     pub next_cursor: u32,
 }
 
+/// A feature's reported status (`0x2f` ext `0x21`): mode/status/state/subscription.
+#[derive(Clone, Copy, Debug)]
+pub struct FeatureStatus {
+    pub feature: u8,
+    pub mode: u8,
+    pub status: u8,
+    pub state: u8,
+    pub subscription: u8,
+}
+
+impl FeatureStatus {
+    fn parse(p: &Packet) -> Option<FeatureStatus> {
+        if p.ext_tag() != Some(0x21) || p.payload.len() < 6 {
+            return None;
+        }
+        Some(FeatureStatus {
+            feature: p.payload[1],
+            mode: p.payload[2],
+            status: p.payload[3],
+            state: p.payload[4],
+            subscription: p.payload[5],
+        })
+    }
+}
+
 /// High-level client over any [`Transport`].
 pub struct OuraClient<T: Transport> {
     transport: T,
@@ -268,10 +293,40 @@ impl<T: Transport> OuraClient<T> {
         Ok(out)
     }
 
+    /// Read a feature's status (mode/state/subscription).
+    pub async fn feature_status(&self, feature_id: u8) -> Result<FeatureStatus> {
+        let packets = self.request(&protocol::req_feature_status(feature_id)).await?;
+        packets
+            .iter()
+            .find_map(FeatureStatus::parse)
+            .ok_or_else(|| Error::Protocol("no feature-status response".into()))
+    }
+
+    /// Set a feature's mode (e.g. `feature_mode::AUTOMATIC` to enable measurement).
+    pub async fn set_feature_mode(&self, feature_id: u8, mode: u8) -> Result<()> {
+        let packets = self
+            .request(&protocol::req_set_feature_mode(feature_id, mode))
+            .await?;
+        match packets
+            .iter()
+            .find(|p| p.ext_tag() == Some(0x23))
+            .and_then(|p| p.payload.get(2).copied())
+        {
+            Some(0x00) => Ok(()),
+            Some(other) => Err(Error::Protocol(format!("set_feature_mode result {other:#04x}"))),
+            None => Err(Error::Protocol("no set_feature_mode response".into())),
+        }
+    }
+
     /// Enable live heart rate (daytime HR, `CONNECTED_LIVE`) and invoke `on_sample`
     /// for each valid beat for up to `duration`. Restores `AUTOMATIC` mode on exit.
     /// The ring must be worn for samples to appear.
-    pub async fn live_heart_rate<F>(&self, duration: Duration, mut on_sample: F) -> Result<()>
+    pub async fn live_heart_rate<F>(
+        &self,
+        duration: Duration,
+        debug: bool,
+        mut on_sample: F,
+    ) -> Result<()>
     where
         F: FnMut(HeartRateSample),
     {
@@ -294,6 +349,9 @@ impl<T: Transport> OuraClient<T> {
             }
             match tokio::time::timeout(remaining, rx.recv()).await {
                 Ok(Ok(frame)) => {
+                    if debug {
+                        eprintln!("raw notify: {}", hex::encode(&frame));
+                    }
                     if let Some(sample) = parse_live_hr_frame(&frame) {
                         on_sample(sample);
                     }
