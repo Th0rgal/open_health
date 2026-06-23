@@ -63,7 +63,7 @@ pub async fn run(client: OuraClient<BleTransport>, port: u16, minutes: u16) -> R
                 if let Ok((sock, _)) = accept {
                     let rx = tx.subscribe();
                     let c = client.clone();
-                    tokio::spawn(async move { let _ = handle(sock, rx, c, minutes).await; });
+                    tokio::spawn(async move { let _ = handle(sock, rx, c, port, minutes).await; });
                 }
             }
         }
@@ -71,16 +71,43 @@ pub async fn run(client: OuraClient<BleTransport>, port: u16, minutes: u16) -> R
     Ok(())
 }
 
+/// Case-insensitive lookup of an HTTP header value in the raw request.
+fn header<'a>(req: &'a str, name: &str) -> Option<&'a str> {
+    req.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
 async fn handle(
     mut sock: TcpStream,
     mut rx: broadcast::Receiver<String>,
     client: Client,
+    port: u16,
     minutes: u16,
 ) -> Result<()> {
     let mut buf = [0u8; 2048];
     let n = sock.read(&mut buf).await?;
     let req = String::from_utf8_lossy(&buf[..n]);
     let path = req.split_whitespace().nth(1).unwrap_or("/");
+
+    // Defend the local server against DNS-rebinding and cross-site (CSRF) calls:
+    // require a loopback Host on every request, and a same-origin Origin on the
+    // control endpoints (browsers attach Origin to cross-site fetches).
+    let host_ok = header(&req, "host").is_some_and(|h| {
+        h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}")
+    });
+    if !host_ok {
+        return forbidden(&mut sock).await;
+    }
+    if matches!(path, "/start" | "/stop") {
+        let origin_ok = header(&req, "origin").is_none_or(|o| {
+            o == format!("http://127.0.0.1:{port}") || o == format!("http://localhost:{port}")
+        });
+        if !origin_ok {
+            return forbidden(&mut sock).await;
+        }
+    }
 
     match path {
         "/stream" => {
@@ -130,11 +157,17 @@ async fn handle(
 
 async fn ok(sock: &mut TcpStream, msg: &str) -> Result<()> {
     let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
         msg.len(),
         msg
     );
     sock.write_all(resp.as_bytes()).await?;
+    Ok(())
+}
+
+async fn forbidden(sock: &mut TcpStream) -> Result<()> {
+    sock.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        .await?;
     Ok(())
 }
 
@@ -208,7 +241,8 @@ let G=null,vel=[0,0,0],pos=[0,0,0],still=0,trail=[],frames=0,rate=0,mag=0,pitch=
 function feed(d){
  const raw=[d.x,d.y,d.z];
  G=G?add(sc(G,1-set.alpha),sc(raw,set.alpha)):raw.slice();
- const g=norm(G); mag=len(raw)/set.cpg;
+ // accelerometer measures specific force (points up at rest); true "up" is -G
+ const g=norm(sc(G,-1)); mag=len(raw)/set.cpg;
  pitch=Math.atan2(g[2],g[1])*180/Math.PI; roll=Math.atan2(g[0],g[1])*180/Math.PI;
  const lin=sc(sub(raw,G),1/set.cpg), dt=0.02;
  if(len(lin)<set.zupt){if(++still>8)vel=[0,0,0];}else still=0;
