@@ -12,6 +12,8 @@ use oura_core::ble::{self, BleTransport};
 use oura_core::storage::Store;
 use oura_core::OuraClient;
 
+mod viz;
+
 /// Read sleep/HR/activity signals straight from an Oura ring (Ring 3/4/5).
 #[derive(Parser, Debug)]
 #[command(name = "oura", version, about)]
@@ -82,6 +84,15 @@ enum Command {
     Accel {
         #[arg(long, default_value_t = 15)]
         seconds: u64,
+    },
+    /// Real-time 3D motion visualizer (web UI with start/stop + sensitivity).
+    Viz {
+        /// Local HTTP port to serve the visualizer on.
+        #[arg(long, default_value_t = 8088)]
+        port: u16,
+        /// Minutes the ring streams per "Start" (it auto-stops after this).
+        #[arg(long, default_value_t = 5)]
+        minutes: u16,
     },
     /// Show feature status (HR, SpO2…) and optionally enable measurement.
     Features {
@@ -192,6 +203,11 @@ async fn main() -> Result<()> {
         Command::Latest => cmd_latest(&cli, &key).await,
         Command::LiveHr { seconds, raw } => cmd_live_hr(&cli, &key, *seconds, *raw).await,
         Command::Accel { seconds } => cmd_accel(&cli, &key, *seconds).await,
+        Command::Viz { port, minutes } => {
+            let client = connect(&cli).await?;
+            maybe_auth(&client, &key).await?;
+            viz::run(client, *port, *minutes).await
+        }
         Command::Rdata { action } => cmd_rdata(&cli, &key, action).await,
         Command::Events => cmd_events(&cli).await,
         Command::Redecode => {

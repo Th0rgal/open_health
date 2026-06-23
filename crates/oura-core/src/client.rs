@@ -32,6 +32,11 @@ impl AcmSample {
     pub fn magnitude(&self) -> f64 {
         ((self.x as f64).powi(2) + (self.y as f64).powi(2) + (self.z as f64).powi(2)).sqrt()
     }
+
+    /// Parse an ACM measurement-indication frame (tag `0x33`) into its samples.
+    pub fn parse_frame(frame: &[u8]) -> Vec<AcmSample> {
+        parse_acm_frame(frame)
+    }
 }
 
 /// Latest cached feature values read on demand (not a live stream).

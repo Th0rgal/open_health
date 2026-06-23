@@ -38,7 +38,8 @@ cargo build --release
 ```
 
 See [`crates/README.md`](crates/README.md) for all commands (`scan`, `info`,
-`sync`, `latest`, `live-hr`, `events`) and the auth-key details.
+`sync`, `latest`, `live-hr`, `accel`, `viz`, `features`, `rdata`, `events`) and the
+auth-key details. `oura viz` opens a real-time 3D motion visualizer in the browser.
 
 ## Research bench (Python)
 
