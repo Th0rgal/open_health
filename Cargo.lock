@@ -749,33 +749,63 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "oura-analysis"
+version = "0.1.0"
+dependencies = [
+ "oura-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "oura-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "hex",
- "oura-core",
+ "oura-analysis",
+ "oura-link",
+ "oura-protocol",
+ "oura-store",
  "tokio",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "oura-core"
+name = "oura-link"
 version = "0.1.0"
 dependencies = [
- "aes",
  "async-trait",
  "btleplug",
  "futures",
  "hex",
- "rusqlite",
- "serde",
- "serde_json",
+ "oura-protocol",
  "thiserror 1.0.69",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "oura-protocol"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "hex",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "oura-store"
+version = "0.1.0"
+dependencies = [
+ "oura-protocol",
+ "rusqlite",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

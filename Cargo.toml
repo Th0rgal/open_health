@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/oura-core", "crates/oura-cli"]
+members = [
+    "crates/oura-protocol",
+    "crates/oura-link",
+    "crates/oura-analysis",
+    "crates/oura-store",
+    "crates/oura-cli",
+]
 
 [workspace.package]
 version = "0.1.0"

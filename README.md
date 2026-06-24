@@ -20,8 +20,10 @@ not on the ring — see [`docs/data-recovery-map.md`](docs/data-recovery-map.md)
 
 ## Repository map
 
-- **`crates/`** — the Rust client: a reusable `oura-core` library and the `oura`
-  CLI. Start here → [`crates/README.md`](crates/README.md).
+- **`crates/`** — the Rust client, split by concern (`oura-protocol` decode /
+  `oura-link` fetch / `oura-analysis` metrics / `oura-store` SQLite / `oura-cli`).
+  Start here → [`crates/README.md`](crates/README.md) and
+  [`docs/architecture.md`](docs/architecture.md).
 - **`tools/`** — Python research bench used for protocol exploration:
   `oura_protocol.py` (full command matrix, auth, danger-gated ops, JSONL capture)
   and `oura_realtime_listener.py`.
@@ -65,6 +67,10 @@ State-changing and destructive commands are hidden behind `--include-state` /
   and first-contact findings.
 - [`docs/firmware-update.md`](docs/firmware-update.md) — the DFU/OTA opcodes and
   why a custom image can't be flashed (encrypted, device-resident key).
+- [`docs/architecture.md`](docs/architecture.md) — the fetch/interpret/apply crate
+  layering and where to add things.
+- [`docs/algorithms/README.md`](docs/algorithms/README.md) — the on-device ecore
+  metric algorithms (scores, sleep, baselines) and their porting status.
 - [`docs/native-decoder.md`](docs/native-decoder.md) — porting event-body decoders
   from the native `libringeventparser.so` (how the exact byte layouts were
   recovered with Ghidra).

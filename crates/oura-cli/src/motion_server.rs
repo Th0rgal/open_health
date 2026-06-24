@@ -12,11 +12,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 
-use oura_core::ble::BleTransport;
-use oura_core::client::AcmSample;
-use oura_core::protocol;
-use oura_core::transport::Transport;
-use oura_core::OuraClient;
+use oura_link::ble::BleTransport;
+use oura_link::client::AcmSample;
+use oura_protocol::protocol;
+use oura_link::transport::Transport;
+use oura_link::OuraClient;
 
 type Client = Arc<OuraClient<BleTransport>>;
 

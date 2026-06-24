@@ -9,8 +9,8 @@
 
 use anyhow::Result;
 
-use oura_core::ble::BleTransport;
-use oura_core::OuraClient;
+use oura_link::ble::BleTransport;
+use oura_link::OuraClient;
 
 /// Serve the game at `127.0.0.1:port` (see [`crate::motion_server::run`]).
 pub async fn run(client: OuraClient<BleTransport>, port: u16, minutes: u16) -> Result<()> {
@@ -91,25 +91,25 @@ const clamp=(v,a,b)=>v<a?a:v>b?b:v;
 
 // ---- vector helpers ------------------------------------------------------
 const add=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]];
+const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
 const sc=(a,s)=>[a[0]*s,a[1]*s,a[2]*s];
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
 const len=a=>Math.hypot(a[0],a[1],a[2]);
 const norm=a=>{const l=len(a)||1;return sc(a,1/l);};
 
 // ---- live sensor state ---------------------------------------------------
-let G=null, pitch=0, roll=0, haveSample=false, frames=0, rate=0;
+let G=null, haveSample=false, frames=0, rate=0;
+let u0=null, bR=[1,0,0], bF=[0,0,1];   // calibrated neutral gravity + tangent basis
 function feed(d){
  const raw=[d.x,d.y,d.z];
  G=G?add(sc(G,1-set.alpha),sc(raw,set.alpha)):raw.slice();
- const up=norm(sc(G,set.flipy?-1:1));
- pitch=Math.atan2(up[2],up[1])*180/Math.PI;   // hand tilt fwd/back
- roll =Math.atan2(up[0],up[1])*180/Math.PI;   // hand tilt left/right
  haveSample=true; frames++;
 }
 
 // ---- game state ----------------------------------------------------------
 let state='idle';            // idle | calibrating | playing | dead
-let pitch0=0, roll0=0;       // captured neutral pose
-let calibSum=[0,0], calibN=0, calibStart=0;
+let calibG=[0,0,0], calibN=0, calibStart=0;   // accumulates neutral gravity
 let ship={x:0,y:0}, rocks=[], stars=[], score=0, best=+(localStorage.ringRunnerBest||0), tStart=0, spawnAcc=0, last=0;
 const keys={};
 
@@ -120,12 +120,17 @@ function initStars(){
 initStars();
 
 function beginCalibration(){
- state='calibrating'; calibSum=[0,0]; calibN=0; calibStart=0;
+ state='calibrating'; calibG=[0,0,0]; calibN=0; calibStart=0;
  $('status').textContent='calibrating'; showCenter('Hold still','','keep your hand in a neutral, comfortable steering pose');
 }
 function startGame(){
- pitch0=calibN?calibSum[0]/calibN:pitch;
- roll0 =calibN?calibSum[1]/calibN:roll;
+ // Neutral gravity direction, plus an orthonormal tangent basis (right, up). Reading
+ // each control axis as an independent projection onto this basis keeps them decoupled
+ // (no shared-denominator cross-talk) and equally sensitive, whatever the ring's pose.
+ u0=norm(calibN?calibG:(G||[0,1,0]));
+ const seed=Math.abs(dot([1,0,0],u0))<0.9?[1,0,0]:[0,0,1];
+ bR=norm(sub(seed,sc(u0,dot(seed,u0))));   // "right" axis in the plane ⟂ to gravity
+ bF=cross(u0,bR);                          // "vertical" axis, ⟂ to both
  ship={x:0,y:0}; rocks=[]; score=0; spawnAcc=0; tStart=performance.now(); state='playing';
  $('status').textContent='flying'; hideCenter();
 }
@@ -153,23 +158,31 @@ function axis(delta){
  const range=Math.max(4,(34/set.sens));
  return clamp(Math.sign(delta)*(a-dz)/range,-1,1);
 }
+// tilt away from the neutral pose, decomposed onto the calibrated basis, in degrees
+function tilt(){
+ if(!u0||!G) return [0,0];
+ const u=norm(G);
+ return [Math.asin(clamp(dot(u,bR),-1,1))*180/Math.PI,   // horizontal
+         Math.asin(clamp(dot(u,bF),-1,1))*180/Math.PI];  // vertical
+}
 function stickTarget(){
  // keyboard override for testing without a ring
  if(keys.ArrowLeft||keys.ArrowRight||keys.ArrowUp||keys.ArrowDown){
   return [ (keys.ArrowRight?1:0)-(keys.ArrowLeft?1:0),
            (keys.ArrowDown?1:0)-(keys.ArrowUp?1:0) ];
  }
- const nx=axis(roll-roll0);
- const ny=-axis(pitch-pitch0);    // tilt hand up -> ship up
+ const [h,v]=tilt();
+ const nx=axis(h);
+ const ny=(set.flipy?1:-1)*axis(v);    // tilt hand up -> ship up (toggle to invert)
  return [nx,ny];
 }
 
 // ---- per-frame update ----------------------------------------------------
 function update(dt,now){
  if(state==='calibrating'){
-  if(haveSample){
+  if(haveSample&&G){
    if(!calibStart) calibStart=now;
-   calibSum[0]+=pitch; calibSum[1]+=roll; calibN++;
+   calibG=add(calibG,norm(G)); calibN++;
    const left=3-(now-calibStart)/1000;
    showCenter('Hold still', Math.max(0,Math.ceil(left)), 'capturing your neutral pose…');
    if(left<=0) startGame();

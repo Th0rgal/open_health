@@ -13,8 +13,8 @@
 
 use anyhow::Result;
 
-use oura_core::ble::BleTransport;
-use oura_core::OuraClient;
+use oura_link::ble::BleTransport;
+use oura_link::OuraClient;
 
 /// Serve the visualizer at `127.0.0.1:port` (see [`crate::motion_server::run`]).
 pub async fn run(client: OuraClient<BleTransport>, port: u16, minutes: u16) -> Result<()> {

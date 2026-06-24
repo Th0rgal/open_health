@@ -8,9 +8,9 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 
-use oura_core::ble::{self, BleTransport};
-use oura_core::storage::Store;
-use oura_core::OuraClient;
+use oura_link::ble::{self, BleTransport};
+use oura_store::storage::Store;
+use oura_link::OuraClient;
 
 mod game;
 mod motion_server;
@@ -251,7 +251,7 @@ async fn cmd_features(
     enable_hr: bool,
     enable_spo2: bool,
 ) -> Result<()> {
-    use oura_core::protocol::{feature, feature_mode};
+    use oura_protocol::protocol::{feature, feature_mode};
     let client = connect(cli).await?;
     maybe_auth(&client, key).await?;
 
@@ -431,7 +431,7 @@ async fn cmd_latest(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
     let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
     let store = Store::open(&cli.db).ok();
 
-    use oura_core::protocol::feature;
+    use oura_protocol::protocol::feature;
     for (label, id) in [
         ("daytime HR", feature::DAYTIME_HR),
         ("exercise HR", feature::EXERCISE_HR),
