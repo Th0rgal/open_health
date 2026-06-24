@@ -360,7 +360,7 @@ function die(){state='dead';best=Math.max(best,Math.floor(score));localStorage.r
  $('cbig').classList.remove('hidden');$('cbig').textContent=Math.floor(score);}
 function showCenter(t,big,hint){$('center').classList.remove('hidden');$('ctitle').textContent=t;
  if(big===''){$('cbig').classList.add('hidden');}else{$('cbig').classList.remove('hidden');$('cbig').textContent=big;}
- $('cbody').style.display=(t==='HULL BREACHED')?'none':'block';$('chint').innerHTML=hint||'';}
+ $('cbody').style.display=(t==='RING RUNNER')?'block':'none';$('chint').innerHTML=hint||'';}
 function hideCenter(){$('center').classList.add('hidden');}
 function togglePause(){if(state!=='playing')return;paused=!paused;
  if(paused){$('status').textContent='paused';showCenter('PAUSED','','press SPACE to resume');
@@ -388,7 +388,7 @@ function update(dt,now){
   return;}
  if(shake>0)shake=Math.max(0,shake-dt*1.6);
  if(ex.length){for(const e of ex){e.p=add(e.p,sc(e.v,dt));e.v=sc(e.v,0.94);e.life-=dt*1.1;}ex=ex.filter(e=>e.life>0);}
- if(state!=='playing')return;
+ if(state!=='playing'||paused)return;
  const t=(now-tStart)/1000;
  const speed=38+t*1.7, interval=Math.max(0.32,0.72-t*0.012);
  const [nx,ny]=stickTarget();
@@ -398,7 +398,7 @@ function update(dt,now){
  ship.x=clamp(ship.x,-4.4,4.4);ship.y=clamp(ship.y,-2.8,2.8);
  spawnAcc+=dt;while(spawnAcc>=interval){spawnAcc-=interval;
   rocks.push({x:(Math.random()*2-1)*5,y:(Math.random()*2-1)*3.4,z:-160,
-   s:0.5+Math.random()*1.0,mi:(Math.random()*ROCKS.length)|0,
+   s:0.28+Math.random()*Math.random()*2.7,mi:(Math.random()*ROCKS.length)|0,
    ax:norm([Math.random()*2-1,Math.random()*2-1,Math.random()*2-1]),aa:Math.random()*6.28,spin:(Math.random()-0.5)*1.6});}
  const shipR=0.6;
  for(let i=rocks.length-1;i>=0;i--){const o=rocks[i];o.z+=speed*dt;o.aa+=o.spin*dt;
@@ -541,7 +541,7 @@ const H={headers:{'X-Oura-Viz':'1'}};
 $('start').onclick=async()=>{initAudio();if(AC&&AC.state==='suspended')AC.resume();
  await fetch('/start',H);$('start').classList.add('on');$('stop').classList.remove('on');beginCalibration();};
 $('stop').onclick=async()=>{await fetch('/stop',H);$('stop').classList.add('on');$('start').classList.remove('on');
- state='idle';$('status').textContent='stopped';$('center').classList.remove('dead');showCenter('RING RUNNER','','press ENGAGE to stream and fly');};
+ state='idle';paused=false;$('status').textContent='stopped';$('center').classList.remove('dead');showCenter('RING RUNNER','','press ENGAGE to stream and fly');};
 $('recal').onclick=()=>{if(state==='playing'||state==='dead')beginCalibration();};
 $('advBtn').onclick=()=>{const a=$('adv');a.classList.toggle('hidden');
  $('advBtn').classList.toggle('on',!a.classList.contains('hidden'));$('advBtn').textContent=a.classList.contains('hidden')?'Adv ▸':'Adv ▾';};
@@ -549,7 +549,7 @@ $('snd').onclick=()=>{muted=!muted;$('snd').classList.toggle('on',!muted);$('snd
  if(!muted){initAudio();if(AC){AC.resume();eng&&eng.master.gain.setTargetAtTime(0.9,AC.currentTime,0.05);}}
  else if(eng){eng.master.gain.setTargetAtTime(0,AC.currentTime,0.05);}};
 addEventListener('keydown',e=>{keys[e.key]=true;if(e.code==='Space'){e.preventDefault();
- if(state==='dead')startGame();else if(state==='idle')$('start').click();}});
+ if(state==='dead')startGame();else if(state==='idle')$('start').click();else if(state==='playing')togglePause();}});
 addEventListener('keyup',e=>{keys[e.key]=false;});
 $('best').textContent=best;
 </script>

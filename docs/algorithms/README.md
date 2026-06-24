@@ -30,7 +30,7 @@ each is ported; this index is the status table.
 | Activity score + contributors | `get_activity_score_raw @ 0x1d5788` (per-contributor pw-interp, Y=[0,25,95,100]); combiner `@ 0x1d781c` | — | ◐ contributor curves + X-tables recovered; final-combiner divisor ambiguous — needs careful re-read |
 | Activity targets / cals / MET | `actinfo_target_to_cal @ 0x1cd2c8`, `actinfo_update_5_min_classification @ 0x1cd640` | `oura-analysis::metabolic` | ◐ VO2max/BMR/steps→m ported+tested; MET-class ordering + calorie/step regression best-effort |
 | Cycle prediction / tracking | `cycle_prediction_calculate @ 0x1e2864`, `cycle_tracking_calculate @ 0x1e4244` | — | ◐ day-type thresholds + 0.18–0.30 sine band recovered; fit_sin/sine_from_range unresolved — deferred |
-| **Sleep hypnogram (staging)** | **not in ecore** — SleepNet model (`sleepstaging_2_6_0.pt.enc`) / ring firmware | `oura-analysis::sleepnet` | ⏳ model is encrypted; decrypt + run (Python first) |
+| **Sleep hypnogram (staging)** | SleepNet PyTorch model (`sleepstaging_2_6_0.pt.enc`) — not in ecore | — | ❌ blocked: AES-256-GCM decryption RE'd, but the key is **server-delivered** (see [sleepnet.md](sleepnet.md)) |
 
 ## Device vs cloud (corrected)
 
