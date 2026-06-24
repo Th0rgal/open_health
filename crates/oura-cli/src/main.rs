@@ -137,6 +137,16 @@ enum Command {
         #[arg(long, default_value = "data")]
         mode: String,
     },
+    /// Set a feature's operating MODE via SetFeatureMode (e.g. turn on real_steps).
+    /// This is the consumer-feature enable path (distinct from `subscribe`).
+    FeatureMode {
+        /// Feature: real_steps | exercise_hr | resting_hr | cva_ppg | ambient,
+        /// or a raw id like 0x0b.
+        feature: String,
+        /// Mode: off | automatic | requested | connected_live (default: automatic).
+        #[arg(long, default_value = "automatic")]
+        mode: String,
+    },
 }
 
 fn feature_mode_name(mode: u8) -> &'static str {
@@ -262,6 +272,7 @@ async fn main() -> Result<()> {
         } => cmd_features(&cli, &key, *enable_hr, *enable_spo2).await,
         Command::Sessions { tz_offset } => cmd_sessions(&cli, *tz_offset),
         Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
+        Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
     }
 }
 
@@ -310,6 +321,46 @@ async fn cmd_subscribe(
         println!("Wear the ring; the feature's events will appear on the next sync.");
     } else {
         println!("Ring rejected {feature} (mode {mode}): {result:#04x} = {name}.");
+    }
+    Ok(())
+}
+
+/// Set a feature's operating mode (SetFeatureMode). The consumer-feature enable
+/// path — e.g. `feature-mode real_steps` turns on the on-ring step/gait DSP whose
+/// `real_steps_features` events (0x7e/0x7f) feed the steps_motion_decoder.
+async fn cmd_feature_mode(cli: &Cli, key: &Option<[u8; 16]>, feature: &str, mode: &str) -> Result<()> {
+    use oura_protocol::protocol::feature_mode;
+    let id: u8 = match feature {
+        "real_steps" => 0x0b,
+        "daytime_hr" => 0x02,
+        "exercise_hr" => 0x03,
+        "spo2" => 0x04,
+        "resting_hr" => 0x08,
+        "cva_ppg" => 0x0d,
+        "ambient" => 0x10,
+        other => other
+            .strip_prefix("0x")
+            .and_then(|h| u8::from_str_radix(h, 16).ok())
+            .or_else(|| other.parse().ok())
+            .ok_or_else(|| anyhow!("unknown feature {other} (use a name or 0xNN)"))?,
+    };
+    let m = match mode {
+        "off" => feature_mode::OFF,
+        "automatic" => feature_mode::AUTOMATIC,
+        "requested" => feature_mode::REQUESTED,
+        "connected_live" => feature_mode::CONNECTED_LIVE,
+        other => return Err(anyhow!("unknown mode {other}")),
+    };
+    let client = connect(cli).await?;
+    if !maybe_auth(&client, key).await? {
+        return Err(anyhow!("set-feature-mode requires --key-file (authentication)"));
+    }
+    match client.set_feature_mode(id, m).await {
+        Ok(()) => {
+            println!("SetFeatureMode({feature}=0x{id:02x}, {mode}): SUCCESS.");
+            println!("Wear the ring; the feature's events should appear on the next sync.");
+        }
+        Err(e) => println!("SetFeatureMode({feature}=0x{id:02x}, {mode}) rejected: {e}"),
     }
     Ok(())
 }
