@@ -200,8 +200,8 @@ function prog(vs,fs){const p=gl.createProgram();gl.attachShader(p,shader(gl.VERT
  if(!gl.getProgramParameter(p,gl.LINK_STATUS))console.error(gl.getProgramInfoLog(p));return p;}
 
 const litP=prog(
-`attribute vec3 aPos;attribute vec3 aNrm;uniform mat4 uP,uV,uM;varying vec3 vN,vW;
- void main(){vec4 w=uM*vec4(aPos,1.);vW=w.xyz;vN=mat3(uM)*aNrm;gl_Position=uP*uV*w;}`,
+`attribute vec3 aPos;attribute vec3 aNrm;uniform mat4 uMVP,uM;varying vec3 vN,vW;
+ void main(){vec4 w=uM*vec4(aPos,1.);vW=w.xyz;vN=mat3(uM)*aNrm;gl_Position=uMVP*vec4(aPos,1.);}`,
 `precision highp float;varying vec3 vN,vW;
  uniform vec3 uCol,uCam,uKey,uKeyC,uFill,uFillC,uAmb,uEmis,uFog;uniform float uSpec,uShin,uFogD;
  void main(){vec3 N=normalize(vN),V=normalize(uCam-vW);if(dot(N,V)<0.)N=-N;vec3 L=normalize(uKey),L2=normalize(uFill);
@@ -410,15 +410,16 @@ function update(dt,now){
 // ---- render --------------------------------------------------------------
 const KEY=norm([0.5,0.8,0.35]),FILL=norm([-0.6,-0.2,0.4]);
 const FOG=[0.02,0.05,0.10];
+let _VP=null;
 function setLit(P,V,cam){gl.useProgram(litP);
- gl.uniformMatrix4fv(gl.getUniformLocation(litP,'uP'),false,P);
- gl.uniformMatrix4fv(gl.getUniformLocation(litP,'uV'),false,V);
+ _VP=M.mul(P,V);
  gl.uniform3fv(gl.getUniformLocation(litP,'uCam'),cam);
  gl.uniform3fv(gl.getUniformLocation(litP,'uKey'),KEY);gl.uniform3fv(gl.getUniformLocation(litP,'uKeyC'),[1.25,1.15,1.0]);
  gl.uniform3fv(gl.getUniformLocation(litP,'uFill'),FILL);gl.uniform3fv(gl.getUniformLocation(litP,'uFillC'),[0.28,0.45,0.7]);
  gl.uniform3fv(gl.getUniformLocation(litP,'uAmb'),[0.22,0.26,0.34]);
  gl.uniform3fv(gl.getUniformLocation(litP,'uFog'),FOG);gl.uniform1f(gl.getUniformLocation(litP,'uFogD'),0.018);}
 function drawLit(m,model,col,spec,shin,emis){
+ gl.uniformMatrix4fv(gl.getUniformLocation(litP,'uMVP'),false,M.mul(_VP,model));
  gl.uniformMatrix4fv(gl.getUniformLocation(litP,'uM'),false,model);
  gl.uniform3fv(gl.getUniformLocation(litP,'uCol'),col);
  gl.uniform1f(gl.getUniformLocation(litP,'uSpec'),spec);gl.uniform1f(gl.getUniformLocation(litP,'uShin'),shin);
