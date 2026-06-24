@@ -29,7 +29,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
  *{box-sizing:border-box}
  html,body{margin:0;height:100%;background:var(--ink);color:#cfe9f2;
    font:12px/1.5 ui-monospace,"SF Mono",Menlo,monospace;overflow:hidden;user-select:none}
- canvas{display:block;position:fixed;inset:0}
+ canvas{display:block;position:fixed;inset:0;width:100vw;height:100vh}
  /* CRT scanlines + vignette */
  #fx{position:fixed;inset:0;z-index:4;pointer-events:none;
    background:repeating-linear-gradient(0deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.10) 2px 3px),
@@ -122,7 +122,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
  <div class="row"><span>sensitivity</span><input id="sens" type="range" min="40" max="260" value="120"></div>
  <div class="row"><span>dead-zone</span><input id="dz" type="range" min="0" max="100" value="25"></div>
  <div class="row"><span>smoothing</span><input id="alpha" type="range" min="1" max="40" value="10"></div>
- <div class="row"><span>invert vertical ↕</span><input id="flipy" type="checkbox"></div>
+ <div class="row"><span>invert vertical ↕</span><input id="flipy" type="checkbox" checked></div>
  <div class="mini"><button id="recal">Recalibrate</button></div>
  <div class="lbl" style="margin-top:8px">tilt = steer · arrows = test</div>
 </div>
@@ -338,7 +338,7 @@ function feed(d){const raw=[d.x,d.y,d.z];
 let state='idle';
 let calibG=[0,0,0],calibN=0,calibStart=0;
 let ship={x:0,y:0}, rocks=[], score=0, best=+(localStorage.ringRunnerBest||0), tStart=0, spawnAcc=0, last=0;
-let sx=0,sy=0,psx=0,psy=0, thrust=0.4, shake=0, ex=[];
+let sx=0,sy=0,psx=0,psy=0, thrust=0.4, shake=0, ex=[], paused=false;
 const keys={};
 
 function beginCalibration(){state='calibrating';calibG=[0,0,0];calibN=0;calibStart=0;
@@ -349,7 +349,7 @@ function startGame(){
  const seed=Math.abs(dot([1,0,0],u0))<0.9?[1,0,0]:[0,0,1];
  bR=norm(sub(seed,sc(u0,dot(seed,u0))));
  bF=cross(u0,bR);
- ship={x:0,y:0};rocks=[];ex=[];score=0;spawnAcc=0;sx=sy=psx=psy=0;tStart=performance.now();state='playing';
+ ship={x:0,y:0};rocks=[];ex=[];score=0;spawnAcc=0;sx=sy=psx=psy=0;paused=false;tStart=performance.now();state='playing';
  $('status').textContent='flying';hideCenter();}
 function die(){state='dead';best=Math.max(best,Math.floor(score));localStorage.ringRunnerBest=best;
  $('status').textContent='wrecked';shake=1.0;boom();
@@ -362,6 +362,11 @@ function showCenter(t,big,hint){$('center').classList.remove('hidden');$('ctitle
  if(big===''){$('cbig').classList.add('hidden');}else{$('cbig').classList.remove('hidden');$('cbig').textContent=big;}
  $('cbody').style.display=(t==='HULL BREACHED')?'none':'block';$('chint').innerHTML=hint||'';}
 function hideCenter(){$('center').classList.add('hidden');}
+function togglePause(){if(state!=='playing')return;paused=!paused;
+ if(paused){$('status').textContent='paused';showCenter('PAUSED','','press SPACE to resume');
+  if(eng&&AC)eng.master.gain.setTargetAtTime(0,AC.currentTime,0.1);}
+ else{hideCenter();$('status').textContent='flying';
+  if(eng&&AC&&!muted)eng.master.gain.setTargetAtTime(0.9,AC.currentTime,0.05);}}
 
 // ---- control -------------------------------------------------------------
 function axis(delta){const dz=set.dz,a=Math.abs(delta);if(a<dz)return 0;
@@ -432,8 +437,8 @@ function render(now,dt){
  const asp=cv.width/cv.height;
  const P=M.persp(1.0,asp,0.1,400);
  const shk=shake*0.18;
- const eye=[ship.x*0.12+Math.sin(now*0.0006)*0.05+(Math.random()*2-1)*shk,3.4+(Math.random()*2-1)*shk,4.7];
- const ctr=[ship.x*0.3,-0.2+ship.y*0.25,-7];
+ const eye=[ship.x*0.14+Math.sin(now*0.0006)*0.05+(Math.random()*2-1)*shk,2.5+(Math.random()*2-1)*shk,5.6];
+ const ctr=[ship.x*0.32,0.55+ship.y*0.22,-9];
  const V=M.look(eye,ctr,[0,1,0]);
  const VP=M.mul(P,V);
  // camera basis for billboards
@@ -456,9 +461,6 @@ function render(now,dt){
  for(const o of rocks){
   const rot=M.mul(M.ry(o.aa),M.rx(o.aa*0.6));const m=M.mul(M.trans(o.x,o.y,o.z),M.mul(rot,M.scale(o.s)));
   drawLit(ROCKS[o.mi],m,ROCKCOL[o.mi],0.35,18);}
- // TEST: big bright box at the look-at point (must be dead-centre if projection is ok)
- if(!window.__tb)window.__tb=box(2,2,2);
- drawLit(window.__tb,M.mul(M.trans(ship.x*0.3,-0.2,-7),M.scale(2)),[1,1,1],.4,20,[0.2,0.9,0.4]);
  // ship
  if(state==='playing'||state==='dead'){
   const bank=-sx*0.55, pit=sy*0.32, yaw=sx*0.18;
@@ -469,7 +471,7 @@ function render(now,dt){
    if(part.dyn==='aileronL')lm=M.mul(compose(l.p,[elev-ail,l.r[1],0]),M.scale(1));
    if(part.dyn==='aileronR')lm=M.mul(compose(l.p,[elev+ail,l.r[1],0]),M.scale(1));
    if(part.dyn==='rudder')lm=compose(l.p,[0,rud,0]);
-   drawLit(part.m,M.mul(base,lm),part.col,part.spec,part.shin,[0.7,0.3,0.9]);}
+   drawLit(part.m,M.mul(base,lm),part.col,part.spec,part.shin,part.emis);}
  }
 
  // glow: engine flames + explosion (additive, depth-test, no depth write)

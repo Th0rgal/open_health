@@ -56,3 +56,27 @@ ecore is stateless-per-call; the host re-injects state each night via typed
 objects: recovery state (+prev), temperature baseline, previous sleep periods,
 cycle-tracking state, and the SpO2 main storage (the only native binary serializer,
 versioned TLV). Mirror these in `oura-store` so baselines accumulate.
+
+## Score combiners: structure recovered, exact tables blocked → use calibration
+
+The three 0–100 scores were chased to the combiner level: the sleep mapper
+(`FUN_001f5e64`) is a per-contributor piecewise interp (X = age-derived limits
+from `init_limits_v2`, shared Y-curve `DAT_0017bcb7`, weights `DAT_0017bcbf`
+summing to 100, contributor 8 = `sleep_timing_score`, final `round(Σ wᵢ·cᵢ/100)`);
+the activity combiner (`get_activity_score_from_raw_100`) and the legacy/modern
+readiness paths are likewise resolved structurally. **But the constant tables they
+read (`DAT_0017bcb7/bcbf`, readiness weights `0x17bff8/bfdc`, activity X-tables)
+do not read back cleanly from this APK's `libappecore.so` build** — direct ELF
+extraction yields non-monotonic/garbage values and several live in `.data`
+populated at runtime. So an exact bit-match of Oura's scores isn't feasible from
+this artifact alone.
+
+**Practical path (validated): calibration.** We have all the raw inputs (sleep
+durations, HRV, resting HR, temperature deviation, MET) and the user's trends
+export pairs those with Oura's contributor sub-scores and final scores. A linear
+fit reproduces the **Sleep Score at R²=0.999** (and Readiness/Activity close) — see
+`data-recovery-map.md`. So `oura-analysis::score` will fit weights from the trends
+CSV rather than porting the unreadable `.rodata`; the decompiled structure
+(contributor set, the piecewise shape, the weighted-sum-/100 combination) guides
+the model. Bit-exact reproduction would need a cleaner build's `.rodata` or
+device-side calibration data.
