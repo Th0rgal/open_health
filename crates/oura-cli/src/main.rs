@@ -147,6 +147,8 @@ enum Command {
         #[arg(long, default_value = "automatic")]
         mode: String,
     },
+    /// Read the real on-ring MODE/status of the data features (what's actually on).
+    FeatureStatus,
 }
 
 fn feature_mode_name(mode: u8) -> &'static str {
@@ -273,6 +275,7 @@ async fn main() -> Result<()> {
         Command::Sessions { tz_offset } => cmd_sessions(&cli, *tz_offset),
         Command::Subscribe { feature, mode } => cmd_subscribe(&cli, &key, feature, mode).await,
         Command::FeatureMode { feature, mode } => cmd_feature_mode(&cli, &key, feature, mode).await,
+        Command::FeatureStatus => cmd_feature_status(&cli, &key).await,
     }
 }
 
@@ -361,6 +364,37 @@ async fn cmd_feature_mode(cli: &Cli, key: &Option<[u8; 16]>, feature: &str, mode
             println!("Wear the ring; the feature's events should appear on the next sync.");
         }
         Err(e) => println!("SetFeatureMode({feature}=0x{id:02x}, {mode}) rejected: {e}"),
+    }
+    Ok(())
+}
+
+/// Read the actual on-ring mode/status of the data-producing features.
+async fn cmd_feature_status(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
+    let client = connect(cli).await?;
+    if !maybe_auth(&client, key).await? {
+        return Err(anyhow!("feature-status requires --key-file (authentication)"));
+    }
+    let mode_name = |m: u8| match m {
+        0 => "OFF",
+        1 => "AUTOMATIC",
+        2 => "REQUESTED",
+        3 => "CONNECTED_LIVE",
+        _ => "?",
+    };
+    let feats = [
+        (0x02u8, "daytime_hr"), (0x03, "exercise_hr"), (0x04, "spo2"),
+        (0x08, "resting_hr"), (0x0b, "real_steps"), (0x0c, "experimental"),
+        (0x0d, "cva_ppg"),
+    ];
+    println!("  {:<14} {:>3}  {:<14} status state sub", "feature", "id", "mode");
+    for (id, name) in feats {
+        match client.feature_status(id).await {
+            Ok(s) => println!(
+                "  {name:<14} {id:>3}  {:<14} {:>6} {:>5} {:>3}",
+                mode_name(s.mode), s.status, s.state, s.subscription
+            ),
+            Err(e) => println!("  {name:<14} {id:>3}  <read failed: {e}>"),
+        }
     }
     Ok(())
 }
