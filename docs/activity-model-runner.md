@@ -99,4 +99,3 @@ the behavior table in the script (swimming=13, walking=14, cycling=5, …).
 Wire up `steps_motion_decoder_2_0_0.pt` to produce real `stepmotion` — but it
 needs raw ACM, which is the RData capability we can't enable on a consumer ring.
 Without it, type classification stays weak; detection is the usable capability.
-</content>
