@@ -6,7 +6,8 @@ models whose inputs we can supply from synced data are wired here; see
 docs/model-usage-map / the feasibility matrix for what's blocked and why.
 
 Usage: python tools/run_models.py <model> [DB] [--tz H]
-  model = bdi | daily_medians | moonstone | all
+  model = bdi | daily_medians | all
+(sleepnet_moonstone has its own runner: tools/run_sleep_model.py)
 """
 import json
 import sys
@@ -142,57 +143,11 @@ def run_daily_medians(db, tz):
         print(f"  [{i}]", o.flatten()[:8].tolist())
 
 
-# ---- sleepnet_moonstone_1_2_0: full overnight apnea (IBI+ACM+temp+SpO2) ----
-def run_moonstone(db, tz):
-    import json
-    rows = events(db)
-    unix_s = anchor(rows)
-    bp = last_bedtime(rows)
-    bstart, bend = unix_s(bp["bedtime_start_ds"]), unix_s(bp["bedtime_end_ds"])
-    inwin = lambda t: bstart - 60 <= t <= bend + 60
+# Note: sleepnet_moonstone (full overnight sleep staging + apnea) already has a
+# working, validated runner in tools/run_sleep_model.py — use that. It produces a
+# DEEP/LIGHT/REM/WAKE hypnogram + sleep efficiency.
 
-    ibi_rows, ibi_t, acm, acm_t, temp, temp_t, spo2, spo2_t = [], [], [], [], [], [], [], []
-    for ds, n, j, _ in rows:
-        t = unix_s(ds)
-        if not inwin(t):
-            continue
-        d = json.loads(j)
-        if n == "ibi_and_amplitude_event":
-            amps = d.get("amplitude", [])
-            acc = 0.0
-            for k, ms in enumerate(d.get("ibi_ms", [])):
-                if ms and ms > 0:
-                    ibi_rows.append([float(ms), float(amps[k]) if k < len(amps) else 0.0, 1.0])
-                    acc += ms  # a beat occurs at the END of its interval
-                    ibi_t.append(int((t * 1000) + acc))
-        elif n == "sleep_acm_period":
-            vals = d.get("acm_mad", [])
-            for k, v in enumerate(vals):
-                acm.append([float(v)]); acm_t.append(int((t + k) * 1000))
-        elif n == "sleep_temp_event":
-            for k, v in enumerate(d.get("temps_c", [])):
-                temp.append([float(v)]); temp_t.append(int((t + k) * 1000))
-        elif n == "spo2_r_pi_event":
-            # NOTE: we have ratio-of-ratios (r) + perfusion index, NOT SpO2 % —
-            # feed perfusion_index as a proxy (flagged); not a true SpO2 value.
-            for k, v in enumerate(d.get("perfusion_index", [])):
-                spo2.append([float(v)]); spo2_t.append(int((t + k) * 1000))
-    print(f"ibi={len(ibi_rows)} acm={len(acm)} temp={len(temp)} spo2={len(spo2)}")
-    m = load("sleepnet_moonstone_1_2_0")
-    L = torch.long
-    bedtime_input = torch.tensor([int(bstart * 1000), int(bend * 1000)], dtype=L)
-    out = m(
-        bedtime_input,
-        f32(ibi_rows), torch.tensor(ibi_t, dtype=L),
-        f32(acm), torch.tensor(acm_t, dtype=L),
-        f32(temp), torch.tensor(temp_t, dtype=L),
-        f32(spo2), torch.tensor(spo2_t, dtype=L),
-        f32([0.0]),            # scalars_input (guess; validator will correct)
-    )
-    print("OUTPUT shapes:", [tuple(o.shape) for o in out])
-
-
-RUNNERS = {"bdi": run_bdi, "daily_medians": run_daily_medians, "moonstone": run_moonstone}
+RUNNERS = {"bdi": run_bdi, "daily_medians": run_daily_medians}
 
 
 def main():

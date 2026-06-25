@@ -139,6 +139,8 @@ def main():
                 hr.append((t, sum(b) / len(b)))
 
     met = sorted({round(t): (t, m) for t, m in met}.values())
+    if not met:
+        sys.exit("no MET (activity_information / tag 0x50) events in DB — cannot run the activity model")
 
     def f32(seq):
         return torch.tensor(seq, dtype=torch.float32)

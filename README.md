@@ -14,9 +14,15 @@ Straight from the ring, with no Oura account: device info, battery, live heart r
 carries raw PPG/IBI/temperature/motion/SpO2 samples plus the ring's **on-device**
 sleep stages, activity MET levels, and HRV.
 
-What you **cannot** get from the ring: the 0-100 Readiness / Sleep / Activity /
-Stress scores and workout auto-classification. Those are computed in Oura's cloud,
-not on the ring. See [`docs/data-recovery-map.md`](docs/data-recovery-map.md).
+The ring itself does **not** emit the 0-100 Readiness / Sleep / Activity / Stress
+scores. But those are **not** computed in
+Oura's cloud either: they're computed **on the phone** by the native `ecore`
+engine and a set of on-device PyTorch models (the same `.pt` we run here), then
+uploaded; the cloud only stores and syncs them back. So they're reproducible
+offline. The one genuine cloud-only step is **workout auto-classification**
+(`POST /api/activity-tagging/v2`). See
+[`docs/data-recovery-map.md`](docs/data-recovery-map.md) and
+[`docs/algorithms/README.md`](docs/algorithms/README.md).
 
 ## Repository map
 
