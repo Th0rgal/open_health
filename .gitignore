@@ -1,0 +1,13 @@
+/target/
+/.venv/
+/.env
+*.db
+*.sqlite
+*.key
+*.hex
+captures/
+reverse/
+dna/files/*
+!dna/files/.gitkeep
+dna/scores/*
+!dna/scores/.gitkeep

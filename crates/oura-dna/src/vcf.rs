@@ -20,10 +20,10 @@ use crate::util::{norm_chrom, norm_genotype};
 pub struct Record<'a> {
     pub chrom: &'a str,
     pub pos: u64,
-    pub ids: &'a str,       // raw ID column, may be "." or "rsA;rsB"
+    pub ids: &'a str, // raw ID column, may be "." or "rsA;rsB"
     pub ref_allele: &'a str,
-    pub alt: &'a str,       // raw ALT column, may be "A,C"
-    pub info: &'a str,      // INFO column (carries END= for gVCF blocks)
+    pub alt: &'a str,        // raw ALT column, may be "A,C"
+    pub info: &'a str,       // INFO column (carries END= for gVCF blocks)
     pub gt: Option<&'a str>, // GT subfield of the first sample, if present
 }
 
@@ -125,7 +125,10 @@ pub fn homozygous_ref(chrom: &str, pos: u64, ref_allele: &str) -> Genotype {
     let (alleles, key) = if r.is_empty() {
         (Vec::new(), String::new())
     } else {
-        (vec![r.clone(), r.clone()], norm_genotype(&format!("{r}{r}")))
+        (
+            vec![r.clone(), r.clone()],
+            norm_genotype(&format!("{r}{r}")),
+        )
     };
     Genotype {
         alleles,
@@ -164,7 +167,12 @@ impl Genotype {
             return None;
         }
         let e = effect.trim().to_ascii_uppercase();
-        Some(self.alleles.iter().filter(|a| a.eq_ignore_ascii_case(&e)).count() as u8)
+        Some(
+            self.alleles
+                .iter()
+                .filter(|a| a.eq_ignore_ascii_case(&e))
+                .count() as u8,
+        )
     }
 
     /// The set of distinct alleles observed at the site (REF plus every ALT),
@@ -188,7 +196,9 @@ pub fn genotype_from_record(rec: &Record<'_>) -> Genotype {
         if idx == 0 {
             Some(rec.ref_allele.to_ascii_uppercase())
         } else {
-            alt_alleles.get(idx - 1).map(|a| a.trim().to_ascii_uppercase())
+            alt_alleles
+                .get(idx - 1)
+                .map(|a| a.trim().to_ascii_uppercase())
         }
     };
 
@@ -285,7 +295,10 @@ impl VcfSource {
         let want_pos = parse_locus_query(q);
         let mut hit: Option<Genotype> = None;
         self.scan(|rec| {
-            let matches = rec.ids.split(';').any(|id| id.trim().eq_ignore_ascii_case(&want_rsid))
+            let matches = rec
+                .ids
+                .split(';')
+                .any(|id| id.trim().eq_ignore_ascii_case(&want_rsid))
                 || want_pos
                     .as_ref()
                     .is_some_and(|(c, p)| norm_chrom(rec.chrom) == *c && rec.pos == *p);

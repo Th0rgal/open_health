@@ -1,10 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/oura-protocol",
-    "crates/oura-link",
-    "crates/oura-analysis",
-    "crates/oura-store",
     "crates/oura-cli",
     "crates/oura-ffi",
     "crates/oura-core",
@@ -16,7 +12,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/Th0rgal/open_oura"
+repository = "https://github.com/Th0rgal/open_health"
 
 [profile.release]
 lto = true

@@ -33,7 +33,9 @@ pub struct PgsMeta {
 
 fn open_reader(path: &Path) -> Result<Box<dyn BufRead>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let is_gz = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gz"));
+    let is_gz = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gz"));
     let inner: Box<dyn Read> = if is_gz {
         Box::new(MultiGzDecoder::new(file))
     } else {
@@ -43,7 +45,9 @@ fn open_reader(path: &Path) -> Result<Box<dyn BufRead>> {
 }
 
 fn basename(path: &Path) -> String {
-    path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 /// Parse a `#key=value` header line into `(key, value)`, if it is one.
@@ -124,7 +128,9 @@ impl Columns {
 }
 
 fn cell<'a>(fields: &[&'a str], idx: Option<usize>) -> Option<&'a str> {
-    idx.and_then(|i| fields.get(i)).map(|s| s.trim()).filter(|s| !s.is_empty() && *s != ".")
+    idx.and_then(|i| fields.get(i))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && *s != ".")
 }
 
 /// Fully parse a scoring file into a [`ScoreSpec`].
@@ -143,7 +149,12 @@ pub fn load(path: &Path) -> Result<ScoreSpec> {
         if line.starts_with('#') {
             continue;
         }
-        header = Some(line.trim_end_matches(['\n', '\r']).split('\t').map(|s| s.to_string()).collect());
+        header = Some(
+            line.trim_end_matches(['\n', '\r'])
+                .split('\t')
+                .map(|s| s.to_string())
+                .collect(),
+        );
         break;
     }
     let header = header.ok_or_else(|| anyhow!("scoring file {} has no data", path.display()))?;
@@ -175,7 +186,9 @@ pub fn load(path: &Path) -> Result<ScoreSpec> {
         let pos = cell(&f, cols.hm_pos)
             .or_else(|| cell(&f, cols.pos))
             .and_then(|p| p.parse::<u64>().ok());
-        let rsid = cell(&f, cols.rsid).or_else(|| cell(&f, cols.hm_rsid)).unwrap_or(".");
+        let rsid = cell(&f, cols.rsid)
+            .or_else(|| cell(&f, cols.hm_rsid))
+            .unwrap_or(".");
         let other = cell(&f, cols.other)
             .or_else(|| cell(&f, cols.hm_infer_other))
             .map(|s| s.to_ascii_uppercase());
@@ -203,7 +216,10 @@ pub fn load(path: &Path) -> Result<ScoreSpec> {
     }
 
     if variants.is_empty() {
-        return Err(anyhow!("scoring file {} yielded no usable variants", path.display()));
+        return Err(anyhow!(
+            "scoring file {} yielded no usable variants",
+            path.display()
+        ));
     }
 
     let id = meta.id.clone().unwrap_or_else(|| meta.file.clone());
@@ -233,7 +249,10 @@ mod tests {
 
     fn write(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
         let p = dir.join(name);
-        File::create(&p).unwrap().write_all(body.as_bytes()).unwrap();
+        File::create(&p)
+            .unwrap()
+            .write_all(body.as_bytes())
+            .unwrap();
         p
     }
 

@@ -136,7 +136,10 @@ fn match_variant(variant: &ScoreVariant, geno: &Genotype) -> Match {
 }
 
 fn count(alleles: &[String], target: &str) -> u8 {
-    alleles.iter().filter(|a| a.eq_ignore_ascii_case(target)).count() as u8
+    alleles
+        .iter()
+        .filter(|a| a.eq_ignore_ascii_case(target))
+        .count() as u8
 }
 
 /// The kept part of a per-variant contribution (for the "top contributors" list).
@@ -223,12 +226,12 @@ impl<'a> ScoreAccumulator<'a> {
             self.top.push(c);
             return;
         }
-        if let Some((i, min)) = self
-            .top
-            .iter()
-            .enumerate()
-            .min_by(|a, b| a.1.contribution.abs().partial_cmp(&b.1.contribution.abs()).unwrap())
-        {
+        if let Some((i, min)) = self.top.iter().enumerate().min_by(|a, b| {
+            a.1.contribution
+                .abs()
+                .partial_cmp(&b.1.contribution.abs())
+                .unwrap()
+        }) {
             if c.contribution.abs() > min.contribution.abs() {
                 self.top[i] = c;
             }
@@ -237,7 +240,10 @@ impl<'a> ScoreAccumulator<'a> {
 
     pub fn finish(mut self) -> ScoreResult {
         self.top.sort_by(|a, b| {
-            b.contribution.abs().partial_cmp(&a.contribution.abs()).unwrap()
+            b.contribution
+                .abs()
+                .partial_cmp(&a.contribution.abs())
+                .unwrap()
         });
         let total = self.spec.variants.len();
         let band = band_for(&self.spec.bands, self.sum);

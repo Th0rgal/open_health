@@ -470,7 +470,10 @@ fn merge_fallback_markers(markers: &mut Vec<ParsedMarker>, fallback: Vec<ParsedM
 
 fn llm_fallback_markers(text: &str, warnings: &mut Vec<String>) -> Vec<ParsedMarker> {
     let Ok(key) = std::env::var("AGENT_BACKEND_API_KEY") else {
-        warnings.push("deterministic parse was sparse; AGENT_BACKEND_API_KEY not set for fallback normalizer".to_string());
+        warnings.push(
+            "deterministic parse was sparse; AGENT_BACKEND_API_KEY not set for fallback normalizer"
+                .to_string(),
+        );
         return Vec::new();
     };
     let candidates = fallback_candidate_lines(text);
@@ -499,7 +502,9 @@ fn llm_fallback_markers(text: &str, warnings: &mut Vec<String>) -> Vec<ParsedMar
         Ok(r) => match r.into_string() {
             Ok(s) => s,
             Err(e) => {
-                warnings.push(format!("fallback normalizer response could not be read: {e}"));
+                warnings.push(format!(
+                    "fallback normalizer response could not be read: {e}"
+                ));
                 return Vec::new();
             }
         },
@@ -547,7 +552,10 @@ fn parse_llm_marker_json(text: &str, warnings: &mut Vec<String>) -> Vec<ParsedMa
                 unit: r["unit"].as_str().unwrap_or(def.unit).to_string(),
                 low: r["ref_low"].as_f64().or(def.low),
                 high: r["ref_high"].as_f64().or(def.high),
-                ref_text: r["ref_text"].as_str().map(str::to_string).or_else(|| def.ref_text.map(str::to_string)),
+                ref_text: r["ref_text"]
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| def.ref_text.map(str::to_string)),
             })
         })
         .collect()

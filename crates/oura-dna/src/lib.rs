@@ -103,7 +103,10 @@ fn index_target(
     }
     if pos > 0 && !chrom.is_empty() {
         by_pos.entry(pos_key(chrom, pos)).or_default().push(t);
-        chrom_tmp.entry(norm_chrom(chrom)).or_default().push((pos, t));
+        chrom_tmp
+            .entry(norm_chrom(chrom))
+            .or_default()
+            .push((pos, t));
         pos_set.insert(pos);
     }
 }
@@ -185,7 +188,9 @@ fn resolve_target(
 /// already-selected specs (built-in and/or PGS) to apply.
 pub fn build_report(src: &VcfSource, catalog: &Catalog, scores: &[ScoreSpec]) -> Result<Report> {
     if catalog.traits.is_empty() && scores.is_empty() {
-        return Err(anyhow!("nothing to compute: no traits and no scores selected"));
+        return Err(anyhow!(
+            "nothing to compute: no traits and no scores selected"
+        ));
     }
 
     // Indexes: by rsID and exact chrom:pos (order-independent), plus a
@@ -199,11 +204,32 @@ pub fn build_report(src: &VcfSource, catalog: &Catalog, scores: &[ScoreSpec]) ->
     let mut pos_set: HashSet<u64> = HashSet::new();
 
     for (ti, t) in catalog.traits.iter().enumerate() {
-        index_target(&mut by_rsid, &mut by_pos, &mut chrom_tmp, &mut pos_set, &t.rsid, &t.chrom, t.pos, Target::Trait(ti));
+        index_target(
+            &mut by_rsid,
+            &mut by_pos,
+            &mut chrom_tmp,
+            &mut pos_set,
+            &t.rsid,
+            &t.chrom,
+            t.pos,
+            Target::Trait(ti),
+        );
     }
     for (si, s) in scores.iter().enumerate() {
         for (vi, v) in s.variants.iter().enumerate() {
-            index_target(&mut by_rsid, &mut by_pos, &mut chrom_tmp, &mut pos_set, &v.rsid, &v.chrom, v.pos, Target::Score { score: si, variant: vi });
+            index_target(
+                &mut by_rsid,
+                &mut by_pos,
+                &mut chrom_tmp,
+                &mut pos_set,
+                &v.rsid,
+                &v.chrom,
+                v.pos,
+                Target::Score {
+                    score: si,
+                    variant: vi,
+                },
+            );
         }
     }
 
@@ -226,9 +252,12 @@ pub fn build_report(src: &VcfSource, catalog: &Catalog, scores: &[ScoreSpec]) ->
     // Per-target state.
     let mut trait_geno: Vec<Option<Genotype>> = vec![None; catalog.traits.len()];
     let mut accs: Vec<ScoreAccumulator> = scores.iter().map(ScoreAccumulator::new).collect();
-    let mut consumed: Vec<Vec<bool>> =
-        scores.iter().map(|s| vec![false; s.variants.len()]).collect();
-    let mut remaining = catalog.traits.len() + scores.iter().map(|s| s.variants.len()).sum::<usize>();
+    let mut consumed: Vec<Vec<bool>> = scores
+        .iter()
+        .map(|s| vec![false; s.variants.len()])
+        .collect();
+    let mut remaining =
+        catalog.traits.len() + scores.iter().map(|s| s.variants.len()).sum::<usize>();
     let have_rsids = !by_rsid.is_empty();
 
     let mut hits: Vec<Target> = Vec::new();
@@ -253,13 +282,28 @@ pub fn build_report(src: &VcfSource, catalog: &Catalog, scores: &[ScoreSpec]) ->
         }
         if !hits.is_empty() {
             let mode = if ref_only {
-                if homref_block { RecMode::HomRef } else { RecMode::NoCall }
+                if homref_block {
+                    RecMode::HomRef
+                } else {
+                    RecMode::NoCall
+                }
             } else {
                 RecMode::Variant
             };
             let real = matches!(mode, RecMode::Variant).then(|| vcf::genotype_from_record(rec));
             for t in &hits {
-                resolve_target(&mut trait_geno, &mut accs, &mut consumed, &mut remaining, catalog, *t, rec.pos, rec.chrom, mode, real.as_ref());
+                resolve_target(
+                    &mut trait_geno,
+                    &mut accs,
+                    &mut consumed,
+                    &mut remaining,
+                    catalog,
+                    *t,
+                    rec.pos,
+                    rec.chrom,
+                    mode,
+                    real.as_ref(),
+                );
             }
         }
 
@@ -279,7 +323,18 @@ pub fn build_report(src: &VcfSource, catalog: &Catalog, scores: &[ScoreSpec]) ->
                         if list[i].0 > rec.pos {
                             // pos == POS was handled in Step A above
                             for t in &list[i].1 {
-                                resolve_target(&mut trait_geno, &mut accs, &mut consumed, &mut remaining, catalog, *t, list[i].0, rec.chrom, RecMode::HomRef, None);
+                                resolve_target(
+                                    &mut trait_geno,
+                                    &mut accs,
+                                    &mut consumed,
+                                    &mut remaining,
+                                    catalog,
+                                    *t,
+                                    list[i].0,
+                                    rec.chrom,
+                                    RecMode::HomRef,
+                                    None,
+                                );
                             }
                         }
                         i += 1;
@@ -349,10 +404,15 @@ mod tests {
         path
     }
 
-    const HEADER: &str = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n";
+    const HEADER: &str =
+        "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n";
 
     fn tmpdir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("oura-dna-lib-{}", std::process::id()));
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let d = std::env::temp_dir().join(format!("oura-dna-lib-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -440,7 +500,11 @@ chr15\t28120472\t.\tA\tG\t.\t.\t.\tGT\t1|1\n"
         let sc = &rep.scores[0];
         assert_eq!(sc.matched, 2, "both variants covered (one via ref block)");
         assert!((sc.value - 0.5).abs() < 1e-9, "value {}", sc.value);
-        assert_eq!(sc.contributors.len(), 1, "only the non-ref site contributes");
+        assert_eq!(
+            sc.contributors.len(),
+            1,
+            "only the non-ref site contributes"
+        );
         assert_eq!(sc.contributors[0].rsid, "rs12913832");
     }
 
@@ -451,9 +515,7 @@ chr15\t28120472\t.\tA\tG\t.\t.\t.\tGT\t1|1\n"
         // The catalog writes rs4988235 as C/T (classic strand), but a GRCh38
         // forward-strand VCF stores it as G/A. A homozygous-derived sample is A/A
         // on the forward strand → should reverse-complement to "TT" (Persistent).
-        let body = format!(
-            "{HEADER}2\t135851076\trs4988235\tG\tA\t.\tPASS\t.\tGT\t1/1\n"
-        );
+        let body = format!("{HEADER}2\t135851076\trs4988235\tG\tA\t.\tPASS\t.\tGT\t1/1\n");
         let path = write_vcf_gz(&dir, "strand.vcf.gz", &body);
         let rep = build_report(&VcfSource::open(&path), &cat, &[]).unwrap();
         let lact = &rep.traits[0];

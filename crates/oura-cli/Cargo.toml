@@ -11,9 +11,9 @@ name = "oura"
 path = "src/main.rs"
 
 [dependencies]
-oura-protocol = { path = "../oura-protocol" }
-oura-link = { path = "../oura-link" }
-oura-store = { path = "../oura-store" }
+oura-protocol = { git = "https://github.com/Th0rgal/open_oura", branch = "web-dashboard" }
+oura-link = { git = "https://github.com/Th0rgal/open_oura", branch = "web-dashboard" }
+oura-store = { git = "https://github.com/Th0rgal/open_oura", branch = "web-dashboard" }
 oura-summary = { path = "../oura-summary" }
 oura-dna = { path = "../oura-dna" }
 clap = { version = "4", features = ["derive"] }

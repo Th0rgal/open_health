@@ -281,8 +281,16 @@ fn autonomic_by_stage(
             e.3 += 1;
         }
     }
-    let hrv = |c: i64| acc.get(&c).filter(|e| e.1 > 0).map(|e| (e.0 / e.1 as f64).round());
-    let hr = |c: i64| acc.get(&c).filter(|e| e.3 > 0).map(|e| (e.2 / e.3 as f64).round());
+    let hrv = |c: i64| {
+        acc.get(&c)
+            .filter(|e| e.1 > 0)
+            .map(|e| (e.0 / e.1 as f64).round())
+    };
+    let hr = |c: i64| {
+        acc.get(&c)
+            .filter(|e| e.3 > 0)
+            .map(|e| (e.2 / e.3 as f64).round())
+    };
     json!({
         "hrv_deep": hrv(1), "hrv_light": hrv(2), "hrv_rem": hrv(3),
         "hr_deep":  hr(1),  "hr_light":  hr(2),  "hr_rem":  hr(3),
@@ -476,7 +484,9 @@ fn smooth_stages(vals: &[i64], win: usize) -> Vec<i64> {
                     counts[s as usize] += 1;
                 }
             }
-            (1..=4).max_by_key(|&k| counts[k as usize]).unwrap_or(vals[i]) as i64
+            (1..=4)
+                .max_by_key(|&k| counts[k as usize])
+                .unwrap_or(vals[i]) as i64
         })
         .collect()
 }
@@ -782,7 +792,8 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         let in_bed_s = (nt.end_ds - nt.start_ds) as f64 / 10.0;
         let (metrics, asleep_s) = sleep_metrics(&full_stages, in_bed_s);
         asleep_by_night.push(asleep_s);
-        let autonomic = autonomic_by_stage(&nt.hrv_t, &nt.hr_t, &full_stages, nt.start_ds, nt.end_ds);
+        let autonomic =
+            autonomic_by_stage(&nt.hrv_t, &nt.hr_t, &full_stages, nt.start_ds, nt.end_ds);
         nights_json.push(json!({
             "date": date_label(unix_s(nt.start_ds), tz),
             "ymd": ymd_label(unix_s(nt.start_ds), tz),
@@ -854,7 +865,8 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     };
     let bmr_kcal_day = oura_analysis::ported::metabolic::bmr_schofield(demo.age, sex_code, weight);
     // Anthropometric VO2max (Jackson non-exercise estimate), ecore's own formula.
-    let vo2max = oura_analysis::ported::metabolic::vo2max_jackson(demo.age, demo.sex == 'F', weight);
+    let vo2max =
+        oura_analysis::ported::metabolic::vo2max_jackson(demo.age, demo.sex == 'F', weight);
     for (ds, tag, jstr, _) in &events {
         if name_of(*tag) != "activity_information" || !jstr.contains("\"met\"") {
             continue;

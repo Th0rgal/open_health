@@ -1272,6 +1272,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "oura-analysis"
 version = "0.1.0"
+source = "git+https://github.com/Th0rgal/open_oura?branch=web-dashboard#1158582b95cedd0abb4ec3a6d255c6e133d4a3c2"
 dependencies = [
  "oura-protocol",
  "serde",
@@ -1336,6 +1337,7 @@ dependencies = [
 [[package]]
 name = "oura-link"
 version = "0.1.0"
+source = "git+https://github.com/Th0rgal/open_oura?branch=web-dashboard#1158582b95cedd0abb4ec3a6d255c6e133d4a3c2"
 dependencies = [
  "async-trait",
  "btleplug",
@@ -1351,6 +1353,7 @@ dependencies = [
 [[package]]
 name = "oura-protocol"
 version = "0.1.0"
+source = "git+https://github.com/Th0rgal/open_oura?branch=web-dashboard#1158582b95cedd0abb4ec3a6d255c6e133d4a3c2"
 dependencies = [
  "aes",
  "hex",
@@ -1362,6 +1365,7 @@ dependencies = [
 [[package]]
 name = "oura-store"
 version = "0.1.0"
+source = "git+https://github.com/Th0rgal/open_oura?branch=web-dashboard#1158582b95cedd0abb4ec3a6d255c6e133d4a3c2"
 dependencies = [
  "oura-protocol",
  "rusqlite",

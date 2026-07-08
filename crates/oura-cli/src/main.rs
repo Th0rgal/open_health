@@ -286,7 +286,10 @@ fn open_store_or_warn(db: &Path) -> Option<Store> {
     match Store::open(db) {
         Ok(s) => Some(s),
         Err(e) => {
-            eprintln!("warning: live readings won't be saved — can't open {}: {e}", db.display());
+            eprintln!(
+                "warning: live readings won't be saved — can't open {}: {e}",
+                db.display()
+            );
             None
         }
     }
@@ -592,10 +595,8 @@ fn cmd_sessions(cli: &Cli, tz_offset: i64, threshold: f64, json: bool) -> Result
 /// combiner weights). Always shells out to Python, which already owns the torch
 /// model path; there is no native LibTorch backend for the scorer.
 fn cmd_sleep_score(cli: &Cli, tz_offset: i64, csv: Option<PathBuf>, json: bool) -> Result<()> {
-    let root = pyrunner::require_repo_root(
-        Path::new("tools/score_sleep.py"),
-        "tools/score_sleep.py",
-    )?;
+    let root =
+        pyrunner::require_repo_root(Path::new("tools/score_sleep.py"), "tools/score_sleep.py")?;
     let db = pyrunner::resolve_db(&cli.db)?;
 
     use std::process::Command as Proc;

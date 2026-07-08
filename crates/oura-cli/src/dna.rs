@@ -258,7 +258,13 @@ pub fn report(file: &str, scores_param: &str) -> Value {
     (*arc).clone()
 }
 
-fn build(dir: &Path, vcf: &Path, cat_path: &Path, name: &str, selected: &[String]) -> Result<Value> {
+fn build(
+    dir: &Path,
+    vcf: &Path,
+    cat_path: &Path,
+    name: &str,
+    selected: &[String],
+) -> Result<Value> {
     let catalog = Catalog::load(cat_path)?;
     let specs = resolve_scores(dir, &catalog, selected)?;
     let src = VcfSource::open(vcf);
@@ -328,7 +334,9 @@ fn catalog_annotation(dir: &Path, query: &str, g: &Genotype) -> Value {
     let q = query.trim().to_ascii_lowercase();
     let matches = |t: &TraitDef| {
         t.rsid.eq_ignore_ascii_case(&q)
-            || g.rsid.split(';').any(|id| id.trim().eq_ignore_ascii_case(&t.rsid))
+            || g.rsid
+                .split(';')
+                .any(|id| id.trim().eq_ignore_ascii_case(&t.rsid))
     };
     let Some(t) = catalog.traits.iter().find(|t| matches(t)) else {
         return Value::Null;
@@ -410,12 +418,16 @@ fn download(url: &str, dest: &Path) -> Result<u64> {
     })?;
 
     let tmp = dest.with_extension("part");
-    let mut out = std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    let mut out =
+        std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
     let mut reader = resp.into_reader().take(MAX_SCORE_BYTES + 1);
     let written = std::io::copy(&mut reader, &mut out).context("downloading scoring file")?;
     if written > MAX_SCORE_BYTES {
         let _ = std::fs::remove_file(&tmp);
-        return Err(anyhow!("file exceeds the {} MB cap", MAX_SCORE_BYTES / 1_000_000));
+        return Err(anyhow!(
+            "file exceeds the {} MB cap",
+            MAX_SCORE_BYTES / 1_000_000
+        ));
     }
     drop(out);
     std::fs::rename(&tmp, dest).with_context(|| format!("saving {}", dest.display()))?;

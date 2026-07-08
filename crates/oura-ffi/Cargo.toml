@@ -11,4 +11,4 @@ repository.workspace = true
 crate-type = ["staticlib", "lib"]
 
 [dependencies]
-oura-analysis = { path = "../oura-analysis" }
+oura-analysis = { git = "https://github.com/Th0rgal/open_oura", branch = "web-dashboard" }

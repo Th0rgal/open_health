@@ -12,11 +12,11 @@ name = "oura_core"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
-oura-analysis = { path = "../oura-analysis" }
-oura-store = { path = "../oura-store" }
+oura-analysis = { git = "https://github.com/Th0rgal/open_oura", branch = "web-dashboard" }
+oura-store = { git = "https://github.com/Th0rgal/open_oura", branch = "web-dashboard" }
 oura-summary = { path = "../oura-summary" }
 # the ring client + transport trait, WITHOUT btleplug (iOS supplies the transport)
-oura-link = { path = "../oura-link", default-features = false }
+oura-link = { git = "https://github.com/Th0rgal/open_oura", branch = "web-dashboard", default-features = false }
 uniffi = { version = "0.28", features = ["cli", "tokio"] }
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
 async-trait = "0.1"
