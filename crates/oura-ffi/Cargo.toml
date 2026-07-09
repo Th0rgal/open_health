@@ -1,14 +1,15 @@
 [package]
 name = "oura-ffi"
-description = "C-ABI surface over the shared analysis core, for the iOS/native clients"
+description = "C-ABI surface over the Oura protocol core for the native iOS app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [lib]
-# staticlib → liboura_ffi.a to link into the iOS app; cdylib is handy for desktop tests.
-crate-type = ["staticlib", "lib"]
+name = "ouraffi"
+crate-type = ["staticlib"]
 
 [dependencies]
-oura-analysis = { git = "https://github.com/Th0rgal/open_oura", branch = "split-open-health" }
+oura-protocol = { git = "https://github.com/Th0rgal/open_oura", branch = "split-open-health" }
+serde_json = "1"

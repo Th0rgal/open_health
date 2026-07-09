@@ -11,3 +11,17 @@ dna/files/*
 !dna/files/.gitkeep
 dna/scores/*
 !dna/scores/.gitkeep
+
+# Proprietary/decrypted ML models and mobile exports.
+notes/models/
+*.pt
+*.ptl
+*.pth
+*.onnx
+*.mlmodel
+
+# iOS build artifacts generated locally by xcodegen / build-rust.sh.
+apps/ios/OpenOura.xcodeproj/
+apps/ios/OuraFFI/OuraFFI.xcframework/
+apps/ios/build/
+apps/ios/DerivedData/

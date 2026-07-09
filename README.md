@@ -12,7 +12,7 @@ consumed here as Git dependencies.
 ## What lives here
 
 - **`dashboard/web/`**: vanilla HTML/CSS/JS health dashboard served locally.
-- **`apps/ios/`**: SwiftUI iOS client and generated Rust FFI bindings.
+- **`apps/ios/`**: native SwiftUI app (`OpenOura`) that talks directly to the ring over BLE.
 - **`crates/oura-cli`**: app-oriented CLI entrypoint, including `oura dashboard`,
   DNA explorer routes, blood PDF import, model runners, and local dashboard APIs.
 - **`crates/oura-summary`**: shared dashboard summary JSON consumed by web and iOS.
@@ -53,5 +53,10 @@ The dashboard reads local files only. Genome files, blood PDFs, generated
 cargo test --workspace
 ```
 
-For the iOS app, use the scripts under `apps/ios/` after rebuilding the Rust FFI
-artifacts.
+For the iOS app:
+
+```bash
+./apps/ios/build-rust.sh
+cd apps/ios && xcodegen generate
+open OpenOura.xcodeproj
+```

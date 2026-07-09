@@ -1,0 +1,57 @@
+name: OpenOura
+options:
+  bundleIdPrefix: md.thomas
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "2"
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: "BQ6Z84B8L5"
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  OpenOura:
+    type: application
+    platform: iOS
+    sources:
+      - path: OpenOura
+    postBuildScripts:
+      - name: Bundle private ML models
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          MODELS_DIR="${SRCROOT}/../../notes/models/mobile"
+          RESOURCES_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          if [ ! -d "$MODELS_DIR" ]; then
+            echo "No private mobile models at $MODELS_DIR; skipping."
+            exit 0
+          fi
+          mkdir -p "$RESOURCES_DIR"
+          for model in \
+            sleepnet_moonstone_1_2_0.ptl \
+            cva_2_1_0.ptl \
+            automatic_activity_detection_3_1_11.ptl
+          do
+            if [ -f "$MODELS_DIR/$model" ]; then
+              cp "$MODELS_DIR/$model" "$RESOURCES_DIR/$model"
+              echo "Bundled private model: $model"
+            else
+              echo "Private model missing: $model"
+            fi
+          done
+    dependencies:
+      - framework: OuraFFI/OuraFFI.xcframework
+        embed: false              # static library — linked, not embedded
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openoura
+        INFOPLIST_FILE: OpenOura/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        OTHER_LDFLAGS: ["-lc++"]
