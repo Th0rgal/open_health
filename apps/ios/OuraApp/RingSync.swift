@@ -280,6 +280,11 @@ final class RingSync: ObservableObject {
                 pump?.cancel()
                 pump = nil
                 t.disconnect() // release the (possibly half-dead) link before retrying
+                if Self.isAuthenticationFailure(error) {
+                    status = "auth failed — this key was rejected by the ring; paste the key exported from the phone that onboarded this exact ring"
+                    dlog("sync", "not retrying: auth rejection is deterministic")
+                    return
+                }
                 status = "sync interrupted: \(error)"
             }
         }
@@ -311,5 +316,10 @@ final class RingSync: ObservableObject {
         b >= 1_048_576
             ? String(format: "%.1f MB", Double(b) / 1_048_576)
             : String(format: "%.0f KB", Double(b) / 1024)
+    }
+
+    private static func isAuthenticationFailure(_ error: Error) -> Bool {
+        let s = String(describing: error).lowercased()
+        return s.contains("authentication failed") || s.contains("ring rejected auth")
     }
 }

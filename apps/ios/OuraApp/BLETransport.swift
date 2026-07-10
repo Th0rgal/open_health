@@ -14,6 +14,7 @@ import Foundation
 
 enum RingUUID {
     static let service = CBUUID(string: "98ED0001-A541-11E4-B6A0-0002A5D5C51B")
+    static let chargingCaseService = CBUUID(string: "8BC5888F-C577-4F5D-857F-377354093F13")
     static let write = CBUUID(string: "98ED0002-A541-11E4-B6A0-0002A5D5C51B")
     // notify/indicate chars: gen-4 uses …0003; Ring 5 adds …0004/0005/0006.
     static let notify: Set<String> = [
@@ -252,11 +253,28 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         let advName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
             ?? peripheral.name ?? ""
         let advServices = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        // Ring 5 also has a charging case advertising an Oura-looking name and its own
+        // charger service. Do not connect to it: it can win the scan race, expose a
+        // confusing GATT surface, and then reject the ring auth key.
+        let lowerName = advName.lowercased()
+        let isChargingCase = lowerName.contains("charging case")
+            || advServices.contains(RingUUID.chargingCaseService)
+        if isChargingCase {
+            let adKey = "\(peripheral.identifier.uuidString)|case|\(advName)"
+            if loggedAds.insert(adKey).inserted {
+                let svc = advServices.map(\.uuidString).joined(separator: ",")
+                let mfr = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)?.hexString ?? "—"
+                let conn = advertisementData[CBAdvertisementDataIsConnectable] as? Bool
+                dlog("scan", "saw charging case '\(advName.isEmpty ? "<no name>" : advName)' id=\(peripheral.identifier.uuidString.suffix(12)) rssi=\(RSSI) services=[\(svc)] mfr=\(mfr) connectable=\(conn.map(String.init) ?? "?") — waiting for the ring")
+            }
+            return
+        }
+
         // A ring advertises the proprietary Oura service UUID; accept on that even
         // when the name is missing (the name lives in the scan response, which a worn
         // ring may not have answered yet). Name match covers factory-reset shapes.
         let isRing = advServices.contains(RingUUID.service)
-            || (!advName.isEmpty && advName.lowercased().contains(nameContains.lowercased()))
+            || (!advName.isEmpty && lowerName.contains(nameContains.lowercased()))
         if !isRing {
             // count distinct non-ring devices as radio liveness proof; log the first
             // few so the transcript shows what the scan IS seeing.
