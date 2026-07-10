@@ -46,7 +46,7 @@ enum Core {
                                  ringSize: profile?.ring_size ?? 10)
             cva = r.result; cvaErr = r.error
         }
-        q.async(group: group) { let r = ActivityModel.run(); workouts = r.sessions; actErr = r.error }
+        q.async(group: group) { let r = ActivityModel.run(profile: profile); workouts = r.sessions; actErr = r.error }
         group.wait()
 
         // fold SleepNet's hypnogram + stage breakdown into each night, keyed by the exact

@@ -235,6 +235,7 @@ struct RootView: View {
     @State private var report: ReportSel?
     @State private var showAllDays = false
     @State private var showSync = false
+    @State private var showProfile = false
     @StateObject private var ring = RingSync()
     private func f(_ v: Double?, _ fallback: String = "—") -> String {
         v.map { "\(Int($0))" } ?? fallback
@@ -261,6 +262,7 @@ struct RootView: View {
         .fullScreenCover(item: $report) { sel in if let s { DayReportView(s: s, day: sel.day, tab: sel.sleep ? .sleep : .activity) } }
         .sheet(isPresented: $showAllDays) { if let s { AllDaysView(s: s) } }
         .sheet(isPresented: $showSync) { SyncView(ring: ring, onSynced: reload) }
+        .sheet(isPresented: $showProfile) { ProfileSettingsView(profile: s?.profile, onSaved: reload) }
         .onAppear(perform: load)
     }
 
@@ -296,6 +298,10 @@ struct RootView: View {
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .overlay(RoundedRectangle(cornerRadius: 5).stroke(Obs.trace, lineWidth: 0.8))
                         Spacer()
+                        Button { showProfile = true } label: {
+                            Image(systemName: "person.crop.circle")
+                                .font(.system(size: 17)).foregroundStyle(Obs.ink2)
+                        }
                         Button { showSync = true } label: {
                             Image(systemName: "arrow.triangle.2.circlepath")
                                 .font(.system(size: 16)).foregroundStyle(Obs.teal)

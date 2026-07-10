@@ -849,20 +849,21 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
             cursor,
             |ev| {
                 if db_err.borrow().is_some() {
-                    return;
+                    return false;
                 }
                 match store.insert_event(&serial, ev) {
                     Ok(true) => inserted += 1,
                     Ok(false) => {}
                     Err(e) => *db_err.borrow_mut() = Some(e),
                 }
+                db_err.borrow().is_none()
             },
             // Persist the cursor after each fully-drained batch (so an interrupted
             // sync still makes progress) — but not once a DB write has failed. A
             // failed cursor write is itself recorded so it can't be silently lost.
             |p| {
                 if db_err.borrow().is_some() {
-                    return;
+                    return false;
                 }
                 match store.set_cursor(&serial, p.next_cursor) {
                     Ok(()) => cursor_advanced.set(true),
@@ -873,6 +874,7 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
                     p.events_synced,
                     p.bytes_left as f64 / 1024.0
                 );
+                db_err.borrow().is_none()
             },
         )
         .await?;

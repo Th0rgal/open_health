@@ -21,7 +21,7 @@ enum ActivityModel {
 
     // Returns detected sessions, plus a non-nil `error` only for genuine failures
     // (bundled model missing). An empty list with `error == nil` means no activity data.
-    static func run() -> (sessions: [WorkoutSession], error: String?) {
+    static func run(profile: Profile?) -> (sessions: [WorkoutSession], error: String?) {
         guard let modelPath = Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl")
         else { return ([], "activity model file missing from the app bundle") }
 
@@ -29,19 +29,21 @@ enum ActivityModel {
         guard !events.isEmpty else { return ([], nil) }
 
         let eps = EventStore.epochs(events)
-        let anchor = eps.map { $0.anchorUnix }.max()!  // newest epoch's capture ≈ "now" for context
-        func unixMin(_ ds: Int64) -> Double { EventStore.unixSeconds(ds, eps) / 60.0 }
+        let anchor = EventStore.latestUnix(eps)
+        func unixMin(_ e: EventStore.Ev) -> Double {
+            EventStore.unixSeconds(e.ds, eps, capturedUnix: e.cu) / 60.0
+        }
         // Base the offset on the earliest wall-clock (not the smallest ds — after a reset
         // the smallest ds belongs to the newest epoch and is NOT the earliest in time).
-        let offset = Int((events.map { unixMin($0.ds) }.min()! / 1440).rounded(.down)) * 1440
-        func tmin(_ ds: Int64) -> Int { Int(unixMin(ds).rounded()) - offset }
+        let offset = Int((events.map(unixMin).min()! / 1440).rounded(.down)) * 1440
+        func tmin(_ e: EventStore.Ev) -> Int { Int(unixMin(e).rounded()) - offset }
         let nan = Float.nan
         func num(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }
 
         var metD: [Int: (Float, Float)] = [:]   // round(t) → (t, met)
         var motion: [[Float]] = [], temp: [[Float]] = [], hr: [[Float]] = []
         for e in events {
-            let t = Float(tmin(e.ds))
+            let t = Float(tmin(e))
             switch e.tag {
             case 0x50:
                 if let met = e.json["met"] as? [NSNumber] {
@@ -74,7 +76,9 @@ enum ActivityModel {
         let d = Date(timeIntervalSince1970: Double(anchor) + tz * 3600)
         let c = cal.dateComponents([.year, .month, .day, .weekday], from: d)
         var context: [Float] = [Float(c.year!), Float(c.month!), Float(c.day!), Float(((c.weekday! + 5) % 7))]
-        var user: [Float] = [30, 1, 1.78, 78] + Array(repeating: nan, count: 10)
+        let sex: Float = profile?.sex?.uppercased() == "M" ? 1 : 0
+        var user: [Float] = [Float(profile?.age ?? 30), sex, Float(profile?.height_m ?? 1.78),
+                             Float(profile?.weight_kg ?? 75)] + Array(repeating: nan, count: 10)
 
         var out = [Float](repeating: 0, count: 256 * 9)
         let n = oura_activity(modelPath, &context, &user, &metFlat, Int32(nMet),

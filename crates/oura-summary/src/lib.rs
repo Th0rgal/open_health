@@ -12,6 +12,8 @@
 //! *render* it: web `dashboard/web/app.js`, iOS `apps/ios/OuraApp/OuraApp.swift`. See
 //! `docs/clients-web-and-ios.md`.
 
+mod ring_time;
+
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +21,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
 use oura_store::storage::Store;
+use ring_time::RingClock;
 
 /// User anthropometrics — only the CVA model needs them; everything else is
 /// signal-derived. Stored in an editable `profile.json` next to the DB.
@@ -585,61 +588,9 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             db.display()
         ));
     }
-    // `ring_timestamp` (ds) is a per-boot relative deciseconds counter: it resets to ~0
-    // every time the ring reboots (battery drain, firmware reset). A single global
-    // anchor therefore scatters older boots to nonsense dates. Recover each boot
-    // "epoch" by walking events in real sync order (captured_unix, then ds) and
-    // splitting on any large backward jump in ds, then anchor each epoch independently:
-    // its newest ds is pinned to that event's capture time and the rest offset by the
-    // decisecond delta. Raw ds is left untouched everywhere else — it is still the DB /
-    // model query key; only the ds→wall-clock mapping becomes epoch-aware.
-    struct Epoch {
-        min_ds: i64,
-        max_ds: i64,
-        anchor_unix: i64,
-    }
-    // A real reboot drops ds by millions; 6 h of slack absorbs minor out-of-order
-    // framing within an epoch without ever splitting one.
-    const EPOCH_RESET_SLACK_DS: i64 = 6 * 3600 * 10;
-    let mut order: Vec<(i64, i64)> = events.iter().map(|(ds, _, _, cu)| (*cu, *ds)).collect();
-    order.sort_unstable();
-    let mut epochs: Vec<Epoch> = Vec::new();
-    for (cu, ds) in order {
-        match epochs.last_mut() {
-            Some(e) if ds >= e.max_ds - EPOCH_RESET_SLACK_DS => {
-                if ds >= e.max_ds {
-                    e.max_ds = ds;
-                    e.anchor_unix = cu;
-                }
-                e.min_ds = e.min_ds.min(ds);
-            }
-            _ => epochs.push(Epoch {
-                min_ds: ds,
-                max_ds: ds,
-                anchor_unix: cu,
-            }),
-        }
-    }
-    // Newest epoch's capture time — a wall-clock "now" reference and fallback anchor.
-    let anchor_unix = epochs.iter().map(|e| e.anchor_unix).max().unwrap();
-    // Map a raw ds to wall-clock seconds via the epoch it belongs to. Epochs usually
-    // do not overlap, but after a ring reboot a new ds range can sit inside an older
-    // range. In that case choose the epoch whose predicted wall time is closest to the
-    // event's real capture time; otherwise recent events can be dated days too early.
-    let unix_s_at = |ds: i64, captured_unix: i64| -> f64 {
-        let e = epochs
-            .iter()
-            .filter(|e| {
-                ds >= e.min_ds - EPOCH_RESET_SLACK_DS && ds <= e.max_ds + EPOCH_RESET_SLACK_DS
-            })
-            .min_by_key(|e| {
-                let predicted_tick = e.anchor_unix.saturating_mul(10) - (e.max_ds - ds);
-                let captured_tick = captured_unix.saturating_mul(10);
-                (predicted_tick - captured_tick).unsigned_abs()
-            })
-            .unwrap_or_else(|| epochs.last().expect("events is non-empty"));
-        e.anchor_unix as f64 - (e.max_ds - ds) as f64 / 10.0
-    };
+    let clock = RingClock::from_events(&events);
+    let unix_s_at = |ds: i64, captured_unix: i64| clock.unix_s(ds, captured_unix);
+    let anchor_unix = clock.latest_unix();
     let mut beds: Vec<(i64, i64, i64)> = Vec::new();
     let mut present_recent = std::collections::HashSet::new();
     // "recent" = within 10 days of the newest data, measured in wall-clock so it never
@@ -656,9 +607,10 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 if let (Some(s), Some(e)) =
                     (v["bedtime_start_ds"].as_i64(), v["bedtime_end_ds"].as_i64())
                 {
-                    match beds.iter_mut().find(|(bs, _, bcu)| {
-                        *bs == s && (*bcu - *cu).abs() <= 12 * 3600
-                    }) {
+                    match beds
+                        .iter_mut()
+                        .find(|(bs, _, bcu)| *bs == s && (*bcu - *cu).abs() <= 12 * 3600)
+                    {
                         Some(b) => {
                             b.1 = b.1.max(e);
                             b.2 = b.2.max(*cu);
@@ -1126,7 +1078,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         "synced": synced_unix.map(|s| date_label(s, tz)),
         "synced_hm": synced_unix.map(|s| hm(s, tz)),
         "fresh_hours": synced_unix.map(|s| ((now - s) / 3600.0 * 10.0).round() / 10.0),
-        "days_of_data": ((epochs.iter().map(|e| (e.max_ds - e.min_ds) as f64).sum::<f64>() / 10.0 / 86400.0) * 10.0).round() / 10.0,
+        "days_of_data": ((clock.total_span_ds() as f64 / 10.0 / 86400.0) * 10.0).round() / 10.0,
         "total_events": events.len(),
         "nights": nights.len(),
         "battery_pct": battery.map(|b| b.0),

@@ -19,7 +19,7 @@ options:
 settings:
   base:
     MARKETING_VERSION: "0.1.1"
-    CURRENT_PROJECT_VERSION: "5"
+    CURRENT_PROJECT_VERSION: "8"
     PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openoura
     TARGETED_DEVICE_FAMILY: "1"   # iPhone only (no iPad multitasking orientation reqs)
     CODE_SIGN_STYLE: Automatic
@@ -58,6 +58,7 @@ targets:
       - path: Theme.swift
       - path: BLETransport.swift
       - path: RingSync.swift
+      - path: ProfileSettings.swift
       - path: EventStore.swift
       - path: SleepStaging.swift
       - path: CvaModel.swift
@@ -77,6 +78,7 @@ targets:
       - path: ../../../oura.db
         buildPhase: resources
     dependencies:
+      - sdk: HealthKit.framework
       # Rust core (static lib in an xcframework) — link, don't embed
       - framework: ../OuraCore.xcframework
         embed: false

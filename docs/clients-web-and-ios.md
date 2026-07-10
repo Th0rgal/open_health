@@ -76,7 +76,11 @@ a nap doesn't shadow the real sleep.
   drives the Rust `RingSession` FFI (`oura-core`) to authenticate + drain into a writable
   DB. The web dashboard has **no** BLE; it reads a DB produced by the desktop `oura sync`.
   Both ultimately run the SAME `oura-link` `OuraClient<T: Transport>` over a different
-  transport (btleplug on desktop, CoreBluetooth-over-FFI on iOS).
+  transport (btleplug on desktop, CoreBluetooth-over-FFI on iOS). Ring 5 history payloads
+  are coalesced into 32 KB chunks before crossing UniFFI; control/summary frames stay
+  immediate, and diagnostics log only the aggregate frame/byte count rather than raw
+  sensor payloads. This mirrors Android's `ExtGetEvent` raw-buffer accumulation without
+  sacrificing the Rust client's 4,096-event cursor checkpoints.
 
 ## Sleep metrics: two code paths, one algorithm — keep them in sync
 
@@ -102,8 +106,9 @@ which is why Oura's own app has no per-night HRV trend either.
 
 ## Known gaps (web-only, not yet on iOS)
 
-- **Advanced & debugging**: on-ring feature toggles (`/api/feature`), the per-type event
-  stream, profile editing.
+- **Advanced & debugging**: on-ring feature toggles (`/api/feature`) and the per-type
+  event stream. Profile editing is now native on iOS, including optional Apple Health
+  import for date of birth, biological sex, height, and weight.
 - **Polysomnograph crosshair**: web has a hover crosshair; iOS uses a touch scrubber
   (drag across the lanes) — same idea, adapted to the input.
 - **DNA explorer** (`/dna`): reads genome `*.vcf.gz` files and scores single-SNP **traits**
@@ -161,11 +166,12 @@ When you close one of these gaps, update this section.
 every time the ring reboots (battery drain, firmware reset). Naively anchoring every ds
 to one global `max_ds`/`captured_unix` scatters older boots to wildly wrong dates (a boot
 can land months in the past). The fix segments events into boot **epochs** — walk in real
-sync order `(captured_unix, then ds)`, split on any large backward jump in ds, anchor each
-epoch's newest ds to that event's capture time — and maps ds→wall-clock per epoch. This
+sync order `(captured_unix, then insertion id)`, split on any large backward jump in ds, then use
+the epoch's on-ring `time_sync` (`ring_timestamp` ↔ UTC) records as authoritative anchors.
+`captured_unix` is only an epoch-selection hint and a fallback for legacy data. This
 lives in **three places that must stay in sync**:
 
-- `crates/oura-summary/src/lib.rs` — the shared brain (`unix_s`); fixes night/activity/
+- `crates/oura-summary/src/ring_time.rs` — the shared `RingClock`; fixes night/activity/
   movement **dates for both clients** at once.
 - `tools/epoch_time.py` (helper) used by `tools/run_activity_model.py` and
   `tools/run_sleep_model.py` — the **web** on-model session/hypnogram times.
@@ -173,8 +179,8 @@ lives in **three places that must stay in sync**:
   `ActivityModel.swift` and `SleepStaging.swift` — the **iOS** on-device model times.
   iOS must be rebuilt to pick this up.
 
-Operational gap (not yet fixed): `oura sync` keys incremental pulls off the PC-side cursor
-(`sync_state.next_cursor`, deciseconds). After a reboot the ring's ds restarts low, so a
-cursor left at the old (high) value matches nothing and sync silently returns 0 events
-until the cursor is reset. A robust sync should detect "0 events but a from-0 probe has
-data below the cursor" and rebase the cursor.
+Incremental pulls key off `sync_state.next_cursor` (deciseconds). After a reboot the
+ring's ds restarts low, so an empty incremental fetch verifies that the event immediately
+before the saved cursor still exists. If that marker is absent, the native iOS core
+checkpoints cursor 0 and drains the new boot epoch automatically. This also recovers
+cursors poisoned by the pre-`d409f9e` extended-envelope timestamp decoder.

@@ -160,6 +160,77 @@ impl Transport for FfiTransport {
     }
 }
 
+/// Drain one incremental range, inserting each event before checkpointing its batch.
+/// Returning `false` from either callback makes oura-link withhold the ring ACK, so a
+/// database failure can never advance the cursor past data that was not persisted.
+async fn drain_into_store(
+    client: &OuraClient<FfiTransport>,
+    cursor: u32,
+    serial: &str,
+    store: &Mutex<Store>,
+    inserted: &AtomicU32,
+    db_err: &Mutex<Option<String>>,
+    progress: &dyn SyncProgressListener,
+) -> Result<oura_link::client::SyncOutcome, String> {
+    let outcome = client
+        .drain_events(
+            cursor,
+            |ev| {
+                if db_err.lock().unwrap().is_some() {
+                    return false;
+                }
+                match store.lock().unwrap().insert_event(serial, ev) {
+                    Ok(true) => {
+                        inserted.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(false) => {}
+                    Err(e) => *db_err.lock().unwrap() = Some(e.to_string()),
+                }
+                db_err.lock().unwrap().is_none()
+            },
+            |p| {
+                progress.on_progress("sync".into(), p.bytes_left as u64, p.events_synced);
+                if db_err.lock().unwrap().is_some() {
+                    return false;
+                }
+                if let Err(e) = store.lock().unwrap().set_cursor(serial, p.next_cursor) {
+                    *db_err.lock().unwrap() = Some(e.to_string());
+                }
+                db_err.lock().unwrap().is_none()
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(msg) = db_err.lock().unwrap().clone() {
+        return Err(msg);
+    }
+    Ok(outcome)
+}
+
+/// An empty incremental fetch is normally legitimate. Verify it cheaply by asking
+/// for the event immediately before the saved cursor: a healthy cursor points one
+/// past that retained event. If the marker is absent, the ring clock rebooted below
+/// the cursor (or an older parser persisted an impossible cursor), so a from-zero
+/// drain is required. The probe deliberately does not write to SQLite.
+async fn cursor_marker_present(
+    client: &OuraClient<FfiTransport>,
+    cursor: u32,
+) -> Result<bool, String> {
+    if cursor == 0 {
+        return Ok(true);
+    }
+    let outcome = client
+        .drain_events(cursor - 1, |_| true, |_| true)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(outcome.events_synced > 0 && outcome.next_cursor >= cursor)
+}
+
+fn should_rebase_cursor(cursor: u32, events_synced: u32, marker_present: bool) -> bool {
+    cursor > 0 && events_synced == 0 && !marker_present
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl RingSession {
     #[uniffi::constructor]
@@ -227,36 +298,44 @@ impl RingSession {
         let inserted = AtomicU32::new(0);
         let db_err: Mutex<Option<String>> = Mutex::new(None);
         progress.on_progress("sync".into(), 0, 0);
-        let outcome = client
-            .drain_events(
-                cursor,
-                |ev| {
-                    if db_err.lock().unwrap().is_some() {
-                        return;
-                    }
-                    match store.lock().unwrap().insert_event(&serial, ev) {
-                        Ok(true) => {
-                            inserted.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Ok(false) => {}
-                        Err(e) => *db_err.lock().unwrap() = Some(e.to_string()),
-                    }
-                },
-                |p| {
-                    progress.on_progress("sync".into(), p.bytes_left as u64, p.events_synced);
-                    if db_err.lock().unwrap().is_some() {
-                        return;
-                    }
-                    if let Err(e) = store.lock().unwrap().set_cursor(&serial, p.next_cursor) {
-                        *db_err.lock().unwrap() = Some(e.to_string());
-                    }
-                },
-            )
-            .await
-            .map_err(|e| fail(e.to_string()))?;
+        let mut outcome = drain_into_store(
+            &client,
+            cursor,
+            &serial,
+            &store,
+            &inserted,
+            &db_err,
+            progress.as_ref(),
+        )
+        .await
+        .map_err(&fail)?;
 
-        if let Some(msg) = db_err.into_inner().unwrap() {
-            return Err(fail(msg));
+        if outcome.events_synced == 0 && cursor > 0 {
+            let marker_present = cursor_marker_present(&client, cursor)
+                .await
+                .map_err(&fail)?;
+            if should_rebase_cursor(cursor, outcome.events_synced, marker_present) {
+                // Checkpoint zero before the recovery drain: if BLE drops midway, the
+                // existing reconnect loop resumes the new epoch instead of retrying the
+                // stale/poisoned cursor and reporting another false success.
+                store
+                    .lock()
+                    .unwrap()
+                    .set_cursor(&serial, 0)
+                    .map_err(|e| fail(e.to_string()))?;
+                progress.on_progress("rebase".into(), 0, 0);
+                outcome = drain_into_store(
+                    &client,
+                    0,
+                    &serial,
+                    &store,
+                    &inserted,
+                    &db_err,
+                    progress.as_ref(),
+                )
+                .await
+                .map_err(&fail)?;
+            }
         }
         Ok(SyncReport {
             serial,
@@ -277,4 +356,21 @@ fn parse_key(hex: &str) -> Option<[u8; 16]> {
         key[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebases_empty_sync_when_saved_cursor_marker_is_missing() {
+        assert!(should_rebase_cursor(184_190_174, 0, false));
+    }
+
+    #[test]
+    fn keeps_healthy_or_progressing_cursor() {
+        assert!(!should_rebase_cursor(5_586_831, 0, true));
+        assert!(!should_rebase_cursor(5_586_831, 12, false));
+        assert!(!should_rebase_cursor(0, 0, false));
+    }
 }

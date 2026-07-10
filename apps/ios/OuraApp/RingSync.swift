@@ -6,8 +6,8 @@ import UIKit
 
 // Shared debug logger for the connect + auth + sync path. View live in Console.app
 // (filter subsystem `md.thomas.openoura`) or `xcrun simctl spawn booted log stream
-// --predicate 'subsystem == "md.thomas.openoura"'`. Frames are logged as hex; the auth
-// KEY is never logged (only its length), and the Rust layer logs only nonce/state bytes.
+// --predicate 'subsystem == "md.thomas.openoura"'`. Control frames are logged as hex;
+// bulk history is summarized by frame/byte count. The auth KEY is never logged.
 let ringLog = Logger(subsystem: "md.thomas.openoura", category: "ring")
 extension Data {
     var hexString: String { map { String(format: "%02x", $0) }.joined() }
@@ -223,6 +223,9 @@ final class RingSync: ObservableObject {
     private var transport: BLETransport?
     private var session: RingSession?
     private var pump: Task<Void, Never>?
+    private var lastProgressBytes: UInt64?
+    private var lastProgressAt: Date?
+    private var smoothedBytesPerSecond: Double?
 
     func resetLocalDatabase() {
         do {
@@ -239,6 +242,9 @@ final class RingSync: ObservableObject {
     /// Connect, wire the inbound-frame pump, and run a full sync into the writable DB.
     func run(keyHex: String) async {
         lastReport = nil   // clear any prior success so a failed retry isn't read as one
+        lastProgressBytes = nil
+        lastProgressAt = nil
+        smoothedBytesPerSecond = nil
         // one attempt = one transcript, so a copied log is unambiguous about which run
         // it describes.
         RingDiag.shared.clear()
@@ -345,9 +351,32 @@ final class RingSync: ObservableObject {
             status = "authenticating…"
         case "setup":
             status = "configuring ring…"
+        case "rebase":
+            status = "ring clock reset detected — recovering history…"
+            dlog("sync", "saved cursor is absent on ring — rebasing to the new boot epoch")
         default:
             if bytesLeft > 0 {
+                let now = Date()
+                if let previousBytes = lastProgressBytes,
+                   let previousAt = lastProgressAt,
+                   previousBytes > bytesLeft {
+                    let elapsed = now.timeIntervalSince(previousAt)
+                    if elapsed > 0.05 {
+                        let instant = Double(previousBytes - bytesLeft) / elapsed
+                        smoothedBytesPerSecond = smoothedBytesPerSecond
+                            .map { $0 * 0.65 + instant * 0.35 } ?? instant
+                    }
+                } else if let previousBytes = lastProgressBytes, bytesLeft > previousBytes {
+                    smoothedBytesPerSecond = nil // a rebase/new drain starts a new estimate
+                }
+                lastProgressBytes = bytesLeft
+                lastProgressAt = now
+                let eta = smoothedBytesPerSecond.flatMap { rate -> String? in
+                    guard rate > 0 else { return nil }
+                    return Self.fmtDuration(Double(bytesLeft) / rate)
+                }
                 status = "syncing… ~\(Self.fmtBytes(bytesLeft)) left · \(events) events"
+                    + (eta.map { " · about \($0)" } ?? "")
             } else if events > 0 {
                 status = "syncing… \(events) events · finishing up"
             } else {
@@ -360,6 +389,14 @@ final class RingSync: ObservableObject {
         b >= 1_048_576
             ? String(format: "%.1f MB", Double(b) / 1_048_576)
             : String(format: "%.0f KB", Double(b) / 1024)
+    }
+
+    private static func fmtDuration(_ seconds: Double) -> String {
+        let s = max(1, Int(seconds.rounded()))
+        if s < 60 { return "\(s)s" }
+        let minutes = Int((Double(s) / 60).rounded())
+        if minutes < 60 { return "\(minutes) min" }
+        return String(format: "%.1f h", Double(minutes) / 60)
     }
 
     private static func isAuthenticationFailure(_ error: Error) -> Bool {
