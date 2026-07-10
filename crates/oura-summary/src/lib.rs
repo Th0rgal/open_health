@@ -225,6 +225,7 @@ fn nightly_skin_temp(temps_c: &[f64]) -> Option<f64> {
 struct Night {
     start_ds: i64,
     end_ds: i64,
+    captured_unix: i64,
     rmssd: Vec<f64>,
     hr: Vec<f64>,
     temp: Vec<f64>,
@@ -619,31 +620,35 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             }),
         }
     }
-    // Map a raw ds to wall-clock seconds via the epoch it belongs to. Epochs are usually
-    // disjoint in ds (a fresh boot starts near 0); if ranges overlap, prefer the
-    // narrowest epoch containing ds, falling back to the newest epoch.
-    let unix_s = |ds: i64| -> f64 {
+    // Newest epoch's capture time — a wall-clock "now" reference and fallback anchor.
+    let anchor_unix = epochs.iter().map(|e| e.anchor_unix).max().unwrap();
+    // Map a raw ds to wall-clock seconds via the epoch it belongs to. Epochs usually
+    // do not overlap, but after a ring reboot a new ds range can sit inside an older
+    // range. In that case choose the epoch whose predicted wall time is closest to the
+    // event's real capture time; otherwise recent events can be dated days too early.
+    let unix_s_at = |ds: i64, captured_unix: i64| -> f64 {
         let e = epochs
             .iter()
             .filter(|e| {
                 ds >= e.min_ds - EPOCH_RESET_SLACK_DS && ds <= e.max_ds + EPOCH_RESET_SLACK_DS
             })
-            .min_by_key(|e| e.max_ds - e.min_ds)
+            .min_by_key(|e| {
+                let predicted_tick = e.anchor_unix.saturating_mul(10) - (e.max_ds - ds);
+                let captured_tick = captured_unix.saturating_mul(10);
+                (predicted_tick - captured_tick).unsigned_abs()
+            })
             .unwrap_or_else(|| epochs.last().expect("events is non-empty"));
         e.anchor_unix as f64 - (e.max_ds - ds) as f64 / 10.0
     };
-    // Newest epoch's capture time — a wall-clock "now" reference and fallback anchor.
-    let anchor_unix = epochs.iter().map(|e| e.anchor_unix).max().unwrap();
-
-    let mut beds: Vec<(i64, i64)> = Vec::new();
+    let mut beds: Vec<(i64, i64, i64)> = Vec::new();
     let mut present_recent = std::collections::HashSet::new();
     // "recent" = within 10 days of the newest data, measured in wall-clock so it never
     // sweeps in an older epoch that happens to share a high raw ds.
     let recent_cut_unix = anchor_unix as f64 - 10.0 * 86_400.0;
     let name_of = |tag: u8| oura_protocol::events::event_name(tag);
-    for (ds, tag, jstr, _) in &events {
+    for (ds, tag, jstr, cu) in &events {
         let n = name_of(*tag);
-        if unix_s(*ds) >= recent_cut_unix {
+        if unix_s_at(*ds, *cu) >= recent_cut_unix {
             present_recent.insert(n);
         }
         if n == "bedtime_period" {
@@ -651,9 +656,14 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 if let (Some(s), Some(e)) =
                     (v["bedtime_start_ds"].as_i64(), v["bedtime_end_ds"].as_i64())
                 {
-                    match beds.iter_mut().find(|(bs, _)| *bs == s) {
-                        Some(b) => b.1 = b.1.max(e),
-                        None => beds.push((s, e)),
+                    match beds.iter_mut().find(|(bs, _, bcu)| {
+                        *bs == s && (*bcu - *cu).abs() <= 12 * 3600
+                    }) {
+                        Some(b) => {
+                            b.1 = b.1.max(e);
+                            b.2 = b.2.max(*cu);
+                        }
+                        None => beds.push((s, e, *cu)),
                     }
                 }
             }
@@ -663,19 +673,23 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
 
     let mut nights: Vec<Night> = beds
         .iter()
-        .map(|&(s, e)| Night {
+        .map(|&(s, e, cu)| Night {
             start_ds: s,
             end_ds: e,
+            captured_unix: cu,
             ..Default::default()
         })
         .collect();
-    let find_night = |ds: i64, nights: &[Night]| {
+    let find_night = |ds: i64, captured_unix: i64, nights: &[Night]| {
         nights
             .iter()
-            .position(|nt| nt.start_ds - 600 <= ds && ds <= nt.end_ds + 600)
+            .enumerate()
+            .filter(|(_, nt)| nt.start_ds - 600 <= ds && ds <= nt.end_ds + 600)
+            .min_by_key(|(_, nt)| (nt.captured_unix - captured_unix).abs())
+            .map(|(idx, _)| idx)
     };
-    for (ds, tag, jstr, _) in &events {
-        let Some(idx) = find_night(*ds, &nights) else {
+    for (ds, tag, jstr, cu) in &events {
+        let Some(idx) = find_night(*ds, *cu, &nights) else {
             continue;
         };
         let n = name_of(*tag);
@@ -765,6 +779,12 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         })
         .unwrap_or_default();
 
+    nights.sort_by(|a, b| {
+        unix_s_at(a.start_ds, a.captured_unix)
+            .partial_cmp(&unix_s_at(b.start_ds, b.captured_unix))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     // downsample a raw signal to ≤N points (bucket mean) then round for a compact
     // payload; the frontend spreads each series evenly across the night window (all
     // signals cover the full night, so index→time is shared across lanes).
@@ -794,12 +814,14 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         asleep_by_night.push(asleep_s);
         let autonomic =
             autonomic_by_stage(&nt.hrv_t, &nt.hr_t, &full_stages, nt.start_ds, nt.end_ds);
+        let start_unix = unix_s_at(nt.start_ds, nt.captured_unix);
+        let end_unix = unix_s_at(nt.end_ds, nt.captured_unix);
         nights_json.push(json!({
-            "date": date_label(unix_s(nt.start_ds), tz),
-            "ymd": ymd_label(unix_s(nt.start_ds), tz),
+            "date": date_label(start_unix, tz),
+            "ymd": ymd_label(start_unix, tz),
             "start_ds": nt.start_ds, // exact bedtime key for on-device model injection
-            "start": hm(unix_s(nt.start_ds), tz),
-            "end": hm(unix_s(nt.end_ds), tz),
+            "start": hm(start_unix, tz),
+            "end": hm(end_unix, tz),
             "in_bed_h": ((nt.end_ds - nt.start_ds) as f64 / 10.0 / 3600.0 * 10.0).round() / 10.0,
             "hrv_ms": mean(&nt.rmssd).map(|x| x.round()),
             "rhr": nt.hr.iter().cloned().fold(f64::INFINITY, f64::min).is_finite().then(|| nt.hr.iter().cloned().fold(f64::INFINITY, f64::min).round()),
@@ -867,7 +889,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     // Anthropometric VO2max (Jackson non-exercise estimate), ecore's own formula.
     let vo2max =
         oura_analysis::ported::metabolic::vo2max_jackson(demo.age, demo.sex == 'F', weight);
-    for (ds, tag, jstr, _) in &events {
+    for (ds, tag, jstr, cu) in &events {
         if name_of(*tag) != "activity_information" || !jstr.contains("\"met\"") {
             continue;
         }
@@ -875,7 +897,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             if let Some(met) = v["met"].as_array() {
                 for (i, m) in met.iter().enumerate() {
                     let mv = m.as_f64().unwrap_or(1.0);
-                    let unix = unix_s(*ds) + i as f64 * 60.0;
+                    let unix = unix_s_at(*ds, *cu) + i as f64 * 60.0;
                     let local = unix + tz as f64 * 3600.0;
                     let day_idx = (local / 86400.0).floor() as i64;
                     let (y, mo, dd) = civil(day_idx);

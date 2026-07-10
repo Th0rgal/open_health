@@ -94,6 +94,30 @@ func dlog(_ tag: String, _ msg: String) {
     ringLog.info("[\(tag, privacy: .public)] \(msg, privacy: .public)")
 }
 
+@MainActor
+enum IdleTimerLock {
+    private static var reasons = Set<String>()
+
+    static func acquire(_ reason: String) {
+        reasons.insert(reason)
+        UIApplication.shared.isIdleTimerDisabled = true
+        dlog("idle", "screen lock disabled (\(reason)); holders=\(reasons.sorted().joined(separator: ","))")
+    }
+
+    static func release(_ reason: String) {
+        reasons.remove(reason)
+        UIApplication.shared.isIdleTimerDisabled = !reasons.isEmpty
+        dlog("idle", "screen lock \(reasons.isEmpty ? "enabled" : "still disabled") after releasing \(reason)")
+    }
+
+    static func refreshIfHeld(_ reason: String) {
+        if reasons.contains(reason) {
+            UIApplication.shared.isIdleTimerDisabled = true
+            dlog("idle", "screen lock disabled refreshed (\(reason))")
+        }
+    }
+}
+
 // On-device BLE sync: connect to the ring over CoreBluetooth (BLETransport), then
 // drive the SAME Rust client over FFI (RingSession) to authenticate + drain history
 // events into a writable SQLite DB. Mirrors `oura sync` on desktop. The actual BLE
@@ -112,6 +136,14 @@ enum DB {
         let p = url.path
         if FileManager.default.fileExists(atPath: p) { return p }
         return Bundle.main.path(forResource: "oura", ofType: "db") ?? p
+    }
+
+    /// Drop the writable synced DB. The bundled seed remains intact; the next sync
+    /// starts from an empty local store and drains the ring from cursor 0.
+    static func resetWritableStore() throws {
+        let p = url
+        guard FileManager.default.fileExists(atPath: p.path) else { return }
+        try FileManager.default.removeItem(at: p)
     }
 }
 
@@ -192,6 +224,18 @@ final class RingSync: ObservableObject {
     private var session: RingSession?
     private var pump: Task<Void, Never>?
 
+    func resetLocalDatabase() {
+        do {
+            try DB.resetWritableStore()
+            lastReport = nil
+            status = "local sync database reset — run Connect & Sync again"
+            dlog("db", "writable sync database reset")
+        } catch {
+            status = "reset failed: \(error.localizedDescription)"
+            dlog("db", "reset failed: \(error)")
+        }
+    }
+
     /// Connect, wire the inbound-frame pump, and run a full sync into the writable DB.
     func run(keyHex: String) async {
         lastReport = nil   // clear any prior success so a failed retry isn't read as one
@@ -210,12 +254,12 @@ final class RingSync: ObservableObject {
             return
         }
         busy = true
-        // a multi-hour first sync must not die because the screen locked: the app has
-        // no scene-phase handling, so an auto-lock would suspend it mid-drain.
-        UIApplication.shared.isIdleTimerDisabled = true
+        // A multi-hour first sync must not die because the screen locked; SyncView
+        // refreshes this when the app becomes active again.
+        IdleTimerLock.acquire("ring-sync")
         defer {
             busy = false
-            UIApplication.shared.isIdleTimerDisabled = false
+            IdleTimerLock.release("ring-sync")
             pump?.cancel()
             pump = nil
             // release the ring's single BLE link — holding it after the sync would

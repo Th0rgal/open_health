@@ -119,6 +119,7 @@ struct SyncView: View {
     @ObservedObject var ring: RingSync
     let onSynced: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var key = Keychain.loadKey() ?? ""
     @ObservedObject private var diag = RingDiag.shared
     @State private var copied = false
@@ -150,6 +151,18 @@ struct SyncView: View {
                         .frame(maxWidth: .infinity).padding(.vertical, 12)
                         .background(Obs.teal).foregroundStyle(Obs.black)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .disabled(ring.busy)
+                    Button(role: .destructive) {
+                        ring.resetLocalDatabase()
+                        onSynced()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "trash")
+                            Text("Reset local sync data").font(Obs.mono(12, .medium))
+                        }
+                        .frame(maxWidth: .infinity).padding(.vertical, 10)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Obs.trace, lineWidth: 0.8))
                     }
                     .disabled(ring.busy)
                     if !ring.status.isEmpty {
@@ -194,6 +207,25 @@ struct SyncView: View {
             .toolbarColorScheme(.dark, for: .navigationBar)
         }
         .preferredColorScheme(.dark)
+        .onAppear {
+            if ring.busy { IdleTimerLock.acquire("pair-screen") }
+        }
+        .onDisappear {
+            IdleTimerLock.release("pair-screen")
+        }
+        .onChange(of: ring.busy) { _, busy in
+            if busy {
+                IdleTimerLock.acquire("pair-screen")
+            } else {
+                IdleTimerLock.release("pair-screen")
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active, ring.busy {
+                IdleTimerLock.refreshIfHeld("ring-sync")
+                IdleTimerLock.acquire("pair-screen")
+            }
+        }
     }
 }
 
