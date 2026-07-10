@@ -1,7 +1,8 @@
 // open_oura dashboard — fetch /api/summary (Rust computes it) and render.
 //
-// New computed fields go in crates/oura-summary. The native iOS app lives under
-// apps/ios/OpenOura and syncs/renders directly from the ring.
+// SIBLING CLIENT: the native iOS app (apps/ios/OuraApp/OuraApp.swift) renders the SAME
+// summary JSON. A user-facing change here usually belongs there too — see the feature
+// map in docs/clients-web-and-ios.md. New computed fields go in crates/oura-summary.
 "use strict";
 
 const $ = (id) => document.getElementById(id);

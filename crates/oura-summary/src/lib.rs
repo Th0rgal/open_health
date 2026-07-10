@@ -8,8 +8,9 @@
 //! native client runs the `.ptl` models on-device (or supplies [`NoModelRunner`]).
 //! Everything else here is pure Rust over the synced SQLite DB.
 //!
-//! A new field added to the JSON here surfaces in the web dashboard. The native iOS
-//! app lives under `apps/ios/OpenOura` and syncs/renders directly from the ring.
+//! A new field added to the JSON here surfaces in BOTH clients — but each must still
+//! *render* it: web `dashboard/web/app.js`, iOS `apps/ios/OuraApp/OuraApp.swift`. See
+//! `docs/clients-web-and-ios.md`.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

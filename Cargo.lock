@@ -1331,8 +1331,7 @@ dependencies = [
 name = "oura-ffi"
 version = "0.1.0"
 dependencies = [
- "oura-protocol",
- "serde_json",
+ "oura-analysis",
 ]
 
 [[package]]

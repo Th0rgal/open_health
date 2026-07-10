@@ -1,33 +1,47 @@
-# Shipping OpenOura to TestFlight
+# Shipping OuraApp to TestFlight
 
-The iOS app lives in this repo at `apps/ios/`. It keeps the existing bundle id
-`md.thomas.openoura`.
-
-Before each TestFlight upload, increment `CURRENT_PROJECT_VERSION` in
-`apps/ios/project.yml`; App Store Connect rejects duplicate build numbers for the
-same marketing version.
+The simulator dev harness (`OuraApp/build_run.sh`) is for quick local runs. TestFlight
+needs a **signed device archive**. Everything below the signing step is scaffolded;
+signing requires *your* Apple Developer account.
 
 ## One-time
-
-- Apple Developer Program membership.
-- Register the App ID `md.thomas.openoura` and create the app in App Store Connect.
+- **Apple Developer Program** membership ($99/yr).
+- Register the App ID **`md.thomas.openoura`** and create the app in App Store Connect.
 - Install xcodegen: `brew install xcodegen`.
 
-## Build & Upload
+## Build & upload
+Current upload version is configured as **0.1.1 (3)** in
+`OuraApp/project.yml` and `OuraApp/project-ci.yml`.
 
 ```bash
-./apps/ios/build-rust.sh
-cd apps/ios
-xcodegen generate
-open OpenOura.xcodeproj
+# 1. shared Rust core → both device + simulator slices
+./apps/ios/build-xcframework.sh
+
+# 2. generate the Xcode project from project.yml
+cd apps/ios/OuraApp && xcodegen generate
+
+# 3. open it, set your Team under Signing & Capabilities (or DEVELOPMENT_TEAM in project.yml)
+open OuraApp.xcodeproj
+#    then: Product → Archive → Distribute App → TestFlight & App Store
+```
+Or headless once a Team is set:
+```bash
+xcodebuild -project OuraApp.xcodeproj -scheme OuraApp -sdk iphoneos \
+  -configuration Release archive -archivePath build/OuraApp.xcarchive
+xcodebuild -exportArchive -archivePath build/OuraApp.xcarchive \
+  -exportOptionsPlist ExportOptions.plist -exportPath build/export   # then upload with `xcrun altool`/Transporter
 ```
 
-In Xcode, select the `OpenOura` scheme and use Product -> Archive -> Distribute App
--> TestFlight & App Store.
+## Already handled
+- App icon (`Assets.xcassets/AppIcon.appiconset`, 1024²).
+- `Info.plist`: Bluetooth usage strings; `ITSAppUsesNonExemptEncryption=false` (AES ring
+  auth is exempt); simulator platform pin removed so a device archive is valid.
+- Device (`ios-arm64`) **and** simulator slices in `OuraCore.xcframework`.
+- Both sim and device Release builds verified to compile + link.
 
-If `notes/models/mobile/*.ptl` exists locally, the Xcode build phase bundles these
-private models into `OpenOura.app`. The model files stay gitignored and are not
-committed.
-
-The simulator has no usable Bluetooth for ring features, so TestFlight/device
-validation needs a real iPhone.
+## Still on you
+- **Signing**: Team ID + a distribution provisioning profile (only you can do this).
+- **Version bumps**: `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in `project.yml`.
+- **Data**: the local `project.yml` build bundles `oura.db` when that gitignored file is
+  present, which is useful for a personal TestFlight. The Xcode Cloud `project-ci.yml`
+  build does not bundle `oura.db`, `.ptl` models, or LibTorch.

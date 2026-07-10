@@ -20,8 +20,12 @@ notes/models/
 *.onnx
 *.mlmodel
 
-# iOS build artifacts generated locally by xcodegen / build-rust.sh.
-apps/ios/OpenOura.xcodeproj/
-apps/ios/OuraFFI/OuraFFI.xcframework/
+# iOS build artifacts generated locally by xcodegen / build scripts.
+apps/ios/OuraApp/OuraApp.xcodeproj/
+apps/ios/OuraCore.xcframework/
+apps/ios/libtorch-xcframeworks/
+apps/ios/.libtorch-frameworks-build/
+apps/ios/OuraApp/build/
 apps/ios/build/
 apps/ios/DerivedData/
+local/
