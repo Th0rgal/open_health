@@ -49,6 +49,25 @@ struct WorkoutSession: Identifiable {
 }
 struct Cardio: Decodable { var vascular_age: Double?; var chronological_age: Double?; var pwv_ms: Double?; var segments: Int? }
 struct Fitness: Decodable { var vo2max: Double? }
+struct SleepDebtDay: Decodable, Identifiable {
+    var date: String
+    var total_sleep_min: Double?
+    var sleep_need_min: Double
+    var shortfall_min: Double?
+    var cumulative_debt_min: Double?
+    var valid_days: Int
+    var id: String { date }
+}
+struct SleepDebtSummary: Decodable {
+    var debt_min: Double = 0
+    var recent_shortfall_min: Double = 0
+    var valid: Bool = false
+    var need_h: Double = 8
+    var valid_days: Int = 0
+    var window_days: Int = 14
+    var state: String = "none"
+    var days: [SleepDebtDay] = []
+}
 struct Device: Decodable {
     var serial: String?; var firmware: String?
     var battery_pct: Int?
@@ -65,6 +84,7 @@ struct Summary: Decodable {
     var profile: Profile?
     var cardio: Cardio?
     var fitness: Fitness?
+    var sleepDebt: SleepDebtSummary?
     var workouts: [WorkoutSession] = []   // on-device only (not in the JSON)
     var modelErrors: [String] = []        // on-device model failures (not in the JSON)
     var error: String?
@@ -72,6 +92,7 @@ struct Summary: Decodable {
     // out of decoding.
     enum CodingKeys: String, CodingKey {
         case digest, device, nights, vitals, activity_profile, activity_daily, profile, cardio, fitness, error
+        case sleepDebt = "sleep_debt"
     }
     /// recent days (newest first) that have a movement profile.
     var activeDays: [String] { activity_profile.keys.sorted(by: >) }

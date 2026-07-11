@@ -65,6 +65,7 @@ enum Core {
             let asleep = total - Double(stages.filter { $0 == 4 }.count)
             s.nights[i].efficiency = (asleep / total * 100).rounded()
         }
+        s.sleepDebt = s.stagedSleepDebt()
         if let cva {
             s.cardio = Cardio(vascular_age: cva.vascularAge, chronological_age: profile?.age ?? 30,
                               pwv_ms: cva.pwv, segments: cva.segments)

@@ -195,6 +195,82 @@ fn ymd_label(unix_s: f64, tz: i64) -> String {
     let (y, m, d) = civil(days);
     format!("{y:04}-{m:02}-{d:02}")
 }
+
+const SLEEP_DEBT_DAYS: i64 = 14;
+const SLEEP_NEED_H: f64 = 8.0;
+
+/// Android's sleep-debt screen works on calendar days, not individual sleep sessions:
+/// a main sleep and a nap ending on the same day both contribute to that day's total.
+/// Build the complete 14-day series here so every client renders the same result.
+fn sleep_debt_summary(asleep_by_day: &std::collections::BTreeMap<i64, i32>) -> Value {
+    use oura_analysis::ported::sleep_debt::{sleep_debt, SleepDebtConfig};
+
+    let Some(&anchor) = asleep_by_day.keys().next_back() else {
+        return json!({
+            "debt_min": 0, "recent_shortfall_min": 0, "valid": false,
+            "need_h": SLEEP_NEED_H, "valid_days": 0, "window_days": SLEEP_DEBT_DAYS,
+            "state": "none", "days": [],
+        });
+    };
+    let need_s = (SLEEP_NEED_H * 3600.0) as i32;
+    let first = anchor - (SLEEP_DEBT_DAYS - 1);
+    let mut days = Vec::with_capacity(SLEEP_DEBT_DAYS as usize);
+
+    for day in first..=anchor {
+        let window_first = day - (SLEEP_DEBT_DAYS - 1);
+        let actual: Vec<i32> = (window_first..=day)
+            .rev()
+            .map(|d| asleep_by_day.get(&d).copied().unwrap_or(0))
+            .collect();
+        let need = vec![need_s; actual.len()];
+        let debt = sleep_debt(&actual, &need, &SleepDebtConfig::default());
+        let total = asleep_by_day.get(&day).copied();
+        let valid_days = actual.iter().filter(|&&s| s > 0).count();
+        let (y, m, d) = civil(day);
+        days.push(json!({
+            "date": format!("{y:04}-{m:02}-{d:02}"),
+            "total_sleep_min": total.map(|s| (s as f64 / 60.0).round()),
+            "sleep_need_min": SLEEP_NEED_H * 60.0,
+            "shortfall_min": total.map(|s| ((need_s - s) as f64 / 60.0).round()),
+            "cumulative_debt_min": debt.valid.then(|| (debt.debt_s as f64 / 60.0).round()),
+            "valid_days": valid_days,
+        }));
+    }
+
+    let actual: Vec<i32> = (first..=anchor)
+        .rev()
+        .map(|d| asleep_by_day.get(&d).copied().unwrap_or(0))
+        .collect();
+    let valid_days = actual.iter().filter(|&&s| s > 0).count();
+    let need = vec![need_s; actual.len()];
+    let debt = sleep_debt(&actual, &need, &SleepDebtConfig::default());
+    let debt_min = if debt.valid {
+        (debt.debt_s as f64 / 60.0).round()
+    } else {
+        0.0
+    };
+    let state = match debt_min {
+        d if d >= 540.0 => "high",
+        d if d >= 360.0 => "moderate",
+        d if d >= 180.0 => "low",
+        _ => "none",
+    };
+    let recent_shortfall_min = if debt.valid && debt.recent_shortfall_s != i32::MAX {
+        (debt.recent_shortfall_s as f64 / 60.0).round()
+    } else {
+        0.0
+    };
+    json!({
+        "debt_min": debt_min,
+        "recent_shortfall_min": recent_shortfall_min,
+        "valid": debt.valid,
+        "need_h": SLEEP_NEED_H,
+        "valid_days": valid_days,
+        "window_days": SLEEP_DEBT_DAYS,
+        "state": state,
+        "days": days,
+    })
+}
 fn hm(unix_s: f64, tz: i64) -> String {
     let sod = (unix_s as i64 + tz * 3600).rem_euclid(86400);
     format!("{:02}:{:02}", sod / 3600, (sod % 3600) / 60)
@@ -849,7 +925,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     };
 
     let mut nights_json = Vec::new();
-    let mut asleep_by_night: Vec<i32> = Vec::new(); // oldest-first, for sleep debt
+    let mut asleep_by_day: std::collections::BTreeMap<i64, i32> = Default::default();
     for nt in &nights {
         let hyp = hyps.get(&nt.start_ds);
         let raw_stages: Vec<i64> = hyp
@@ -862,11 +938,14 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         let stage_cells = (!full_stages.is_empty()).then(|| downsample_codes(&full_stages, 120));
         let in_bed_s = (nt.end_ds - nt.start_ds) as f64 / 10.0;
         let (metrics, asleep_s) = sleep_metrics(&full_stages, in_bed_s);
-        asleep_by_night.push(asleep_s);
         let autonomic =
             autonomic_by_stage(&nt.hrv_t, &nt.hr_t, &full_stages, nt.start_ds, nt.end_ds);
         let start_unix = unix_s_at(nt.start_ds, nt.captured_unix);
         let end_unix = unix_s_at(nt.end_ds, nt.captured_unix);
+        if asleep_s > 0 {
+            let wake_day = (end_unix as i64 + tz * 3600).div_euclid(86_400);
+            *asleep_by_day.entry(wake_day).or_default() += asleep_s;
+        }
         nights_json.push(json!({
             "date": date_label(start_unix, tz),
             "ymd": ymd_label(start_unix, tz),
@@ -908,22 +987,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     }
     nights_json.reverse();
 
-    // sleep debt over the recent nights (newest-first for the linear-decay weighting),
-    // against an 8 h nightly need — the same ecore-ported algorithm as the ring.
-    let need_h = 8.0;
-    let sleep_debt = {
-        use oura_analysis::ported::sleep_debt::{sleep_debt, SleepDebtConfig};
-        let mut actual: Vec<i32> = asleep_by_night.clone();
-        actual.reverse(); // newest-first
-        let need = vec![(need_h * 3600.0) as i32; actual.len()];
-        let d = sleep_debt(&actual, &need, &SleepDebtConfig::default());
-        json!({
-            "debt_min": (d.debt_s as f64 / 60.0).round(),
-            "recent_shortfall_min": (d.recent_shortfall_s as f64 / 60.0).round(),
-            "valid": d.valid,
-            "need_h": need_h,
-        })
-    };
+    let sleep_debt = sleep_debt_summary(&asleep_by_day);
 
     let mut activity = activity_raw
         .as_ref()
@@ -1226,6 +1290,35 @@ mod tests {
             raw_end_ds: end_ds,
             captured_unix: 1,
         }
+    }
+
+    #[test]
+    fn sleep_debt_aggregates_sessions_and_uses_fourteen_calendar_days() {
+        let mut sleep = std::collections::BTreeMap::new();
+        for day in 100..105 {
+            sleep.insert(day, 7 * 3600);
+        }
+        // A one-hour nap belongs to the latest calendar day, making its total 8 h.
+        *sleep.entry(104).or_default() += 3600;
+        let value = sleep_debt_summary(&sleep);
+        assert_eq!(value["valid"], true);
+        assert_eq!(value["valid_days"], 5);
+        assert_eq!(value["days"].as_array().unwrap().len(), 14);
+        assert_eq!(value["days"][13]["total_sleep_min"], 480.0);
+        assert_eq!(value["recent_shortfall_min"], 0.0);
+    }
+
+    #[test]
+    fn sleep_debt_requires_five_distinct_days_not_five_sessions() {
+        let sleep = std::collections::BTreeMap::from([
+            (100, 8 * 3600),
+            (101, 8 * 3600),
+            (102, 8 * 3600),
+            (103, 8 * 3600),
+        ]);
+        let value = sleep_debt_summary(&sleep);
+        assert_eq!(value["valid"], false);
+        assert_eq!(value["valid_days"], 4);
     }
 
     #[test]

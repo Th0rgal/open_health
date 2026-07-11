@@ -40,7 +40,8 @@ metric there once and both clients receive it in the JSON.
 | Digest headline | `load()` digest | `RootView` digest | `digest` | — |
 | Vitals (HRV/RHR/temp/SpO₂) | `renderTiles` / `VitalCell`-like | `VitalCell` | `vitals`, `nights[]` | — |
 | **Unified day (night + activity)** | `renderDay`, `dayCard` | `TodayCard` | `nights[]`, `activity*` | — |
-| **Full-page sleep report** (polysomnograph + clinical metrics + interpretation) | `openDayPage`→`sleepReport`, `polysomnograph`, `hypnoSvg` | `DayReportView`→`SleepReport`, `Polysomnograph` (Reports.swift) | `nights[].{stages_full,series,metrics}`, `sleep_debt` | SleepNet |
+| **Full-page sleep report** (polysomnograph + clinical metrics + interpretation) | `openDayPage`→`sleepReport`, `polysomnograph`, `hypnoSvg` | `DayReportView`→`SleepReport`, `Polysomnograph` (Reports.swift) | `nights[].{stages_full,series,metrics}` | SleepNet |
+| **Sleep debt** (14-day card + cumulative debt / total sleep detail) | `renderSleepDebt`→`openSleepDebt` | `SleepDebtCard`→`SleepDebtDetail` | `sleep_debt`, grouped by wake date including naps | SleepNet |
 | **Full-page activity report** (24h MET profile + intensity metrics) | `openDayPage`→`activityReport`, `metProfileSvg` | `DayReportView`→`ActivityReport`, `MetProfile` (Reports.swift) | `activity_profile`, `activity_daily`, `activity` | AAD |
 | Stage breakdown | `stageBar` | `StageBreakdown` | `nights[].{deep,light,rem,wake}_pct` | SleepNet |
 | **Autonomic recovery by stage** (mean HR/HRV in deep/light/REM) | `sleepReport` autonomic grid | `SleepReport` `autonomicGrid` | `nights[].autonomic` | SleepNet (needs hypnogram) |
@@ -86,9 +87,12 @@ a nap doesn't shadow the real sleep.
 
 The clinical sleep metrics (onset/REM latency, WASO, awakenings, cycles, fragmentation) and
 sleep debt are computed **twice** and must stay identical: once in Rust (`oura-summary`
-`sleep_metrics` / `smooth_stages` / `count_bouts` / `count_periods`, and the `sleep_debt`
-port) for the web, and once in Swift (`Reports.swift` `Sleep.metrics` / `Sleep.smooth` +
-`Summary.sleepDebt`) for iOS. The web reads them from the FFI JSON; iOS recomputes from the
+`sleep_metrics` / `smooth_stages` / `count_bouts` / `count_periods` + `sleep_debt_summary`)
+for the web, and once in Swift (`Reports.swift` `Sleep.metrics` / `Sleep.smooth` +
+`Summary.stagedSleepDebt`) for iOS. Sleep debt groups every sleep session by wake-date,
+including naps in that day's total, then evaluates 14 calendar days with at least five
+valid days; this matches the decompiled Android input and UI. The web reads it from the
+summary JSON; iOS recomputes from the
 **on-device** SleepNet hypnogram (`NightRow.stages`), because iOS runs `build_summary` with
 `NoModelRunner` (no server-side staging), so the FFI `stages_full`/`metrics` are empty there.
 The raw signal series (`nights[].series`) DO come from the FFI on both. If you change the

@@ -242,6 +242,7 @@ struct RootView: View {
     @State private var showAllDays = false
     @State private var showSync = false
     @State private var showProfile = false
+    @State private var showSleepDebt = false
     @StateObject private var ring = RingSync()
     private func f(_ v: Double?, _ fallback: String = "—") -> String {
         v.map { "\(Int($0))" } ?? fallback
@@ -269,6 +270,7 @@ struct RootView: View {
         .sheet(isPresented: $showAllDays) { if let s { AllDaysView(s: s) } }
         .sheet(isPresented: $showSync) { SyncView(ring: ring, onSynced: reload) }
         .sheet(isPresented: $showProfile) { ProfileSettingsView(profile: s?.profile, onSaved: reload) }
+        .sheet(isPresented: $showSleepDebt) { if let debt = s?.sleepDebt { SleepDebtDetail(debt: debt) } }
         .onAppear(perform: load)
     }
 
@@ -346,6 +348,10 @@ struct RootView: View {
                                       value: latest?.skin_temp.map { String(format: "%.1f", $0) } ?? "—",
                                       unit: "°c")
                             VitalCell(tag: "blood o₂", value: f(latest?.spo2_mean), unit: "%")
+                        }
+
+                        if let debt = s.sleepDebt {
+                            SleepDebtCard(debt: debt) { showSleepDebt = true }
                         }
 
                         // cardiovascular age (on-device CVA model, from raw PPG)

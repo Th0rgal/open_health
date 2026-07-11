@@ -139,29 +139,58 @@ enum Sleep {
 }
 
 extension Summary {
-    /// Sleep debt (minutes) vs an 8 h nightly need, newest-first linear-decay weighting —
-    /// the same ecore-ported shape as the ring. Needs the on-device hypnograms.
-    var sleepDebt: (debtMin: Double, shortfallMin: Double, valid: Bool)? {
+    /// iOS stages sleep on-device after the shared JSON is built. Rebuild the same
+    /// Android-compatible 14-day result after staging, grouping main sleep + naps by
+    /// wake date. The web receives this exact shape directly from `oura-summary`.
+    func stagedSleepDebt() -> SleepDebtSummary? {
         let needS = 8.0 * 3600.0
-        // newest-first asleep seconds for nights that have a hypnogram
-        let ordered = nights
-            .filter { ($0.stages?.count ?? 0) > 1 }
-            .sorted { ($0.start_ds ?? 0) > ($1.start_ds ?? 0) }
-        let actual: [Double] = ordered.map { n in
-            let inBed = (n.in_bed_h ?? 0) * 3600
-            return Double(Sleep.asleepS(Sleep.smooth(n.stages ?? [], 5), inBedS: inBed))
+        var byDay: [String: Double] = [:]
+        for n in nights where (n.stages?.count ?? 0) > 1 {
+            guard let day = wakeYmd(n) else { continue }
+            let actual = Double(Sleep.asleepS(Sleep.smooth(n.stages ?? [], 5),
+                                              inBedS: (n.in_bed_h ?? 0) * 3600))
+            if actual > 0 { byDay[day, default: 0] += actual }
         }
-        guard !actual.isEmpty else { return nil }
-        let n = actual.count
-        let decay = n == 1 ? 0.0 : 0.75 / Double(n - 1)
-        var debt = 0.0, valid = 0
-        for d in 0..<n {
-            let sf = needS - actual[d]
-            if actual[d] > 0 { valid += 1; debt += (1.0 - decay * Double(d)) * sf }
+        guard let anchor = byDay.keys.max() else { return nil }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let fmt = DateFormatter()
+        fmt.calendar = cal; fmt.timeZone = cal.timeZone; fmt.dateFormat = "yyyy-MM-dd"
+        guard let anchorDate = fmt.date(from: anchor) else { return nil }
+
+        func date(_ offset: Int, from base: Date) -> String {
+            fmt.string(from: cal.date(byAdding: .day, value: offset, to: base)!)
         }
-        debt = min(max(debt, 0), 36_000)
-        let shortfall = needS - actual[0]
-        return (debtMin: (debt / 60).rounded(), shortfallMin: (shortfall / 60).rounded(), valid: valid >= 5)
+        func score(ending end: Date) -> (debt: Double, recent: Double, valid: Bool, count: Int) {
+            let actual = (0..<14).map { byDay[date(-$0, from: end)] ?? 0 }
+            let count = actual.filter { $0 > 0 }.count
+            guard actual[0] > 0 else { return (0, 0, false, count) }
+            let decay = 0.75 / 13.0
+            var debt = 0.0
+            for i in actual.indices where actual[i] > 0 {
+                debt += (1.0 - decay * Double(i)) * (needS - actual[i])
+            }
+            debt = min(max(debt, 0), 36_000)
+            debt = (debt / 2700).rounded() * 2700
+            return (debt, needS - actual[0], count >= 5, count)
+        }
+        let days: [SleepDebtDay] = (-13...0).map { offset in
+            let d = cal.date(byAdding: .day, value: offset, to: anchorDate)!
+            let key = fmt.string(from: d), total = byDay[key]
+            let result = score(ending: d)
+            return SleepDebtDay(date: key, total_sleep_min: total.map { ($0 / 60).rounded() },
+                                sleep_need_min: needS / 60,
+                                shortfall_min: total.map { ((needS - $0) / 60).rounded() },
+                                cumulative_debt_min: result.valid ? (result.debt / 60).rounded() : nil,
+                                valid_days: result.count)
+        }
+        let current = score(ending: anchorDate)
+        let minutes = current.valid ? (current.debt / 60).rounded() : 0
+        let state = minutes >= 540 ? "high" : minutes >= 360 ? "moderate" : minutes >= 180 ? "low" : "none"
+        return SleepDebtSummary(debt_min: minutes,
+                                recent_shortfall_min: current.valid ? (current.recent / 60).rounded() : 0,
+                                valid: current.valid, need_h: 8, valid_days: current.count,
+                                window_days: 14, state: state, days: days)
     }
 }
 
@@ -394,6 +423,132 @@ private func hourTicks(_ win: (a: Int, b: Int, span: Int)) -> [Int] {
 }
 private func stageName(_ c: Int) -> String { switch c { case 1: return "Deep"; case 2: return "Light"; case 3: return "REM"; default: return "Awake" } }
 
+private func debtDuration(_ minutes: Double) -> String {
+    let m = max(0, Int(minutes.rounded()))
+    return m >= 60 ? "\(m / 60)h \(m % 60)m" : "\(m)m"
+}
+
+private func debtStateCopy(_ state: String) -> String {
+    switch state {
+    case "high": return "Your sleep debt is high right now. Prioritize several consistent nights with enough sleep."
+    case "moderate": return "You’ve built up a moderate amount of sleep debt. A few longer nights can help you recover."
+    case "low": return "You’re mostly meeting your sleep need, with a small amount left to recover."
+    default: return "You’ve met your sleep need consistently over the past two weeks."
+    }
+}
+
+struct SleepDebtCard: View {
+    let debt: SleepDebtSummary
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    ObsTag("sleep debt", icon: "moon.zzz.fill")
+                    Spacer()
+                    Text("past \(debt.window_days) days").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                    Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
+                }
+                if debt.valid {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(debtDuration(debt.debt_min)).font(Obs.mono(26, .medium)).foregroundStyle(Obs.teal)
+                        Text(debt.state).font(Obs.mono(11, .medium)).foregroundStyle(Obs.ink2).textCase(.uppercase)
+                    }
+                    Text(debtStateCopy(debt.state)).font(Obs.prose(14)).foregroundStyle(Obs.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("\(debt.valid_days) of 5 days available").font(Obs.mono(18, .medium)).foregroundStyle(Obs.ink)
+                    Text("5 days of sleep data are needed within the past 2 weeks.")
+                        .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).obsCard()
+    }
+}
+
+private enum DebtGraph: String, CaseIterable { case debt = "Cumulative debt", sleep = "Total sleep" }
+
+private struct SleepDebtChart: View {
+    let debt: SleepDebtSummary
+    let mode: DebtGraph
+    var body: some View {
+        VStack(spacing: 8) {
+            Canvas { context, size in
+                let values: [Double?] = debt.days.map {
+                    mode == .debt ? $0.cumulative_debt_min : $0.total_sleep_min
+                }
+                let maxValue = mode == .debt ? 600.0 : max(720, values.compactMap { $0 }.max() ?? 0)
+                let x = { (i: Int) in CGFloat(i) / CGFloat(max(1, values.count - 1)) * size.width }
+                let y = { (v: Double) in size.height - CGFloat(min(max(v / maxValue, 0), 1)) * size.height }
+                for fraction in [0.25, 0.5, 0.75] {
+                    var grid = Path(); let yy = size.height * CGFloat(1 - fraction)
+                    grid.move(to: CGPoint(x: 0, y: yy)); grid.addLine(to: CGPoint(x: size.width, y: yy))
+                    context.stroke(grid, with: .color(Obs.trace.opacity(0.35)), lineWidth: 0.5)
+                }
+                if mode == .sleep {
+                    var need = Path(); let yy = y(debt.need_h * 60)
+                    need.move(to: CGPoint(x: 0, y: yy)); need.addLine(to: CGPoint(x: size.width, y: yy))
+                    context.stroke(need, with: .color(Obs.yellow.opacity(0.7)), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                }
+                var line = Path(), started = false
+                for (i, value) in values.enumerated() {
+                    guard let value else { started = false; continue }
+                    let point = CGPoint(x: x(i), y: y(value))
+                    if started { line.addLine(to: point) } else { line.move(to: point); started = true }
+                }
+                context.stroke(line, with: .color(Obs.teal), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+            }
+            .frame(height: 180)
+            HStack {
+                Text(debt.days.first.map { String($0.date.suffix(5)) } ?? "").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                Spacer()
+                if mode == .sleep {
+                    HStack(spacing: 5) { Rectangle().fill(Obs.yellow).frame(width: 16, height: 1); Text("sleep need").font(Obs.mono(10)).foregroundStyle(Obs.ink2) }
+                }
+                Spacer()
+                Text(debt.days.last.map { String($0.date.suffix(5)) } ?? "").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+            }
+        }
+    }
+}
+
+struct SleepDebtDetail: View {
+    let debt: SleepDebtSummary
+    @Environment(\.dismiss) private var dismiss
+    @State private var graph = DebtGraph.debt
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Obs.canvas.ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        if debt.valid {
+                            Text(debtDuration(debt.debt_min)).font(Obs.mono(34, .medium)).foregroundStyle(Obs.teal)
+                            Text(debtStateCopy(debt.state)).font(Obs.prose(16)).foregroundStyle(Obs.ink2)
+                        } else {
+                            Text("Not enough data yet").font(Obs.prose(22, .semibold)).foregroundStyle(Obs.ink)
+                            Text("\(debt.valid_days) of 5 sleep days available within the past 2 weeks.")
+                                .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                        }
+                        Picker("Graph", selection: $graph) {
+                            ForEach(DebtGraph.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        }.pickerStyle(.segmented)
+                        SleepDebtChart(debt: debt, mode: graph)
+                        Rule("how it works")
+                        Text("Sleep debt estimates missed sleep over the past 14 days. Total sleep combines main sleep and naps, recent days carry more weight, and the current estimate uses an \(String(format: "%.0f", debt.need_h))-hour sleep need.")
+                            .font(Obs.prose(14)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
+                    }.padding(24)
+                }
+            }
+            .navigationTitle("sleep debt").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .toolbarColorScheme(.dark, for: .navigationBar)
+        }.preferredColorScheme(.dark)
+    }
+}
+
 // ── the full-page report (sleep ⇄ activity) ──────────────────────────────────
 struct DayReportView: View {
     let s: Summary
@@ -541,10 +696,9 @@ struct SleepReport: View {
                 Text(t).font(Obs.prose(14)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
             }
             if let d = s.sleepDebt, d.valid {
-                let h = Int(d.debtMin) / 60, mm = Int(d.debtMin) % 60
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text("\(h)h \(mm)m").font(Obs.mono(20, .medium)).foregroundStyle(Obs.teal)
-                    Text("accumulated sleep debt vs an 8 h nightly need" + (d.shortfallMin > 0 ? " · last night \(Int(d.shortfallMin)) min short" : ""))
+                    Text(debtDuration(d.debt_min)).font(Obs.mono(20, .medium)).foregroundStyle(Obs.teal)
+                    Text("accumulated sleep debt vs an \(String(format: "%.0f", d.need_h)) h nightly need" + (d.recent_shortfall_min > 0 ? " · last sleep day \(Int(d.recent_shortfall_min)) min short" : ""))
                         .font(Obs.mono(11)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.top, 6)
