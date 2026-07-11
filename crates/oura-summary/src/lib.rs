@@ -331,6 +331,81 @@ struct BedPeriod {
 const MAX_BED_BREAK_DS: i64 = 60 * 60 * 10;
 const MAX_SLEEP_SIGNAL_EXTENSION_DS: i64 = 3 * 60 * 60 * 10;
 const EPOCH_ALIGNMENT_SLACK_S: f64 = 5.0 * 60.0;
+const PULSE_BURST_GAP_DS: i64 = 2 * 60 * 10;
+const MAX_PULSE_CONTINUATION_GAP_DS: i64 = 15 * 60 * 10;
+const MIN_ACCEPTED_BEATS_PER_BURST: usize = 2;
+const MIN_LONG_SLEEP_DS: i64 = 3 * 60 * 60 * 10;
+const MIN_PREMATURE_END_EVIDENCE_DS: i64 = 30 * 60 * 10;
+
+/// Return the end of a continuous sequence of pulse-measurement bursts after the
+/// explicit sleep sensors stop. Ring 5 may briefly leave sleep mode after an awakening
+/// while still recording good PPG/IBI every ~10 minutes. A lone daytime HR sample is
+/// not enough evidence: each accepted burst needs multiple packets and every burst must
+/// remain close to the preceding accepted sleep evidence.
+fn pulse_continuation_end(
+    raw_end_ds: i64,
+    explicit_end_ds: i64,
+    captured_unix: i64,
+    pulse_support: &[(i64, i64, usize)],
+    unix_s_at: impl Fn(i64, i64) -> f64 + Copy,
+) -> i64 {
+    let raw_end_unix = unix_s_at(raw_end_ds, captured_unix);
+    let max_end_ds = raw_end_ds + MAX_SLEEP_SIGNAL_EXTENSION_DS;
+    let mut candidates: Vec<(i64, i64, usize)> = pulse_support
+        .iter()
+        .copied()
+        .filter(|&(ds, cu, _)| {
+            if ds < explicit_end_ds || ds > max_end_ds {
+                return false;
+            }
+            let raw_elapsed = (ds - raw_end_ds) as f64 / 10.0;
+            (unix_s_at(ds, cu) - raw_end_unix - raw_elapsed).abs() <= EPOCH_ALIGNMENT_SLACK_S
+        })
+        .collect();
+    candidates.sort_by_key(|&(ds, _, _)| ds);
+
+    let mut bursts: Vec<Vec<(i64, i64, usize)>> = Vec::new();
+    for point in candidates {
+        let continues =
+            bursts
+                .last()
+                .and_then(|b| b.last())
+                .is_some_and(|&(last_ds, last_cu, _)| {
+                    let raw_gap = point.0 - last_ds;
+                    let wall_gap = unix_s_at(point.0, point.1) - unix_s_at(last_ds, last_cu);
+                    (0..=PULSE_BURST_GAP_DS).contains(&raw_gap)
+                        && (0.0..=PULSE_BURST_GAP_DS as f64 / 10.0).contains(&wall_gap)
+                });
+        if continues {
+            bursts.last_mut().expect("burst exists").push(point);
+        } else {
+            bursts.push(vec![point]);
+        }
+    }
+
+    let mut accepted_end = explicit_end_ds;
+    let mut accepted_cu = captured_unix;
+    for burst in bursts
+        .into_iter()
+        .filter(|b| b.iter().map(|point| point.2).sum::<usize>() >= MIN_ACCEPTED_BEATS_PER_BURST)
+    {
+        let first = burst[0];
+        let raw_gap = first.0 - accepted_end;
+        let wall_gap = unix_s_at(first.0, first.1) - unix_s_at(accepted_end, accepted_cu);
+        if raw_gap > MAX_PULSE_CONTINUATION_GAP_DS
+            || wall_gap > MAX_PULSE_CONTINUATION_GAP_DS as f64 / 10.0
+        {
+            break;
+        }
+        if raw_gap >= -PULSE_BURST_GAP_DS && wall_gap >= -(PULSE_BURST_GAP_DS as f64 / 10.0) {
+            if let Some(&(ds, cu, _)) = burst.last() {
+                accepted_end = accepted_end.max(ds);
+                accepted_cu = cu;
+            }
+        }
+    }
+    accepted_end
+}
 
 /// Turn the ring's raw bedtime markers into user-facing sleep windows.
 ///
@@ -341,6 +416,7 @@ const EPOCH_ALIGNMENT_SLACK_S: f64 = 5.0 * 60.0;
 fn normalize_bed_periods(
     mut periods: Vec<BedPeriod>,
     sleep_support: &[(i64, i64)],
+    pulse_support: &[(i64, i64, usize)],
     unix_s_at: impl Fn(i64, i64) -> f64 + Copy,
 ) -> Vec<BedPeriod> {
     periods.sort_by(|a, b| {
@@ -393,6 +469,18 @@ fn normalize_bed_periods(
             {
                 period.end_ds = period.end_ds.max(support_ds);
             }
+        }
+        let raw_duration = period.raw_end_ds - period.raw_start_ds;
+        let explicit_extension = period.end_ds - period.raw_end_ds;
+        if raw_duration >= MIN_LONG_SLEEP_DS && explicit_extension >= MIN_PREMATURE_END_EVIDENCE_DS
+        {
+            period.end_ds = pulse_continuation_end(
+                period.raw_end_ds,
+                period.end_ds,
+                period.captured_unix,
+                pulse_support,
+                unix_s_at,
+            );
         }
     }
     merge_adjacent(periods)
@@ -750,6 +838,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     let anchor_unix = clock.latest_unix();
     let mut raw_beds: Vec<BedPeriod> = Vec::new();
     let mut sleep_support: Vec<(i64, i64)> = Vec::new();
+    let mut pulse_support: Vec<(i64, i64, usize)> = Vec::new();
     let mut present_recent = std::collections::HashSet::new();
     // "recent" = within 10 days of the newest data, measured in wall-clock so it never
     // sweeps in an older epoch that happens to share a high raw ds.
@@ -793,8 +882,18 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         ) {
             sleep_support.push((*ds, *cu));
         }
+        // Both SleepNet implementations already consume these two streams. `hr_bpm`
+        // is populated only when the firmware accepted a pulse estimate, so it is a
+        // stronger continuation signal than raw/invalid IBI values.
+        if matches!(n, "ibi_and_amplitude_event" | "green_ibi_quality_event") {
+            if let Ok(v) = serde_json::from_str::<Value>(jstr) {
+                if let Some(accepted) = v["hr_bpm"].as_array().map(Vec::len).filter(|&n| n > 0) {
+                    pulse_support.push((*ds, *cu, accepted));
+                }
+            }
+        }
     }
-    let beds = normalize_bed_periods(raw_beds, &sleep_support, unix_s_at);
+    let beds = normalize_bed_periods(raw_beds, &sleep_support, &pulse_support, unix_s_at);
 
     let mut nights: Vec<Night> = beds
         .iter()
@@ -1327,26 +1426,100 @@ mod tests {
             bed(0, 5 * 3600 * 10),
             bed(5 * 3600 * 10 + 7 * 60 * 10, 7 * 3600 * 10),
         ];
-        let got = normalize_bed_periods(periods, &[], |ds, _| ds as f64 / 10.0);
+        let got = normalize_bed_periods(periods, &[], &[], |ds, _| ds as f64 / 10.0);
         assert_eq!(got, vec![bed(0, 7 * 3600 * 10)]);
     }
 
     #[test]
     fn nocturnal_signals_extend_a_premature_bedtime_end() {
         let support_end = 7 * 3600 * 10;
-        let got =
-            normalize_bed_periods(vec![bed(0, 5 * 3600 * 10)], &[(support_end, 1)], |ds, _| {
-                ds as f64 / 10.0
-            });
+        let got = normalize_bed_periods(
+            vec![bed(0, 5 * 3600 * 10)],
+            &[(support_end, 1)],
+            &[],
+            |ds, _| ds as f64 / 10.0,
+        );
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].end_ds, support_end);
         assert_eq!(got[0].raw_end_ds, 5 * 3600 * 10);
     }
 
     #[test]
+    fn clustered_valid_pulses_recover_sleep_after_brief_wakes() {
+        let minute = 60 * 10;
+        // Observed Ring 5 shape: explicit sleep streams stop at 05:34, followed by
+        // short good-IBI bursts roughly every ten minutes through 06:27. A final lone
+        // poor-quality packet at 06:38 must not extend the window.
+        let raw_end = 0;
+        let explicit_end = 93 * minute;
+        let mut pulses = Vec::new();
+        for offset_min in [105, 116, 126, 136, 146] {
+            pulses.push((offset_min * minute, 1, 1));
+            pulses.push((offset_min * minute + 10 * 10, 1, 1));
+        }
+        pulses.push((157 * minute, 1, 1));
+        let got = normalize_bed_periods(
+            vec![bed(-6 * 3600 * 10, raw_end)],
+            &[(explicit_end, 1)],
+            &pulses,
+            |ds, _| ds as f64 / 10.0,
+        );
+        assert_eq!(got[0].end_ds, 146 * minute + 10 * 10);
+        assert_eq!(got[0].raw_end_ds, raw_end);
+    }
+
+    #[test]
+    fn isolated_daytime_pulse_does_not_extend_sleep() {
+        let minute = 60 * 10;
+        let got = normalize_bed_periods(
+            vec![bed(-6 * 3600 * 10, 0)],
+            &[],
+            &[(10 * minute, 1, 4)],
+            |ds, _| ds as f64 / 10.0,
+        );
+        assert_eq!(got[0].end_ds, 0);
+    }
+
+    #[test]
+    fn daytime_nap_is_not_extended_by_periodic_hr_sampling() {
+        let minute = 60 * 10;
+        let pulses: Vec<_> = (10..=150).step_by(10).map(|m| (m * minute, 1, 6)).collect();
+        let got = normalize_bed_periods(
+            vec![bed(-20 * minute, 0)],
+            &[(5 * minute, 1)],
+            &pulses,
+            |ds, _| ds as f64 / 10.0,
+        );
+        assert_eq!(got[0].end_ds, 5 * minute);
+    }
+
+    #[test]
+    fn clean_long_sleep_end_is_not_extended_by_daytime_hr_sampling() {
+        let minute = 60 * 10;
+        let pulses = [(30 * minute, 1, 6), (30 * minute + 30 * 10, 1, 6)];
+        let got = normalize_bed_periods(
+            vec![bed(-7 * 60 * minute, 0)],
+            &[(20 * minute, 1)],
+            &pulses,
+            |ds, _| ds as f64 / 10.0,
+        );
+        assert_eq!(got[0].end_ds, 20 * minute);
+    }
+
+    #[test]
+    fn pulse_cluster_after_long_gap_does_not_extend_sleep() {
+        let minute = 60 * 10;
+        let pulses = [(20 * minute, 1, 2), (20 * minute + 10 * 10, 1, 2)];
+        let got = normalize_bed_periods(vec![bed(-6 * 3600 * 10, 0)], &[], &pulses, |ds, _| {
+            ds as f64 / 10.0
+        });
+        assert_eq!(got[0].end_ds, 0);
+    }
+
+    #[test]
     fn daytime_gap_remains_a_separate_sleep() {
         let periods = vec![bed(0, 30 * 60 * 10), bed(4 * 3600 * 10, 11 * 3600 * 10)];
-        let got = normalize_bed_periods(periods.clone(), &[], |ds, _| ds as f64 / 10.0);
+        let got = normalize_bed_periods(periods.clone(), &[], &[], |ds, _| ds as f64 / 10.0);
         assert_eq!(got, periods);
     }
 }

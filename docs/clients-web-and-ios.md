@@ -183,6 +183,23 @@ lives in **three places that must stay in sync**:
   `ActivityModel.swift` and `SleepStaging.swift` — the **iOS** on-device model times.
   iOS must be rebuilt to pick this up.
 
+## Premature sleep ends → evidence-based model windows
+
+The ring can close a raw `bedtime_period` during a brief awakening even though sleep
+continues. `oura-summary::normalize_bed_periods` repairs the model boundary in two stages:
+
+- explicit sleep-only ACM, temperature, and SpO₂ packets can extend a raw end by up to
+  three hours;
+- when a long sleep already has at least 30 minutes of that explicit premature-end
+  evidence, continuous accepted HR/IBI bursts may carry the candidate window farther.
+
+Pulse evidence is deliberately gated: each burst needs multiple firmware-accepted heart
+rate estimates, consecutive bursts can be at most 15 minutes apart, and naps or clean
+bedtime ends never use daytime pulse sampling. The resulting canonical `start_ds/end_ds`
+is passed unchanged to the Python SleepNet runner and iOS `SleepStaging`, so both clients
+score the same recovered window. Regression tests include isolated daytime HR, long gaps,
+periodic post-nap sampling, and the extracted Ring 5 brief-wake vector.
+
 A from-zero recovery may replay an older boot after the newer boot is already stored.
 If that makes the selected epoch project an event more than six hours beyond its phone
 capture time, all three implementations fall back to the newest globally plausible
