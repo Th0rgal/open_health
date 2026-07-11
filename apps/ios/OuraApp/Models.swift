@@ -25,6 +25,7 @@ struct NightSeries: Decodable {
 }
 struct NightRow: Decodable, Identifiable {
     var date: String?; var ymd: String?; var start_ds: Int64?; var end_ds: Int64?
+    var raw_start_ds: Int64?; var raw_end_ds: Int64?; var bedtime_adjusted: Bool?
     var start: String?; var end: String?
     var in_bed_h: Double?; var hrv_ms: Double?; var rhr: Double?
     var skin_temp: Double?; var spo2_mean: Double?

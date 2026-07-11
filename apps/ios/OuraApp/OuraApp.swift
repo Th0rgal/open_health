@@ -229,7 +229,7 @@ struct SyncView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, ring.busy {
                 IdleTimerLock.refreshIfHeld("ring-sync")
-                IdleTimerLock.acquire("pair-screen")
+                IdleTimerLock.refreshIfHeld("pair-screen")
             }
         }
     }

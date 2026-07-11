@@ -193,3 +193,18 @@ The link layer also rejects any single-batch cursor jump beyond 180 days. A phys
 Ring 5 validation exposed malformed tail envelopes with near-`u32::MAX` timestamps;
 discarding those impossible records prevents a new poisoned cursor while preserving
 the surrounding valid events and terminal summary.
+
+## Android parity notes
+
+The decompiled Android client uses SweetBlue's reference-counted
+`PARTIAL_WAKE_LOCK` during BLE work. iOS has no equivalent unrestricted CPU wake
+lock, so `IdleTimerLock` keeps the foreground app awake with the same reference-count
+ownership semantics and reasserts the idle-timer flag after lifecycle transitions.
+
+Android's legacy NSSA path passes the ring's `BedtimePeriodValue` directly to the
+sleep-stage handler. Its newer feature-gated stateless bedtime detector instead skips
+ring bedtime events and derives periods from feature-session, state-change, motion,
+temperature, time-sync, and alert events at one-minute resolution. That detector's
+dynamically delivered model is not embedded in the APK. The shared summary therefore
+keeps the raw ring bounds alongside locally adjusted bounds, and only adjusts an end
+when adjacent bedtime segments or sleep-only sensor evidence support it.

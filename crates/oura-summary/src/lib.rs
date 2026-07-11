@@ -228,6 +228,8 @@ fn nightly_skin_temp(temps_c: &[f64]) -> Option<f64> {
 struct Night {
     start_ds: i64,
     end_ds: i64,
+    raw_start_ds: i64,
+    raw_end_ds: i64,
     captured_unix: i64,
     rmssd: Vec<f64>,
     hr: Vec<f64>,
@@ -245,6 +247,8 @@ struct Night {
 struct BedPeriod {
     start_ds: i64,
     end_ds: i64,
+    raw_start_ds: i64,
+    raw_end_ds: i64,
     captured_unix: i64,
 }
 
@@ -286,6 +290,8 @@ fn normalize_bed_periods(
                 && wall_gap_s >= -(MAX_SLEEP_SIGNAL_EXTENSION_DS as f64 / 10.0)
             {
                 previous.end_ds = previous.end_ds.max(period.end_ds);
+                previous.raw_start_ds = previous.raw_start_ds.min(period.raw_start_ds);
+                previous.raw_end_ds = previous.raw_end_ds.max(period.raw_end_ds);
                 previous.captured_unix = previous.captured_unix.max(period.captured_unix);
             } else {
                 merged.push(period);
@@ -691,11 +697,14 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                     }) {
                         Some(bed) => {
                             bed.end_ds = bed.end_ds.max(e);
+                            bed.raw_end_ds = bed.raw_end_ds.max(e);
                             bed.captured_unix = bed.captured_unix.max(*cu);
                         }
                         None => raw_beds.push(BedPeriod {
                             start_ds: s,
                             end_ds: e,
+                            raw_start_ds: s,
+                            raw_end_ds: e,
                             captured_unix: *cu,
                         }),
                     }
@@ -716,6 +725,8 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         .map(|bed| Night {
             start_ds: bed.start_ds,
             end_ds: bed.end_ds,
+            raw_start_ds: bed.raw_start_ds,
+            raw_end_ds: bed.raw_end_ds,
             captured_unix: bed.captured_unix,
             ..Default::default()
         })
@@ -861,6 +872,11 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             "ymd": ymd_label(start_unix, tz),
             "start_ds": nt.start_ds, // exact bedtime key for on-device model injection
             "end_ds": nt.end_ds,
+            // Android's interim schema likewise preserves bedtime_start/end_original
+            // beside detector-adjusted bounds. Keep both for audits and future models.
+            "raw_start_ds": nt.raw_start_ds,
+            "raw_end_ds": nt.raw_end_ds,
+            "bedtime_adjusted": nt.start_ds != nt.raw_start_ds || nt.end_ds != nt.raw_end_ds,
             "start": hm(start_unix, tz),
             "end": hm(end_unix, tz),
             "in_bed_h": ((nt.end_ds - nt.start_ds) as f64 / 10.0 / 3600.0 * 10.0).round() / 10.0,
@@ -1206,6 +1222,8 @@ mod tests {
         BedPeriod {
             start_ds,
             end_ds,
+            raw_start_ds: start_ds,
+            raw_end_ds: end_ds,
             captured_unix: 1,
         }
     }
@@ -1227,7 +1245,9 @@ mod tests {
             normalize_bed_periods(vec![bed(0, 5 * 3600 * 10)], &[(support_end, 1)], |ds, _| {
                 ds as f64 / 10.0
             });
-        assert_eq!(got, vec![bed(0, support_end)]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].end_ds, support_end);
+        assert_eq!(got[0].raw_end_ds, 5 * 3600 * 10);
     }
 
     #[test]

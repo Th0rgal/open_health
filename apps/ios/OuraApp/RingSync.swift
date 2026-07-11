@@ -96,22 +96,30 @@ func dlog(_ tag: String, _ msg: String) {
 
 @MainActor
 enum IdleTimerLock {
-    private static var reasons = Set<String>()
+    // Match SweetBlue's Android wake-lock semantics: each acquisition owns one
+    // reference and the idle timer is restored only after the final release.
+    private static var reasons: [String: Int] = [:]
     private static var observers: [NSObjectProtocol] = []
     private static var heartbeat: Task<Void, Never>?
 
     static func acquire(_ reason: String) {
         let wasEmpty = reasons.isEmpty
-        reasons.insert(reason)
+        reasons[reason, default: 0] += 1
         if wasEmpty {
             startMonitoring()
         }
         apply()
-        dlog("idle", "screen lock disabled (\(reason)); holders=\(reasons.sorted().joined(separator: ","))")
+        dlog("idle", "screen lock disabled (\(reason)); holders=\(holderSummary)")
     }
 
     static func release(_ reason: String) {
-        reasons.remove(reason)
+        if let count = reasons[reason] {
+            if count > 1 {
+                reasons[reason] = count - 1
+            } else {
+                reasons.removeValue(forKey: reason)
+            }
+        }
         apply()
         if reasons.isEmpty {
             stopMonitoring()
@@ -120,7 +128,7 @@ enum IdleTimerLock {
     }
 
     static func refreshIfHeld(_ reason: String) {
-        if reasons.contains(reason) {
+        if reasons[reason] != nil {
             apply()
             dlog("idle", "screen lock disabled refreshed (\(reason))")
         }
@@ -128,6 +136,13 @@ enum IdleTimerLock {
 
     private static func apply() {
         UIApplication.shared.isIdleTimerDisabled = !reasons.isEmpty
+    }
+
+    private static var holderSummary: String {
+        reasons.keys.sorted().map { reason in
+            let count = reasons[reason] ?? 0
+            return count == 1 ? reason : "\(reason)×\(count)"
+        }.joined(separator: ",")
     }
 
     private static func reassertIfNeeded(_ source: String) {
