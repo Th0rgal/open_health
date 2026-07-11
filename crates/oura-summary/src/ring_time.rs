@@ -14,6 +14,10 @@ struct Epoch {
 }
 
 const RESET_SLACK_DS: i64 = 6 * 3600 * 10;
+// A history event cannot legitimately occur well after the phone captured it.
+// A few hours tolerate clock corrections/timezone setup without allowing a replayed
+// pre-reboot high ds value to fabricate weeks of future data.
+const FUTURE_SLACK_S: f64 = 6.0 * 3600.0;
 
 /// Maps the ring's rebooting relative clock onto UTC.
 pub(crate) struct RingClock {
@@ -64,10 +68,30 @@ impl RingClock {
             .iter()
             .min_by_key(|(a, _)| (*a as i128 - ds as i128).unsigned_abs())
         {
-            *anchor_unix as f64 + (ds - *anchor_ds) as f64 / 10.0
-        } else {
-            epoch.fallback_anchor_unix as f64 - (epoch.max_ds - ds) as f64 / 10.0
+            let predicted = *anchor_unix as f64 + (ds - *anchor_ds) as f64 / 10.0;
+            if predicted <= captured_unix as f64 + FUTURE_SLACK_S {
+                return predicted;
+            }
         }
+
+        // A cursor rebase can replay an old boot after the newer boot was already
+        // stored. Duplicate anchors are ignored by SQLite, while previously unseen
+        // high-ds events are appended at today's capture time and can look like a
+        // continuation of the new boot. If that epoch predicts the future, select the
+        // most recent globally plausible time-sync projection instead.
+        if let Some(predicted) = self
+            .epochs
+            .iter()
+            .flat_map(|e| e.anchors.iter())
+            .map(|(anchor_ds, anchor_unix)| *anchor_unix as f64 + (ds - *anchor_ds) as f64 / 10.0)
+            .filter(|predicted| *predicted <= captured_unix as f64 + FUTURE_SLACK_S)
+            .max_by(f64::total_cmp)
+        {
+            return predicted;
+        }
+
+        (epoch.fallback_anchor_unix as f64 - (epoch.max_ds - ds) as f64 / 10.0)
+            .min(captured_unix as f64 + FUTURE_SLACK_S)
     }
 
     pub(crate) fn latest_unix(&self) -> i64 {
@@ -136,22 +160,22 @@ mod tests {
                 Epoch {
                     min_ds: 0,
                     max_ds: 6_000_000,
-                    capture_min: 100,
-                    capture_max: 199,
+                    capture_min: 1_700_000_100,
+                    capture_max: 1_700_000_199,
                     fallback_anchor_unix: 199,
                     anchors: vec![(5_000_000, 1_700_000_000)],
                 },
                 Epoch {
                     min_ds: 0,
                     max_ds: 1_000_000,
-                    capture_min: 200,
-                    capture_max: 299,
+                    capture_min: 1_800_000_200,
+                    capture_max: 1_800_000_299,
                     fallback_anchor_unix: 299,
                     anchors: vec![(500_000, 1_800_000_000)],
                 },
             ],
         };
-        assert_eq!(clock.unix_s(400_000, 250), 1_799_990_000.0);
+        assert_eq!(clock.unix_s(400_000, 1_800_000_250), 1_799_990_000.0);
     }
 
     #[test]
@@ -164,5 +188,18 @@ mod tests {
         ]);
         assert_eq!(clock.epochs.len(), 2);
         assert_eq!(clock.latest_unix(), 1_800_000_000);
+    }
+
+    #[test]
+    fn replayed_old_boot_cannot_create_future_days() {
+        let clock = RingClock::from_events(&[
+            event(7_500_000, 0x42, r#"{"unix_time":1000000}"#, 2_000_000),
+            event(13_000_000, 1, "{}", 2_000_000),
+            event(10, 1, "{}", 2_100_000),
+            event(5_500_000, 0x42, r#"{"unix_time":2200000}"#, 2_300_000),
+            // Newly seen old-boot event appended by a from-zero replay.
+            event(13_000_000, 1, "{}", 2_400_000),
+        ]);
+        assert_eq!(clock.unix_s(13_000_000, 2_400_000), 1_550_000.0);
     }
 }

@@ -179,6 +179,11 @@ lives in **three places that must stay in sync**:
   `ActivityModel.swift` and `SleepStaging.swift` — the **iOS** on-device model times.
   iOS must be rebuilt to pick this up.
 
+A from-zero recovery may replay an older boot after the newer boot is already stored.
+If that makes the selected epoch project an event more than six hours beyond its phone
+capture time, all three implementations fall back to the newest globally plausible
+`time_sync` projection. This prevents replay fragments from fabricating future days.
+
 Incremental pulls key off `sync_state.next_cursor` (deciseconds). After a reboot the
 ring's ds restarts low, so an empty incremental fetch verifies that the event immediately
 before the saved cursor still exists. If that marker is absent, the native iOS core

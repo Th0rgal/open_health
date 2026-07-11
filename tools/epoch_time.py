@@ -3,6 +3,7 @@
 import json
 
 EPOCH_RESET_SLACK_DS = 6 * 3600 * 10
+FUTURE_SLACK_S = 6 * 3600
 
 
 def build_epochs(rows):
@@ -59,8 +60,17 @@ def make_unix_s(epochs):
             e = epochs[-1]
         if e[5]:
             anchor_ds, anchor_unix = min(e[5], key=lambda a: abs(a[0] - ds))
-            return anchor_unix + (ds - anchor_ds) / 10.0
-        return e[2] - (e[1] - ds) / 10.0
+            predicted = anchor_unix + (ds - anchor_ds) / 10.0
+            if captured_unix is None or predicted <= captured_unix + FUTURE_SLACK_S:
+                return predicted
+        if captured_unix is not None:
+            plausible = [unix + (ds - anchor_ds) / 10.0
+                         for epoch in epochs for anchor_ds, unix in epoch[5]
+                         if unix + (ds - anchor_ds) / 10.0 <= captured_unix + FUTURE_SLACK_S]
+            if plausible:
+                return max(plausible)
+        fallback = e[2] - (e[1] - ds) / 10.0
+        return min(fallback, captured_unix + FUTURE_SLACK_S) if captured_unix is not None else fallback
     return unix_s
 
 

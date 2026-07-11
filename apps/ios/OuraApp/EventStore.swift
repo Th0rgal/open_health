@@ -51,6 +51,7 @@ enum EventStore {
     // A real reboot drops ds by millions; 6 h of slack absorbs minor out-of-order framing
     // within an epoch without ever splitting one.
     static let epochResetSlackDs: Int64 = 6 * 3600 * 10
+    static let futureSlackSeconds: Double = 6 * 3600
 
     /// Segment events into boot epochs. Precondition: `events` is non-empty.
     static func epochs(_ events: [Ev]) -> [Epoch] {
@@ -98,9 +99,19 @@ enum EventStore {
                 ?? eps[eps.count - 1]
         }
         if let a = e.anchors.min(by: { abs($0.ds - ds) < abs($1.ds - ds) }) {
-            return Double(a.unix) + Double(ds - a.ds) / 10.0
+            let predicted = Double(a.unix) + Double(ds - a.ds) / 10.0
+            if capturedUnix == nil || predicted <= Double(capturedUnix!) + futureSlackSeconds {
+                return predicted
+            }
         }
-        return Double(e.fallbackAnchorUnix) - Double(e.maxDs - ds) / 10.0
+        if let cu = capturedUnix {
+            let plausible = eps.flatMap(\.anchors)
+                .map { Double($0.unix) + Double(ds - $0.ds) / 10.0 }
+                .filter { $0 <= Double(cu) + futureSlackSeconds }
+            if let predicted = plausible.max() { return predicted }
+        }
+        let fallback = Double(e.fallbackAnchorUnix) - Double(e.maxDs - ds) / 10.0
+        return capturedUnix.map { min(fallback, Double($0) + futureSlackSeconds) } ?? fallback
     }
 
     static func latestUnix(_ eps: [Epoch]) -> Int64 {
