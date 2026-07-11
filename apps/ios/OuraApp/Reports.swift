@@ -231,20 +231,24 @@ struct Polysomnograph: View {
     private let axisH: CGFloat = 18
 
     private struct Lane { let label: String; let unit: String; let signal: SignalLane?; let stages: [Int]? }
-    private struct SignalLane { let v: [Double]; let color: Color; let dp: Int }
+    private struct SignalLane { let v: [Double]; let color: Color; let dp: Int; let span: [Double] }
 
     private var lanes: [Lane] {
         var out: [Lane] = []
         if let st = night.stages, st.count > 1 { out.append(Lane(label: "Hypnogram", unit: "", signal: nil, stages: Sleep.smooth(st, 5))) }
-        func sig(_ label: String, _ unit: String, _ v: [Double]?, _ color: Color, _ dp: Int = 0) {
+        func sig(_ label: String, _ unit: String, _ v: [Double]?, _ color: Color,
+                 _ dp: Int = 0, span: [Double]? = nil) {
             guard let v, v.count > 1 else { return }
-            out.append(Lane(label: label, unit: unit, signal: SignalLane(v: v, color: color, dp: dp), stages: nil))
+            let coverage = span.flatMap { $0.count == 2 ? $0 : nil } ?? [0, 1]
+            out.append(Lane(label: label, unit: unit,
+                            signal: SignalLane(v: v, color: color, dp: dp,
+                                               span: coverage), stages: nil))
         }
         let s = night.series
         sig("Heart rate", "bpm", s?.hr, Obs.yellow)
         sig("HRV", "ms", s?.hrv, Obs.teal)
         sig("Blood O₂", "%", s?.spo2, Obs.rem)
-        sig("Skin temp", "°C", s?.temp, Obs.light, 1)
+        sig("Skin temp", "°C", s?.temp, Obs.light, 1, span: s?.temp_span)
         sig("Motion", "s", s?.motion, Obs.ink2)
         return out
     }
@@ -294,7 +298,7 @@ struct Polysomnograph: View {
             .frame(width: gutterW, alignment: .leading)
             Group {
                 if let st = lane.stages { HypnoCanvas(stages: st) }
-                else if let s = lane.signal { SignalCanvas(v: s.v, color: s.color) }
+                else if let s = lane.signal { SignalCanvas(v: s.v, color: s.color, span: s.span) }
             }
             .frame(width: plotW, height: h)
         }
@@ -310,7 +314,9 @@ struct Polysomnograph: View {
         guard let s = lane.signal else { return "" }
         let fmt = { (x: Double) in s.dp > 0 ? String(format: "%.\(s.dp)f", x) : String(Int(x.rounded())) }
         if let f = cursorF {
-            let v = s.v[min(s.v.count - 1, max(0, Int(f * Double(s.v.count - 1))))]
+            guard f >= s.span[0], f <= s.span[1] else { return "—" }
+            let local = (f - s.span[0]) / max(1e-9, s.span[1] - s.span[0])
+            let v = s.v[min(s.v.count - 1, max(0, Int(local * Double(s.v.count - 1))))]
             return "\(fmt(v)) \(lane.unit)"
         }
         let mean = s.v.reduce(0, +) / Double(s.v.count)
@@ -369,21 +375,23 @@ private struct HypnoCanvas: View {
 private struct SignalCanvas: View {
     let v: [Double]
     let color: Color
+    let span: [Double]
     var body: some View {
         Canvas { ctx, size in
             guard v.count > 1 else { return }
             let lo = v.min()!, hi = v.max()!, rng = max(hi - lo, 1e-6)
             let pad: CGFloat = 5
             func pt(_ i: Int) -> CGPoint {
-                CGPoint(x: size.width * CGFloat(i) / CGFloat(v.count - 1),
+                CGPoint(x: size.width * CGFloat(span[0] + (span[1] - span[0]) * Double(i) / Double(v.count - 1)),
                         y: pad + (1 - CGFloat((v[i] - lo) / rng)) * (size.height - 2 * pad))
             }
             var line = Path(); line.move(to: pt(0)); for i in 1..<v.count { line.addLine(to: pt(i)) }
-            var area = line; area.addLine(to: CGPoint(x: size.width, y: size.height)); area.addLine(to: CGPoint(x: 0, y: size.height)); area.closeSubpath()
+            let x0 = size.width * CGFloat(span[0]), x1 = size.width * CGFloat(span[1])
+            var area = line; area.addLine(to: CGPoint(x: x1, y: size.height)); area.addLine(to: CGPoint(x: x0, y: size.height)); area.closeSubpath()
             ctx.fill(area, with: .color(color.opacity(0.10)))
             let mean = v.reduce(0, +) / Double(v.count)
             let my = pad + (1 - CGFloat((mean - lo) / rng)) * (size.height - 2 * pad)
-            ctx.stroke(Path { $0.move(to: CGPoint(x: 0, y: my)); $0.addLine(to: CGPoint(x: size.width, y: my)) },
+            ctx.stroke(Path { $0.move(to: CGPoint(x: x0, y: my)); $0.addLine(to: CGPoint(x: x1, y: my)) },
                        with: .color(color.opacity(0.4)), style: StrokeStyle(lineWidth: 0.6, dash: [3, 3]))
             ctx.stroke(line, with: .color(color), lineWidth: 1.3)
         }

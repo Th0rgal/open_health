@@ -560,18 +560,19 @@ function hypnoSvg(stages, w, h) {
 }
 
 // smooth auto-scaled line + faint area + dashed mean, for one signal lane
-function laneSvg(v, w, h, color) {
+function laneSvg(v, w, h, color, span = [0, 1]) {
   if (v.length < 2) return null;
   const min = Math.min(...v), max = Math.max(...v), rng = (max - min) || 1;
   const mean = v.reduce((a, b) => a + b, 0) / v.length;
   const pad = 5, y = (val) => pad + (1 - (val - min) / rng) * (h - 2 * pad);
-  const pts = v.map((val, i) => [(i / (v.length - 1)) * w, y(val)]);
+  const x0 = span[0] * w, x1 = span[1] * w;
+  const pts = v.map((val, i) => [x0 + (i / (v.length - 1)) * (x1 - x0), y(val)]);
   const line = smoothPath(pts), my = y(mean).toFixed(1);
   return {
     mean, min, max,
     svg: `<svg class="lane-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">` +
-      `<path d="${line} L${w} ${h} L0 ${h} Z" fill="${color}" opacity="0.09"/>` +
-      `<line x1="0" y1="${my}" x2="${w}" y2="${my}" stroke="${color}" stroke-width="0.6" stroke-dasharray="3 3" opacity="0.45"/>` +
+      `<path d="${line} L${x1} ${h} L${x0} ${h} Z" fill="${color}" opacity="0.09"/>` +
+      `<line x1="${x0}" y1="${my}" x2="${x1}" y2="${my}" stroke="${color}" stroke-width="0.6" stroke-dasharray="3 3" opacity="0.45"/>` +
       `<path d="${line}" fill="none" stroke="${color}" stroke-width="1.4" vector-effect="non-scaling-stroke"/></svg>`,
   };
 }
@@ -684,20 +685,20 @@ function sleepReport(d, ymd) {
     label: "Hypnogram", summary: "", tall: true, svg: hypnoSvg(stages, W, HH),
     valueAt: (f) => (STAGE[stages[Math.round(f * (stages.length - 1))]] || {}).name || "",
   }];
-  const addLane = (key, label, unit, color, dp = 0) => {
+  const addLane = (key, label, unit, color, dp = 0, span = [0, 1]) => {
     const v = (s[key] || []).filter((x) => x != null);
-    const L = laneSvg(v, W, LH, color);
+    const L = laneSvg(v, W, LH, color, span);
     if (!L) return;
     const fmt = (x) => (dp ? x.toFixed(dp) : Math.round(x));
     lanes.push({
       label, svg: L.svg, summary: `${fmt(L.mean)} ${unit}`,
-      valueAt: (f) => `${fmt(v[Math.round(f * (v.length - 1))])} ${unit}`,
+      valueAt: (f) => f < span[0] || f > span[1] ? "—" : `${fmt(v[Math.round(((f - span[0]) / Math.max(1e-9, span[1] - span[0])) * (v.length - 1))])} ${unit}`,
     });
   };
   addLane("hr", "Heart rate", "bpm", "var(--warn)");
   addLane("hrv", "HRV", "ms", "var(--accent)");
   addLane("spo2", "Blood O₂", "%", "var(--rem)");
-  addLane("temp", "Skin temp", "°C", "var(--light)", 1);
+  addLane("temp", "Skin temp", "°C", "var(--light)", 1, s.temp_span || [0, 1]);
   addLane("motion", "Motion", "s", "var(--faint)");
   root.append(el("p", "subhead", "Overnight polysomnograph"), polysomnograph(n, lanes));
 

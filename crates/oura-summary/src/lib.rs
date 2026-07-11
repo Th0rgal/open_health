@@ -310,6 +310,8 @@ struct Night {
     rmssd: Vec<f64>,
     hr: Vec<f64>,
     temp: Vec<f64>,
+    temp_start_ds: Option<i64>,
+    temp_end_ds: Option<i64>,
     spo2: Vec<f64>,
     motion: Vec<f64>,
     // timestamped (time_ds, value) HRV/HR samples for stage-resolved autonomics — the
@@ -951,14 +953,24 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                     }
                 }
             }
-            "temp_event" | "sleep_temp_event" => {
-                // Keep every in-window sample (not just the first): the ecore nightly
-                // algorithm needs a dense series. `find_night` already restricts these
-                // to the bedtime window, so they're all nocturnal skin-temp readings.
+            "sleep_temp_event" => {
+                // Only the dedicated nocturnal stream is calibrated as skin
+                // temperature. Generic `temp_event` contains several device/ambient
+                // channels; mixing it here creates a false plunge when sleep mode ends.
                 if let Some(a) = v["temps_c"].as_array() {
                     nights[idx]
                         .temp
                         .extend(a.iter().filter_map(|x| x.as_f64()).filter(|&c| c > 0.0));
+                    nights[idx].temp_start_ds = Some(
+                        nights[idx]
+                            .temp_start_ds
+                            .map_or(*ds, |current| current.min(*ds)),
+                    );
+                    nights[idx].temp_end_ds = Some(
+                        nights[idx]
+                            .temp_end_ds
+                            .map_or(*ds, |current| current.max(*ds)),
+                    );
                 }
             }
             "spo2_r_pi_event" => {
@@ -1041,6 +1053,14 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             autonomic_by_stage(&nt.hrv_t, &nt.hr_t, &full_stages, nt.start_ds, nt.end_ds);
         let start_unix = unix_s_at(nt.start_ds, nt.captured_unix);
         let end_unix = unix_s_at(nt.end_ds, nt.captured_unix);
+        let span_ds = (nt.end_ds - nt.start_ds).max(1) as f64;
+        let temp_span = match (nt.temp_start_ds, nt.temp_end_ds) {
+            (Some(start), Some(end)) => Some([
+                ((start - nt.start_ds) as f64 / span_ds).clamp(0.0, 1.0),
+                ((end - nt.start_ds) as f64 / span_ds).clamp(0.0, 1.0),
+            ]),
+            _ => None,
+        };
         if asleep_s > 0 {
             let wake_day = (end_unix as i64 + tz * 3600).div_euclid(86_400);
             *asleep_by_day.entry(wake_day).or_default() += asleep_s;
@@ -1075,6 +1095,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 "hr": series(&nt.hr, 0),
                 "hrv": series(&nt.rmssd, 0),
                 "temp": series(&nt.temp, 2),
+                "temp_span": temp_span,
                 "spo2": series(&nt.spo2, 0),
                 "motion": series(&nt.motion, 0),
             },

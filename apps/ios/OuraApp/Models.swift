@@ -21,6 +21,7 @@ struct NightSeries: Decodable {
     var hrv: [Double] = []
     var spo2: [Double] = []
     var temp: [Double] = []
+    var temp_span: [Double]? = nil
     var motion: [Double] = []
 }
 struct NightRow: Decodable, Identifiable {

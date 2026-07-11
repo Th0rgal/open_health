@@ -200,6 +200,21 @@ is passed unchanged to the Python SleepNet runner and iOS `SleepStaging`, so bot
 score the same recovered window. Regression tests include isolated daytime HR, long gaps,
 periodic post-nap sampling, and the extracted Ring 5 brief-wake vector.
 
+The polysomnograph's skin-temperature lane uses only `sleep_temp_event`. Generic
+`temp_event` contains multiple device/ambient channels and must never be flattened into
+the nocturnal skin-temperature series. `nights[].series.temp_span` records the actual
+coverage inside an extended sleep window, so iOS and web leave a visible gap after the
+last trustworthy sample instead of stretching or inventing a temperature collapse.
+
+## Ring 5 extended history sync
+
+Ring 5's `ExtGetEvent` batches are self-completing. Do not send the legacy `GetEvent`
+ACK (`0x10`) afterward: the ring answers that ACK with another history burst, whose late
+notifications race with the next data flush and are discarded. Extended summary result
+code `0xff` is a rejected cursor, not a successful empty batch. `oura-link` now rejects
+that result explicitly, and `oura-core` checkpoints zero and performs one deduplicated
+recovery drain when an existing iOS database contains such a stale cursor.
+
 A from-zero recovery may replay an older boot after the newer boot is already stored.
 If that makes the selected epoch project an event more than six hours beyond its phone
 capture time, all three implementations fall back to the newest globally plausible

@@ -231,6 +231,10 @@ fn should_rebase_cursor(cursor: u32, events_synced: u32, marker_present: bool) -
     cursor > 0 && events_synced == 0 && !marker_present
 }
 
+fn is_rejected_history_cursor(error: &str) -> bool {
+    error.contains("extended history request failed with result code 0xff")
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl RingSession {
     #[uniffi::constructor]
@@ -298,7 +302,7 @@ impl RingSession {
         let inserted = AtomicU32::new(0);
         let db_err: Mutex<Option<String>> = Mutex::new(None);
         progress.on_progress("sync".into(), 0, 0);
-        let mut outcome = drain_into_store(
+        let first_drain = drain_into_store(
             &client,
             cursor,
             &serial,
@@ -307,10 +311,38 @@ impl RingSession {
             &db_err,
             progress.as_ref(),
         )
-        .await
-        .map_err(&fail)?;
+        .await;
+        let mut rejected_cursor_rebased = false;
+        let mut outcome = match first_drain {
+            Ok(outcome) => outcome,
+            Err(error) if cursor > 0 && is_rejected_history_cursor(&error) => {
+                // Ring 5 rejects a stale/end cursor with ExtGetEvent result 0xff. Older
+                // builds incorrectly treated that as a successful empty terminal batch,
+                // leaving retained history unseen. Rebase transactionally; inserts are
+                // deduplicated, and checkpoint zero makes a reconnect resume recovery.
+                store
+                    .lock()
+                    .unwrap()
+                    .set_cursor(&serial, 0)
+                    .map_err(|e| fail(e.to_string()))?;
+                progress.on_progress("rebase".into(), 0, 0);
+                rejected_cursor_rebased = true;
+                drain_into_store(
+                    &client,
+                    0,
+                    &serial,
+                    &store,
+                    &inserted,
+                    &db_err,
+                    progress.as_ref(),
+                )
+                .await
+                .map_err(&fail)?
+            }
+            Err(error) => return Err(fail(error)),
+        };
 
-        if outcome.events_synced == 0 && cursor > 0 {
+        if outcome.events_synced == 0 && cursor > 0 && !rejected_cursor_rebased {
             let marker_present = cursor_marker_present(&client, cursor)
                 .await
                 .map_err(&fail)?;
@@ -372,5 +404,13 @@ mod tests {
         assert!(!should_rebase_cursor(5_586_831, 0, true));
         assert!(!should_rebase_cursor(5_586_831, 12, false));
         assert!(!should_rebase_cursor(0, 0, false));
+    }
+
+    #[test]
+    fn recognizes_ring5_rejected_cursor_result() {
+        assert!(is_rejected_history_cursor(
+            "protocol error: extended history request failed with result code 0xff"
+        ));
+        assert!(!is_rejected_history_cursor("BLE link lost mid-batch"));
     }
 }
