@@ -97,24 +97,72 @@ func dlog(_ tag: String, _ msg: String) {
 @MainActor
 enum IdleTimerLock {
     private static var reasons = Set<String>()
+    private static var observers: [NSObjectProtocol] = []
+    private static var heartbeat: Task<Void, Never>?
 
     static func acquire(_ reason: String) {
+        let wasEmpty = reasons.isEmpty
         reasons.insert(reason)
-        UIApplication.shared.isIdleTimerDisabled = true
+        if wasEmpty {
+            startMonitoring()
+        }
+        apply()
         dlog("idle", "screen lock disabled (\(reason)); holders=\(reasons.sorted().joined(separator: ","))")
     }
 
     static func release(_ reason: String) {
         reasons.remove(reason)
-        UIApplication.shared.isIdleTimerDisabled = !reasons.isEmpty
+        apply()
+        if reasons.isEmpty {
+            stopMonitoring()
+        }
         dlog("idle", "screen lock \(reasons.isEmpty ? "enabled" : "still disabled") after releasing \(reason)")
     }
 
     static func refreshIfHeld(_ reason: String) {
         if reasons.contains(reason) {
-            UIApplication.shared.isIdleTimerDisabled = true
+            apply()
             dlog("idle", "screen lock disabled refreshed (\(reason))")
         }
+    }
+
+    private static func apply() {
+        UIApplication.shared.isIdleTimerDisabled = !reasons.isEmpty
+    }
+
+    private static func reassertIfNeeded(_ source: String) {
+        guard !reasons.isEmpty, !UIApplication.shared.isIdleTimerDisabled else { return }
+        UIApplication.shared.isIdleTimerDisabled = true
+        dlog("idle", "screen lock was reset by iOS; disabled again (\(source))")
+    }
+
+    private static func startMonitoring() {
+        let center = NotificationCenter.default
+        observers = [
+            UIApplication.didBecomeActiveNotification,
+            UIApplication.willEnterForegroundNotification,
+            UIApplication.protectedDataDidBecomeAvailableNotification,
+        ].map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                Task { @MainActor in reassertIfNeeded(name.rawValue) }
+            }
+        }
+        heartbeat?.cancel()
+        heartbeat = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard !Task.isCancelled else { break }
+                reassertIfNeeded("heartbeat")
+            }
+        }
+    }
+
+    private static func stopMonitoring() {
+        heartbeat?.cancel()
+        heartbeat = nil
+        let center = NotificationCenter.default
+        observers.forEach(center.removeObserver)
+        observers.removeAll()
     }
 }
 

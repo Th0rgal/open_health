@@ -24,7 +24,8 @@ struct NightSeries: Decodable {
     var motion: [Double] = []
 }
 struct NightRow: Decodable, Identifiable {
-    var date: String?; var ymd: String?; var start_ds: Int64?; var start: String?; var end: String?
+    var date: String?; var ymd: String?; var start_ds: Int64?; var end_ds: Int64?
+    var start: String?; var end: String?
     var in_bed_h: Double?; var hrv_ms: Double?; var rhr: Double?
     var skin_temp: Double?; var spo2_mean: Double?
     // model-derived (present once the hypnogram runner is wired): per-30s stage codes

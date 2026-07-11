@@ -39,7 +39,11 @@ enum Core {
 
         let group = DispatchGroup()
         let q = DispatchQueue.global(qos: .userInitiated)
-        q.async(group: group) { let r = SleepStaging.run(); staged = r.staged; sleepErr = r.error }
+        q.async(group: group) {
+            let r = SleepStaging.run(nights: base.nights)
+            staged = r.staged
+            sleepErr = r.error
+        }
         q.async(group: group) {
             let r = CvaModel.run(sex: profile?.sex ?? "M", age: profile?.age ?? 30,
                                  heightM: profile?.height_m ?? 1.78, weightKg: profile?.weight_kg ?? 75,

@@ -9,7 +9,7 @@ import Foundation
 enum SleepStaging {
     // Returns date-key → stage codes, plus a non-nil `error` only for genuine failures
     // (bundled model missing). An empty map with `error == nil` just means no sleep data.
-    static func run() -> (staged: [String: [Int]], error: String?) {
+    static func run(nights: [NightRow]) -> (staged: [String: [Int]], error: String?) {
         guard let modelPath = Bundle.main.path(forResource: "sleepnet_moonstone_1_2_0", ofType: "ptl")
         else { return ([:], "sleep model file missing from the app bundle") }
 
@@ -22,19 +22,21 @@ enum SleepStaging {
             Int64(clock.unixSeconds(ds, capturedUnix: cu) * 1000)
         }
 
-        // distinct bedtime periods (dedup by start, keep longest), newest first
-        var beds: [Int64: (end: Int64, cu: Int64)] = [:]
-        for e in events where e.tag == 0x76 {
-            if let s = (e.json["bedtime_start_ds"] as? NSNumber)?.int64Value,
-               let en = (e.json["bedtime_end_ds"] as? NSNumber)?.int64Value {
-                if let old = beds[s] { beds[s] = (max(old.end, en), max(old.cu, e.cu)) }
-                else { beds[s] = (en, e.cu) }
-            }
+        // The shared Rust summary canonicalizes brief wake splits and premature
+        // bedtime ends. Consume those exact windows so the model cannot reintroduce
+        // the raw ring boundary that the UI already corrected.
+        let beds = nights.compactMap { night -> (start: Int64, end: Int64, cu: Int64)? in
+            guard let start = night.start_ds, let end = night.end_ds else { return nil }
+            let captured = events.first { event in
+                event.tag == 0x76
+                    && (event.json["bedtime_start_ds"] as? NSNumber)?.int64Value == start
+            }?.cu
+            return (start, end, captured ?? events.last!.cu)
         }
 
         var result: [String: [Int]] = [:]
-        for (startDs, bed) in beds.sorted(by: { $0.key > $1.key }) {
-            let endDs = bed.end, bedCu = bed.cu
+        for bed in beds {
+            let startDs = bed.start, endDs = bed.end, bedCu = bed.cu
             let lo = startDs - 6000, hi = endDs + 6000
             var beats: [(Int64, Float, Float, Float)] = []
             var acm: [(Int64, Float)] = [], temp: [(Int64, Float)] = []

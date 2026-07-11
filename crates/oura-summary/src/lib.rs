@@ -241,6 +241,81 @@ struct Night {
     hr_t: Vec<(i64, f64)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BedPeriod {
+    start_ds: i64,
+    end_ds: i64,
+    captured_unix: i64,
+}
+
+const MAX_BED_BREAK_DS: i64 = 60 * 60 * 10;
+const MAX_SLEEP_SIGNAL_EXTENSION_DS: i64 = 3 * 60 * 60 * 10;
+const EPOCH_ALIGNMENT_SLACK_S: f64 = 5.0 * 60.0;
+
+/// Turn the ring's raw bedtime markers into user-facing sleep windows.
+///
+/// A short wake can produce two adjacent `bedtime_period` records, and an early
+/// marker can be followed by hours of sleep-only sensor packets. SleepNet cannot
+/// recover either case because bedtime is an input boundary, so normalize that
+/// boundary before both the summary and model runners consume it.
+fn normalize_bed_periods(
+    mut periods: Vec<BedPeriod>,
+    sleep_support: &[(i64, i64)],
+    unix_s_at: impl Fn(i64, i64) -> f64 + Copy,
+) -> Vec<BedPeriod> {
+    periods.sort_by(|a, b| {
+        unix_s_at(a.start_ds, a.captured_unix).total_cmp(&unix_s_at(b.start_ds, b.captured_unix))
+    });
+
+    let merge_adjacent = |periods: Vec<BedPeriod>| {
+        let mut merged: Vec<BedPeriod> = Vec::new();
+        for period in periods {
+            let Some(previous) = merged.last_mut() else {
+                merged.push(period);
+                continue;
+            };
+            let raw_gap_ds = period.start_ds - previous.end_ds;
+            let wall_gap_s = unix_s_at(period.start_ds, period.captured_unix)
+                - unix_s_at(previous.end_ds, previous.captured_unix);
+            let same_epoch =
+                (wall_gap_s - raw_gap_ds as f64 / 10.0).abs() <= EPOCH_ALIGNMENT_SLACK_S;
+            if same_epoch
+                && raw_gap_ds <= MAX_BED_BREAK_DS
+                && wall_gap_s <= MAX_BED_BREAK_DS as f64 / 10.0
+                && raw_gap_ds >= -MAX_SLEEP_SIGNAL_EXTENSION_DS
+                && wall_gap_s >= -(MAX_SLEEP_SIGNAL_EXTENSION_DS as f64 / 10.0)
+            {
+                previous.end_ds = previous.end_ds.max(period.end_ds);
+                previous.captured_unix = previous.captured_unix.max(period.captured_unix);
+            } else {
+                merged.push(period);
+            }
+        }
+        merged
+    };
+
+    let mut periods = merge_adjacent(periods);
+    for period in &mut periods {
+        let original_end = period.end_ds;
+        let end_unix = unix_s_at(original_end, period.captured_unix);
+        for &(support_ds, support_captured) in sleep_support {
+            let raw_delta_ds = support_ds - original_end;
+            if !(0..=MAX_SLEEP_SIGNAL_EXTENSION_DS).contains(&raw_delta_ds) {
+                continue;
+            }
+            let wall_delta_s = unix_s_at(support_ds, support_captured) - end_unix;
+            let same_epoch =
+                (wall_delta_s - raw_delta_ds as f64 / 10.0).abs() <= EPOCH_ALIGNMENT_SLACK_S;
+            if same_epoch
+                && (0.0..=MAX_SLEEP_SIGNAL_EXTENSION_DS as f64 / 10.0).contains(&wall_delta_s)
+            {
+                period.end_ds = period.end_ds.max(support_ds);
+            }
+        }
+    }
+    merge_adjacent(periods)
+}
+
 /// Mean HR / HRV within each sleep stage, mapping each timestamped sample to the
 /// hypnogram epoch it falls in (stages tile [start_ds, end_ds] uniformly). Codes
 /// 1=deep 2=light 3=rem; wake is excluded (not recovery). Returns per-stage means where
@@ -591,7 +666,8 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     let clock = RingClock::from_events(&events);
     let unix_s_at = |ds: i64, captured_unix: i64| clock.unix_s(ds, captured_unix);
     let anchor_unix = clock.latest_unix();
-    let mut beds: Vec<(i64, i64, i64)> = Vec::new();
+    let mut raw_beds: Vec<BedPeriod> = Vec::new();
+    let mut sleep_support: Vec<(i64, i64)> = Vec::new();
     let mut present_recent = std::collections::HashSet::new();
     // "recent" = within 10 days of the newest data, measured in wall-clock so it never
     // sweeps in an older epoch that happens to share a high raw ds.
@@ -607,28 +683,40 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 if let (Some(s), Some(e)) =
                     (v["bedtime_start_ds"].as_i64(), v["bedtime_end_ds"].as_i64())
                 {
-                    match beds
-                        .iter_mut()
-                        .find(|(bs, _, bcu)| *bs == s && (*bcu - *cu).abs() <= 12 * 3600)
-                    {
-                        Some(b) => {
-                            b.1 = b.1.max(e);
-                            b.2 = b.2.max(*cu);
+                    match raw_beds.iter_mut().find(|bed| {
+                        bed.start_ds == s
+                            && (unix_s_at(bed.start_ds, bed.captured_unix) - unix_s_at(s, *cu))
+                                .abs()
+                                <= 5.0 * 60.0
+                    }) {
+                        Some(bed) => {
+                            bed.end_ds = bed.end_ds.max(e);
+                            bed.captured_unix = bed.captured_unix.max(*cu);
                         }
-                        None => beds.push((s, e, *cu)),
+                        None => raw_beds.push(BedPeriod {
+                            start_ds: s,
+                            end_ds: e,
+                            captured_unix: *cu,
+                        }),
                     }
                 }
             }
         }
+        if matches!(
+            n,
+            "sleep_acm_period" | "sleep_temp_event" | "spo2_r_pi_event"
+        ) {
+            sleep_support.push((*ds, *cu));
+        }
     }
-    beds.sort();
+    let beds = normalize_bed_periods(raw_beds, &sleep_support, unix_s_at);
 
     let mut nights: Vec<Night> = beds
         .iter()
-        .map(|&(s, e, cu)| Night {
-            start_ds: s,
-            end_ds: e,
-            captured_unix: cu,
+        .map(|bed| Night {
+            start_ds: bed.start_ds,
+            end_ds: bed.end_ds,
+            captured_unix: bed.captured_unix,
             ..Default::default()
         })
         .collect();
@@ -772,6 +860,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             "date": date_label(start_unix, tz),
             "ymd": ymd_label(start_unix, tz),
             "start_ds": nt.start_ds, // exact bedtime key for on-device model injection
+            "end_ds": nt.end_ds,
             "start": hm(start_unix, tz),
             "end": hm(end_unix, tz),
             "in_bed_h": ((nt.end_ds - nt.start_ds) as f64 / 10.0 / 3600.0 * 10.0).round() / 10.0,
@@ -1107,4 +1196,44 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         "activity_daily": activity_daily,
         "vitals": { "hrv": trend(&hrv_stat), "rhr": trend(&rhr_stat) },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bed(start_ds: i64, end_ds: i64) -> BedPeriod {
+        BedPeriod {
+            start_ds,
+            end_ds,
+            captured_unix: 1,
+        }
+    }
+
+    #[test]
+    fn brief_wake_does_not_split_one_night() {
+        let periods = vec![
+            bed(0, 5 * 3600 * 10),
+            bed(5 * 3600 * 10 + 7 * 60 * 10, 7 * 3600 * 10),
+        ];
+        let got = normalize_bed_periods(periods, &[], |ds, _| ds as f64 / 10.0);
+        assert_eq!(got, vec![bed(0, 7 * 3600 * 10)]);
+    }
+
+    #[test]
+    fn nocturnal_signals_extend_a_premature_bedtime_end() {
+        let support_end = 7 * 3600 * 10;
+        let got =
+            normalize_bed_periods(vec![bed(0, 5 * 3600 * 10)], &[(support_end, 1)], |ds, _| {
+                ds as f64 / 10.0
+            });
+        assert_eq!(got, vec![bed(0, support_end)]);
+    }
+
+    #[test]
+    fn daytime_gap_remains_a_separate_sleep() {
+        let periods = vec![bed(0, 30 * 60 * 10), bed(4 * 3600 * 10, 11 * 3600 * 10)];
+        let got = normalize_bed_periods(periods.clone(), &[], |ds, _| ds as f64 / 10.0);
+        assert_eq!(got, periods);
+    }
 }

@@ -203,10 +203,16 @@ struct SyncView: View {
                 .padding(24)
             }
             .navigationTitle("sync").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .disabled(ring.busy)
+                }
+            }
             .toolbarColorScheme(.dark, for: .navigationBar)
         }
         .preferredColorScheme(.dark)
+        .interactiveDismissDisabled(ring.busy)
         .onAppear {
             if ring.busy { IdleTimerLock.acquire("pair-screen") }
         }
