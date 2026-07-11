@@ -48,75 +48,111 @@ enum EventStore {
         var anchors: [(ds: Int64, unix: Int64)]
     }
 
-    // A real reboot drops ds by millions; 6 h of slack absorbs minor out-of-order framing
-    // within an epoch without ever splitting one.
-    static let epochResetSlackDs: Int64 = 6 * 3600 * 10
-    static let futureSlackSeconds: Double = 6 * 3600
+    /// Immutable clock mapping shared by the on-device models. Epoch construction and
+    /// replay recovery are paid once per model run instead of once per sample.
+    struct RingClock {
+        private static let epochResetSlackDs: Int64 = 6 * 3600 * 10
+        private static let futureSlackSeconds: Int64 = 6 * 3600
 
-    /// Segment events into boot epochs. Precondition: `events` is non-empty.
-    static func epochs(_ events: [Ev]) -> [Epoch] {
-        var eps: [Epoch] = []
-        for o in events {
-            if var e = eps.last, o.ds >= e.maxDs - epochResetSlackDs {
-                if o.ds >= e.maxDs { e.maxDs = o.ds; e.fallbackAnchorUnix = o.cu }
-                e.minDs = min(e.minDs, o.ds)
-                e.captureMin = min(e.captureMin, o.cu)
-                e.captureMax = max(e.captureMax, o.cu)
-                if o.tag == 0x42, let unix = (o.json["unix_time"] as? NSNumber)?.int64Value {
-                    e.anchors.append((o.ds, unix))
+        private let epochs: [Epoch]
+        private let anchorOffsetsDs: [Int64]
+
+        init(events: [Ev]) {
+            precondition(!events.isEmpty)
+            var built: [Epoch] = []
+            for event in events {
+                if var epoch = built.last,
+                   event.ds >= epoch.maxDs - Self.epochResetSlackDs {
+                    if event.ds >= epoch.maxDs {
+                        epoch.maxDs = event.ds
+                        epoch.fallbackAnchorUnix = event.cu
+                    }
+                    epoch.minDs = min(epoch.minDs, event.ds)
+                    epoch.captureMin = min(epoch.captureMin, event.cu)
+                    epoch.captureMax = max(epoch.captureMax, event.cu)
+                    if event.tag == 0x42,
+                       let unix = (event.json["unix_time"] as? NSNumber)?.int64Value {
+                        epoch.anchors.append((event.ds, unix))
+                    }
+                    built[built.count - 1] = epoch
+                } else {
+                    var anchors: [(Int64, Int64)] = []
+                    if event.tag == 0x42,
+                       let unix = (event.json["unix_time"] as? NSNumber)?.int64Value {
+                        anchors.append((event.ds, unix))
+                    }
+                    built.append(Epoch(minDs: event.ds, maxDs: event.ds,
+                                       captureMin: event.cu, captureMax: event.cu,
+                                       fallbackAnchorUnix: event.cu, anchors: anchors))
                 }
-                eps[eps.count - 1] = e
-            } else {
-                var anchors: [(Int64, Int64)] = []
-                if o.tag == 0x42, let unix = (o.json["unix_time"] as? NSNumber)?.int64Value {
-                    anchors.append((o.ds, unix))
-                }
-                eps.append(Epoch(minDs: o.ds, maxDs: o.ds, captureMin: o.cu,
-                                 captureMax: o.cu, fallbackAnchorUnix: o.cu, anchors: anchors))
             }
+            epochs = built
+            anchorOffsetsDs = built.flatMap(\.anchors)
+                .map { $0.unix * 10 - $0.ds }
+                .sorted()
         }
-        return eps
-    }
 
-    /// Map a raw ds to wall-clock seconds via the ring's authoritative time-sync
-    /// record. `capturedUnix` selects the right boot when ds ranges overlap.
-    static func unixSeconds(_ ds: Int64, _ eps: [Epoch], capturedUnix: Int64? = nil) -> Double {
-        let candidates = eps.filter {
-            ds >= $0.minDs - epochResetSlackDs && ds <= $0.maxDs + epochResetSlackDs
-        }
-        let e: Epoch
-        if let cu = capturedUnix, !candidates.isEmpty {
-            e = candidates.min { a, b in
-                func distance(_ x: Epoch) -> Int64 {
-                    if cu < x.captureMin { return x.captureMin - cu }
-                    if cu > x.captureMax { return cu - x.captureMax }
-                    return 0
+        /// Map a raw ds to wall-clock seconds via the ring's authoritative time-sync.
+        /// `capturedUnix` selects the right boot when ds ranges overlap.
+        func unixSeconds(_ ds: Int64, capturedUnix: Int64? = nil) -> Double {
+            let candidates = epochs.filter {
+                ds >= $0.minDs - Self.epochResetSlackDs
+                    && ds <= $0.maxDs + Self.epochResetSlackDs
+            }
+            let epoch: Epoch
+            if let capturedUnix, !candidates.isEmpty {
+                epoch = candidates.min { lhs, rhs in
+                    Self.captureDistance(capturedUnix, lhs)
+                        < Self.captureDistance(capturedUnix, rhs)
+                }!
+            } else {
+                epoch = candidates.min { ($0.maxDs - $0.minDs) < ($1.maxDs - $1.minDs) }
+                    ?? epochs[epochs.count - 1]
+            }
+            if let anchor = epoch.anchors.min(by: { abs($0.ds - ds) < abs($1.ds - ds) }) {
+                let predicted = Double(anchor.unix) + Double(ds - anchor.ds) / 10.0
+                if capturedUnix == nil
+                    || predicted <= Double(capturedUnix! + Self.futureSlackSeconds) {
+                    return predicted
                 }
-                return distance(a) < distance(b)
-            }!
-        } else {
-            e = candidates.min { ($0.maxDs - $0.minDs) < ($1.maxDs - $1.minDs) }
-                ?? eps[eps.count - 1]
-        }
-        if let a = e.anchors.min(by: { abs($0.ds - ds) < abs($1.ds - ds) }) {
-            let predicted = Double(a.unix) + Double(ds - a.ds) / 10.0
-            if capturedUnix == nil || predicted <= Double(capturedUnix!) + futureSlackSeconds {
+            }
+            if let capturedUnix,
+               let predicted = latestPlausibleProjection(ds, capturedUnix: capturedUnix) {
                 return predicted
             }
+            let fallback = Double(epoch.fallbackAnchorUnix)
+                - Double(epoch.maxDs - ds) / 10.0
+            return capturedUnix.map {
+                min(fallback, Double($0 + Self.futureSlackSeconds))
+            } ?? fallback
         }
-        if let cu = capturedUnix {
-            let plausible = eps.flatMap(\.anchors)
-                .map { Double($0.unix) + Double(ds - $0.ds) / 10.0 }
-                .filter { $0 <= Double(cu) + futureSlackSeconds }
-            if let predicted = plausible.max() { return predicted }
-        }
-        let fallback = Double(e.fallbackAnchorUnix) - Double(e.maxDs - ds) / 10.0
-        return capturedUnix.map { min(fallback, Double($0) + futureSlackSeconds) } ?? fallback
-    }
 
-    static func latestUnix(_ eps: [Epoch]) -> Int64 {
-        eps.flatMap(\.anchors).map(\.unix).max()
-            ?? eps.map(\.fallbackAnchorUnix).max()!
+        var latestUnix: Int64 {
+            epochs.flatMap(\.anchors).map(\.unix).max()
+                ?? epochs.map(\.fallbackAnchorUnix).max()!
+        }
+
+        private static func captureDistance(_ capturedUnix: Int64, _ epoch: Epoch) -> Int64 {
+            if capturedUnix < epoch.captureMin { return epoch.captureMin - capturedUnix }
+            if capturedUnix > epoch.captureMax { return capturedUnix - epoch.captureMax }
+            return 0
+        }
+
+        private func latestPlausibleProjection(_ ds: Int64, capturedUnix: Int64) -> Double? {
+            let maxOffset = (capturedUnix + Self.futureSlackSeconds) * 10 - ds
+            var low = 0
+            var high = anchorOffsetsDs.count
+            while low < high {
+                let middle = low + (high - low) / 2
+                if anchorOffsetsDs[middle] <= maxOffset {
+                    low = middle + 1
+                } else {
+                    high = middle
+                }
+            }
+            guard low > 0 else { return nil }
+            return Double(ds + anchorOffsetsDs[low - 1]) / 10.0
+        }
     }
 }
 #endif

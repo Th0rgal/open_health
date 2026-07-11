@@ -490,7 +490,7 @@ fn smooth_stages(vals: &[i64], win: usize) -> Vec<i64> {
             }
             (1..=4)
                 .max_by_key(|&k| counts[k as usize])
-                .unwrap_or(vals[i]) as i64
+                .unwrap_or(vals[i])
         })
         .collect()
 }

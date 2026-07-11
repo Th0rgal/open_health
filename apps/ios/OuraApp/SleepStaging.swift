@@ -17,9 +17,9 @@ enum SleepStaging {
         guard !events.isEmpty else { return ([:], nil) }
 
         // ms(ds) → absolute epoch ms, epoch-aware (ds resets on ring reboot; see EventStore)
-        let eps = EventStore.epochs(events)
+        let clock = EventStore.RingClock(events: events)
         func ms(_ ds: Int64, _ cu: Int64) -> Int64 {
-            Int64(EventStore.unixSeconds(ds, eps, capturedUnix: cu) * 1000)
+            Int64(clock.unixSeconds(ds, capturedUnix: cu) * 1000)
         }
 
         // distinct bedtime periods (dedup by start, keep longest), newest first

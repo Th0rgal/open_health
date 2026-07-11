@@ -1272,7 +1272,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "oura-analysis"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?branch=split-open-health#8bbe2616a52184d14cfd12f1125613a41d7b1cbc"
+source = "git+https://github.com/Th0rgal/open_oura?branch=split-open-health#e3ca846981fd56583a447cd9d18b46d89b571ce3"
 dependencies = [
  "oura-protocol",
  "serde",
@@ -1337,7 +1337,7 @@ dependencies = [
 [[package]]
 name = "oura-link"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?branch=split-open-health#8bbe2616a52184d14cfd12f1125613a41d7b1cbc"
+source = "git+https://github.com/Th0rgal/open_oura?branch=split-open-health#e3ca846981fd56583a447cd9d18b46d89b571ce3"
 dependencies = [
  "async-trait",
  "btleplug",
@@ -1353,7 +1353,7 @@ dependencies = [
 [[package]]
 name = "oura-protocol"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?branch=split-open-health#8bbe2616a52184d14cfd12f1125613a41d7b1cbc"
+source = "git+https://github.com/Th0rgal/open_oura?branch=split-open-health#e3ca846981fd56583a447cd9d18b46d89b571ce3"
 dependencies = [
  "aes",
  "hex",
@@ -1365,7 +1365,7 @@ dependencies = [
 [[package]]
 name = "oura-store"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?branch=split-open-health#8bbe2616a52184d14cfd12f1125613a41d7b1cbc"
+source = "git+https://github.com/Th0rgal/open_oura?branch=split-open-health#e3ca846981fd56583a447cd9d18b46d89b571ce3"
 dependencies = [
  "oura-protocol",
  "rusqlite",

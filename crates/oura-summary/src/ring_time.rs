@@ -22,6 +22,10 @@ const FUTURE_SLACK_S: f64 = 6.0 * 3600.0;
 /// Maps the ring's rebooting relative clock onto UTC.
 pub(crate) struct RingClock {
     epochs: Vec<Epoch>,
+    // `unix * 10 - ring_ds` is the UTC projection offset in deciseconds.
+    // Sorted once so replay recovery can find the newest plausible projection
+    // in O(log n) instead of scanning every time-sync anchor for every event.
+    anchor_offsets_ds: Vec<i64>,
 }
 
 impl RingClock {
@@ -58,7 +62,21 @@ impl RingClock {
                 }
             }
         }
-        Self { epochs }
+        let mut anchor_offsets_ds = epochs
+            .iter()
+            .flat_map(|epoch| {
+                epoch
+                    .anchors
+                    .iter()
+                    .map(|(ds, unix)| unix.saturating_mul(10).saturating_sub(*ds))
+            })
+            .collect::<Vec<_>>();
+        anchor_offsets_ds.sort_unstable();
+        anchor_offsets_ds.dedup();
+        Self {
+            epochs,
+            anchor_offsets_ds,
+        }
     }
 
     pub(crate) fn unix_s(&self, ds: i64, captured_unix: i64) -> f64 {
@@ -79,14 +97,7 @@ impl RingClock {
         // high-ds events are appended at today's capture time and can look like a
         // continuation of the new boot. If that epoch predicts the future, select the
         // most recent globally plausible time-sync projection instead.
-        if let Some(predicted) = self
-            .epochs
-            .iter()
-            .flat_map(|e| e.anchors.iter())
-            .map(|(anchor_ds, anchor_unix)| *anchor_unix as f64 + (ds - *anchor_ds) as f64 / 10.0)
-            .filter(|predicted| *predicted <= captured_unix as f64 + FUTURE_SLACK_S)
-            .max_by(f64::total_cmp)
-        {
+        if let Some(predicted) = self.latest_plausible_projection(ds, captured_unix) {
             return predicted;
         }
 
@@ -126,6 +137,18 @@ impl RingClock {
                 }
             })
             .unwrap_or_else(|| self.epochs.last().expect("events is non-empty"))
+    }
+
+    fn latest_plausible_projection(&self, ds: i64, captured_unix: i64) -> Option<f64> {
+        let max_offset = captured_unix
+            .saturating_add(FUTURE_SLACK_S as i64)
+            .saturating_mul(10)
+            .saturating_sub(ds);
+        let end = self
+            .anchor_offsets_ds
+            .partition_point(|offset| *offset <= max_offset);
+        let offset = *self.anchor_offsets_ds.get(end.checked_sub(1)?)?;
+        Some(ds.saturating_add(offset) as f64 / 10.0)
     }
 }
 
@@ -174,6 +197,7 @@ mod tests {
                     anchors: vec![(500_000, 1_800_000_000)],
                 },
             ],
+            anchor_offsets_ds: vec![1_700_000_000 * 10 - 5_000_000, 1_800_000_000 * 10 - 500_000],
         };
         assert_eq!(clock.unix_s(400_000, 1_800_000_250), 1_799_990_000.0);
     }

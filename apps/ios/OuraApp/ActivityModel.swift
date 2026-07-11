@@ -28,10 +28,10 @@ enum ActivityModel {
         let events = EventStore.decodedEvents(dbPath: DB.readPath())
         guard !events.isEmpty else { return ([], nil) }
 
-        let eps = EventStore.epochs(events)
-        let anchor = EventStore.latestUnix(eps)
+        let clock = EventStore.RingClock(events: events)
+        let anchor = clock.latestUnix
         func unixMin(_ e: EventStore.Ev) -> Double {
-            EventStore.unixSeconds(e.ds, eps, capturedUnix: e.cu) / 60.0
+            clock.unixSeconds(e.ds, capturedUnix: e.cu) / 60.0
         }
         // Base the offset on the earliest wall-clock (not the smallest ds — after a reset
         // the smallest ds belongs to the newest epoch and is NOT the earliest in time).

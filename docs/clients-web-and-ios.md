@@ -189,3 +189,7 @@ ring's ds restarts low, so an empty incremental fetch verifies that the event im
 before the saved cursor still exists. If that marker is absent, the native iOS core
 checkpoints cursor 0 and drains the new boot epoch automatically. This also recovers
 cursors poisoned by the pre-`d409f9e` extended-envelope timestamp decoder.
+The link layer also rejects any single-batch cursor jump beyond 180 days. A physical
+Ring 5 validation exposed malformed tail envelopes with near-`u32::MAX` timestamps;
+discarding those impossible records prevents a new poisoned cursor while preserving
+the surrounding valid events and terminal summary.
