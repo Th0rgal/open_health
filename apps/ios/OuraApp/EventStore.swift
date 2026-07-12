@@ -7,7 +7,13 @@ import Foundation
 // (CvaModel reads raw PPG blobs instead, so it opens the DB itself).
 enum EventStore {
     // A decoded event row: ring timestamp (ds), tag, decoded JSON, capture unix time.
-    struct Ev { let ds: Int64; let tag: Int; let json: [String: Any]; let cu: Int64 }
+    struct Ev {
+        let ds: Int64
+        let tag: Int
+        let json: [String: Any]
+        let cu: Int64
+        let body: Data?
+    }
 
     /// All events with decoded JSON, ordered by ring timestamp. Empty on any failure.
     static func decodedEvents(dbPath: String) -> [Ev] {
@@ -17,16 +23,23 @@ enum EventStore {
 
         var events: [Ev] = []
         var stmt: OpaquePointer?
-        let sql = "SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events WHERE decoded_json IS NOT NULL ORDER BY captured_unix, id"
+        let sql = "SELECT ring_timestamp, tag, decoded_json, captured_unix, body FROM events WHERE decoded_json IS NOT NULL ORDER BY captured_unix, id"
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             while sqlite3_step(stmt) == SQLITE_ROW {
                 guard let cText = sqlite3_column_text(stmt, 2),
                       let data = String(cString: cText).data(using: .utf8),
                       let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+                let body: Data?
+                if let bytes = sqlite3_column_blob(stmt, 4) {
+                    body = Data(bytes: bytes, count: Int(sqlite3_column_bytes(stmt, 4)))
+                } else {
+                    body = nil
+                }
                 events.append(Ev(ds: sqlite3_column_int64(stmt, 0),
                                  tag: Int(sqlite3_column_int(stmt, 1)),
                                  json: obj,
-                                 cu: sqlite3_column_int64(stmt, 3)))
+                                 cu: sqlite3_column_int64(stmt, 3),
+                                 body: body))
             }
         }
         sqlite3_finalize(stmt)

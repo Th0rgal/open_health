@@ -28,14 +28,21 @@ int oura_cva(const char *model_path, const float *ppg, int n_segs, const float *
              double *out_vascular_age, double *out_pwv);
 
 // Activity sessions (automatic_activity_detection): mirrors run_activity_model.py's
-// forward(context[4], user[14], met[n_met×2], step_stub[2×12], motion[n_motion×9],
+// forward(context[4], user[14], met[n_met×2], step[n_step×12], motion[n_motion×9],
 //   temp[n_temp×2], hr[n_hr×2], None, None, threshold, min_duration, 0.0). Writes
 // workouts row-major into out_workouts (max_rows × 9 =
 // [start_min, end_min, is_workout, id1,p1, id2,p2, id3,p3]); returns rows / -1.
 int oura_activity(const char *model_path, const float *context, const float *user,
-                  const float *met, int n_met, const float *motion, int n_motion,
+                  const float *met, int n_met, const float *step, int n_step,
+                  const float *motion, int n_motion,
                   const float *temp, int n_temp, const float *hr, int n_hr,
                   float threshold, float min_duration, float *out_workouts, int max_rows);
+
+// Decode Ring 5 real-step packets with Oura's steps_motion_decoder. `raw` is
+// N×27 quantized input and timestamps are Unix milliseconds. Returns 3N rows.
+int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
+                    const float *raw, int n_raw, int64_t *out_timestamps_ms,
+                    float *out_features, int max_rows);
 #ifdef __cplusplus
 }
 #endif

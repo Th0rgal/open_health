@@ -8,6 +8,7 @@
 #include <torch/csrc/jit/mobile/module.h>
 #include <ATen/ATen.h>
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -78,11 +79,21 @@ static at::Tensor mat(const float *p, int rows, int cols) {
 }
 
 int oura_activity(const char *model_path, const float *context, const float *user,
-                  const float *met, int n_met, const float *motion, int n_motion,
+                  const float *met, int n_met, const float *step, int n_step,
+                  const float *motion, int n_motion,
                   const float *temp, int n_temp, const float *hr, int n_hr,
                   float threshold, float min_duration, float *out_workouts, int max_rows) {
     try {
-        auto m = torch::jit::_load_for_mobile(std::string(model_path), c10::nullopt);
+        // ActivityModel calls once per retained local day. Loading the 15 MB module
+        // for every day dominated sync time, so retain it for the process lifetime.
+        static std::unique_ptr<torch::jit::mobile::Module> cached;
+        static std::string cached_path;
+        if (!cached || cached_path != model_path) {
+            cached = std::make_unique<torch::jit::mobile::Module>(
+                torch::jit::_load_for_mobile(std::string(model_path), c10::nullopt));
+            cached_path = model_path;
+        }
+        auto &m = *cached;
         auto context_t = at::from_blob((void *)context, {4}, at::kFloat).clone();
         auto user_t = at::from_blob((void *)user, {14}, at::kFloat).clone();
         auto met_t = mat(met, n_met, 2);
@@ -90,11 +101,7 @@ int oura_activity(const char *model_path, const float *context, const float *use
         auto temp_t = mat(temp, n_temp, 2);
         auto hr_t = mat(hr, n_hr, 2);
 
-        // stepmotion stub [2,12]: NaN features spanning the met time range
-        auto step_t = at::full({2, 12}, std::nanf(""), at::kFloat);
-        auto sa = step_t.accessor<float, 2>();
-        sa[0][0] = n_met > 0 ? met[0] : 0.f;
-        sa[1][0] = n_met > 0 ? met[(n_met - 1) * 2] : 0.f;
+        auto step_t = mat(step, n_step, 12);
 
         auto thr = at::full({}, threshold, at::kFloat);   // 0-dim scalars
         auto mind = at::full({}, min_duration, at::kFloat);
@@ -106,6 +113,34 @@ int oura_activity(const char *model_path, const float *context, const float *use
         int n = std::min<int>((int)workouts.size(0), max_rows);
         const float *wp = workouts.data_ptr<float>();
         for (int i = 0; i < n * 9; i++) out_workouts[i] = wp[i];
+        return n;
+    } catch (const std::exception &e) {
+        return -1;
+    }
+}
+
+int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
+                    const float *raw, int n_raw, int64_t *out_timestamps_ms,
+                    float *out_features, int max_rows) {
+    try {
+        static std::unique_ptr<torch::jit::mobile::Module> cached;
+        static std::string cached_path;
+        if (!cached || cached_path != model_path) {
+            cached = std::make_unique<torch::jit::mobile::Module>(
+                torch::jit::_load_for_mobile(std::string(model_path), c10::nullopt));
+            cached_path = model_path;
+        }
+        auto &m = *cached;
+        auto timestamps = blobLong(timestamps_ms, n_raw);
+        auto data = blobFloat2d(raw, n_raw, 27);
+        auto result = m.forward({timestamps, data}).toTuple();
+        auto out_ts = result->elements()[0].toTensor().reshape({-1}).to(at::kLong).contiguous();
+        auto out_data = result->elements()[1].toTensor().to(at::kFloat).contiguous();
+        int n = std::min<int>((int)out_data.size(0), max_rows);
+        const int64_t *tp = out_ts.data_ptr<int64_t>();
+        const float *fp = out_data.data_ptr<float>();
+        for (int i = 0; i < n; i++) out_timestamps_ms[i] = tp[i];
+        for (int i = 0; i < n * 11; i++) out_features[i] = fp[i];
         return n;
     } catch (const std::exception &e) {
         return -1;

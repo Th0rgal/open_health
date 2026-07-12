@@ -83,6 +83,8 @@ targets:
         buildPhase: resources
       - path: ../../../notes/models/mobile/automatic_activity_detection_3_1_11.ptl
         buildPhase: resources
+      - path: ../../../notes/models/mobile/steps_motion_decoder_2_0_0.ptl
+        buildPhase: resources
       - path: ../../../oura.db
         buildPhase: resources
     dependencies:

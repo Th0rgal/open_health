@@ -12,7 +12,7 @@ normal path and this script directly for `--json`, `--verbose`, or a custom
 `--threshold`/`--min-duration`.
 
 ```
-python tools/run_activity_model.py [DB] [--tz HOURS] [--threshold P] [--json] [--verbose]
+python tools/run_activity_model.py [DB] [--tz HOURS] [--threshold P] [--date YYYY-MM-DD] [--json]
 oura sessions --tz-offset 1            # same thing, via the CLI
 ```
 `DB` defaults to `./oura.db` then `captures/ring5.db`. Requires `torch` (CPU is
@@ -20,10 +20,10 @@ fine) in the venv. The model lives in `notes/models/`.
 
 ## In-process (Rust + LibTorch, no Python at runtime)
 
-Built with `--features torch`, `oura sessions` runs the model in-process via the
-`tch` crate (LibTorch C bindings) instead of shelling out — bit-identical output
-(verified against the Python runner; only a ±0.001 display-rounding and JSON
-key-order differ). The header then reads `… in-process via LibTorch`.
+Built with `--features torch`, `oura sessions` can run the base model in-process via
+the `tch` crate. That legacy path does not yet run `steps_motion_decoder`; use the
+default Python-backed command (and the web dashboard, which uses it) for the
+Android-parity labels documented here.
 
 On Apple Silicon the only libtorch is the pip wheel, so the repo **venv is aligned
 to torch 2.9.0** (Python 3.11) — the exact version `tch 0.22` targets — and we link
@@ -45,20 +45,20 @@ Version coupling: `tch X` pins one exact libtorch (0.20→2.7, 0.22→2.9, 0.24�
 there is **no 2.8 release**. The venv torch must match the `tch` pin, and torch
 ≥2.9 needs Python ≥3.10. If you bump either, bump both together.
 
-## What works / what doesn't
+## Android parity
 
-- ✅ **Activity/workout *detection*** works from our data. On `ring5.db` it finds
-  4 segments incl. the real swim (10:58–11:21, 23 min) with the highest
-  `is_workout` confidence (0.91).
-- ⚠️ **Activity *type* classification is unreliable.** The swim is typed
-  walking/yardwork/basketball ~0.42 (low, tied), not `swimming`. The model's main
-  type discriminator is the **`stepmotion`** (stride/gait) channel, which we
-  **stub with NaN** — we have no source for it (it comes from
-  `steps_motion_decoder` fed raw ACM, i.e. the capability-locked RData path; see
-  `docs/rdata-capacity-probe.md`). HR is also unreliable underwater.
+The decompiled Android app uses this same 3.1.11 model. Its important preprocessing
+steps are now mirrored here and in iOS:
 
-So: auto-detecting *when* activities happen is reachable today; reliably typing
-them (esp. swimming) is gated on the same raw-data wall as everything else.
+- one inference per local calendar day; model time is minutes since local midnight;
+- a 10-minute minimum duration;
+- all three gait sub-windows from `steps_motion_decoder_2_0_0`;
+- the decoder's columns reordered through Android's `StepMotionFeature` schema.
+
+The ring exposes the decoder input directly as paired `real_step` events (0x7e/0x7f),
+so raw RData is not required. On a retained Ring 5 replay this changes a known hike
+from `cycling` 0.45 to `hiking` 0.97, while a known bike remains `cycling` 0.92 and
+an immersion interval is classified `swimming` 0.99.
 
 ## I/O contract (as implemented)
 
@@ -74,7 +74,7 @@ All series are float32 2-D, **column 0 = time in minutes** on one shared axis.
 | motion | `[t, orient, motion_s, ax, ay, az, NaN(regular_motion), low_int, high_int]` | 0x47 |
 | temperature | `[t, temps_c[0]]` | 0x46 |
 | heartrate | `[t, mean(hr_bpm)]` | 0x80 |
-| stepmotion | 12 cols — **NaN stub spanning [first,last] t** | none |
+| stepmotion | 12 cols — timestamp + 11 gait features | paired 0x7e/0x7f → `steps_motion_decoder` |
 
 Output `workouts[n,9]` = `[start_min, end_min, is_workout_prob, id1,p1, id2,p2,
 id3,p3]` (corrected from the spec, which called col 2 "duration"). `id`→name via
@@ -82,20 +82,17 @@ the behavior table in the script (swimming=13, walking=14, cycling=5, …).
 
 ## Gotchas learned the hard way
 
-- **Time axis must be float32-exact.** Unix-minutes (~29.7 M) exceed float32's
-  2²⁴ integer precision and silently break the model's exact-equality time
-  alignment → rebase by whole days (preserves time-of-day, which the model uses
-  mod-1440).
-- **stepmotion stub must span the full time range.** The model derives
-  `last_valid_time` from the last timestamp of *every* series; a single-row stub
-  at the first minute truncates everything to one minute and crashes HR alignment.
+- **Run each day independently.** This is both the Android contract and keeps the
+  minute axis exactly representable in float32.
+- **Decoder order is not AAD order.** `steps_motion_decoder` emits
+  `sum,y,z,total,strideFreq,…`; Android's `px.b` maps that to
+  `firstFreq,firstAmp,high,mid,gait,…,sum,total,y,z` before AAD.
+- **stepmotion boundary rows must span the day's MET range.** The model derives
+  `last_valid_time` from every series; missing boundaries can truncate a day.
 - **Ring `ring_timestamp` is device-relative deciseconds**, not unix — anchor to
   the latest event's `captured_unix` (as `oura sessions` does).
 - Open calibration unknowns: ACM `avg_*` scaling (env `ACM_SCALE`, default 1) and
   temperature-probe choice (using index 0).
 
-## To improve type accuracy
-
-Wire up `steps_motion_decoder_2_0_0.pt` to produce real `stepmotion` — but it
-needs raw ACM, which is the RData capability we can't enable on a consumer ring.
-Without it, type classification stays weak; detection is the usable capability.
+GPS and past-activity inputs are still absent, so sports without gait can remain
+ambiguous. `--no-stepmotion` exists only to compare against the old partial pipeline.
