@@ -549,10 +549,11 @@ async fn cmd_feature_status(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
 /// equivalent `tools/run_activity_model.py`. Either way the model — not a
 /// heuristic — produces the labels.
 fn cmd_sessions(cli: &Cli, tz_offset: i64, threshold: f64, json: bool) -> Result<()> {
-    // The model file is a stable marker present for both backends.
+    // The runner is owned by open_health. Private model files may be supplied
+    // separately (OURA_MODELS_DIR) or live in the sibling open_oura checkout.
     let root = pyrunner::require_repo_root(
-        Path::new("notes/models/automatic_activity_detection_3_1_11.pt"),
-        "the model under notes/models (run `oura sessions` from inside the checkout)",
+        Path::new("tools/run_activity_model.py"),
+        "the activity runner (run `oura sessions` from inside the open_health checkout)",
     )?;
     let db = pyrunner::resolve_db(&cli.db)?;
 
@@ -811,6 +812,61 @@ async fn cmd_info(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
     Ok(())
 }
 
+fn is_rejected_history_cursor(error: &str) -> bool {
+    error.contains("extended history request failed with result code 0xff")
+}
+
+async fn drain_events_into_store(
+    client: &OuraClient<BleTransport>,
+    store: &Store,
+    serial: &str,
+    cursor: u32,
+    inserted: &std::cell::Cell<u32>,
+) -> Result<(u32, u32)> {
+    let db_err = std::cell::RefCell::new(None);
+    let cursor_advanced = std::cell::Cell::new(false);
+    let outcome = client
+        .drain_events(
+            cursor,
+            |ev| {
+                if db_err.borrow().is_some() {
+                    return false;
+                }
+                match store.insert_event(serial, ev) {
+                    Ok(true) => inserted.set(inserted.get() + 1),
+                    Ok(false) => {}
+                    Err(e) => *db_err.borrow_mut() = Some(e),
+                }
+                db_err.borrow().is_none()
+            },
+            |p| {
+                if db_err.borrow().is_some() {
+                    return false;
+                }
+                match store.set_cursor(serial, p.next_cursor) {
+                    Ok(()) => cursor_advanced.set(true),
+                    Err(e) => *db_err.borrow_mut() = Some(e),
+                }
+                println!(
+                    "  … {} events so far, ~{:.1} KB left on ring",
+                    p.events_synced,
+                    p.bytes_left as f64 / 1024.0
+                );
+                db_err.borrow().is_none()
+            },
+        )
+        .await?;
+    if let Some(e) = db_err.into_inner() {
+        let ctx = if cursor_advanced.get() {
+            "storing event during sync (cursor advanced through earlier batches)"
+        } else {
+            "storing event during sync (cursor not advanced)"
+        };
+        return Err(e).context(ctx);
+    }
+    Ok((outcome.events_synced, outcome.next_cursor))
+}
+
 async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<()> {
     let key = key
         .as_ref()
@@ -836,61 +892,27 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
     let cursor = store.cursor(&serial)?;
     println!("Syncing events for {serial} from cursor {cursor} ...");
 
-    let mut inserted = 0u32;
-    // Capture any DB error (insert or cursor write) so a failure surfaces loudly
-    // instead of being swallowed — and so the cursor is never advanced past events
-    // we failed to store (which would drop them permanently on the next sync).
-    let db_err = std::cell::RefCell::new(None);
-    // Track whether any batch cursor was actually persisted, so the error message
-    // below is accurate even when earlier batches already advanced the cursor.
-    let cursor_advanced = std::cell::Cell::new(false);
-    let outcome = client
-        .drain_events(
-            cursor,
-            |ev| {
-                if db_err.borrow().is_some() {
-                    return false;
-                }
-                match store.insert_event(&serial, ev) {
-                    Ok(true) => inserted += 1,
-                    Ok(false) => {}
-                    Err(e) => *db_err.borrow_mut() = Some(e),
-                }
-                db_err.borrow().is_none()
-            },
-            // Persist the cursor after each fully-drained batch (so an interrupted
-            // sync still makes progress) — but not once a DB write has failed. A
-            // failed cursor write is itself recorded so it can't be silently lost.
-            |p| {
-                if db_err.borrow().is_some() {
-                    return false;
-                }
-                match store.set_cursor(&serial, p.next_cursor) {
-                    Ok(()) => cursor_advanced.set(true),
-                    Err(e) => *db_err.borrow_mut() = Some(e),
-                }
-                println!(
-                    "  … {} events so far, ~{:.1} KB left on ring",
-                    p.events_synced,
-                    p.bytes_left as f64 / 1024.0
-                );
-                db_err.borrow().is_none()
-            },
-        )
-        .await?;
-    if let Some(e) = db_err.into_inner() {
-        let ctx = if cursor_advanced.get() {
-            "storing event during sync (cursor advanced through earlier batches)"
-        } else {
-            "storing event during sync (cursor not advanced)"
-        };
-        return Err(e).context(ctx);
-    }
+    let inserted = std::cell::Cell::new(0u32);
+    let first = drain_events_into_store(&client, &store, &serial, cursor, &inserted).await;
+    let (events_synced, next_cursor) = match first {
+        Ok(outcome) => outcome,
+        Err(error) if cursor > 0 && is_rejected_history_cursor(&error.to_string()) => {
+            // Match the native/iOS recovery path. Ring 5 may reject a stale
+            // cursor while retaining readable history. Checkpoint zero first so
+            // an interrupted recovery resumes safely; inserts are deduplicated.
+            store.set_cursor(&serial, 0)?;
+            println!("  … ring rejected saved cursor {cursor}; replaying retained history");
+            drain_events_into_store(&client, &store, &serial, 0, &inserted).await?
+        }
+        Err(error) => return Err(error),
+    };
 
-    store.set_cursor(&serial, outcome.next_cursor)?;
+    store.set_cursor(&serial, next_cursor)?;
     println!(
         "Done: {} events received, {} new rows, next cursor {}.",
-        outcome.events_synced, inserted, outcome.next_cursor
+        events_synced,
+        inserted.get(),
+        next_cursor
     );
 
     // While connected + authed, snapshot the real on-ring feature modes so the
@@ -1393,4 +1415,17 @@ async fn cmd_events(cli: &Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_rejected_history_cursor;
+
+    #[test]
+    fn recognizes_ring5_rejected_history_cursor() {
+        assert!(is_rejected_history_cursor(
+            "protocol error: extended history request failed with result code 0xff"
+        ));
+        assert!(!is_rejected_history_cursor("BLE link lost mid-batch"));
+    }
 }

@@ -12,7 +12,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use oura_store::storage::Store;
 use tch::{CModule, IValue, Kind, Tensor};
 
-const MODEL_REL: &str = "notes/models/automatic_activity_detection_3_1_11.pt";
+const MODEL_FILE: &str = "automatic_activity_detection_3_1_11.pt";
 const MODEL_VERSION: &str = "3.1.11";
 
 /// behavior-id -> name, from the model's behavior table (ActivityTypes.json).
@@ -103,7 +103,7 @@ struct Session {
 }
 
 pub fn run(db: &Path, root: &Path, tz: i64, threshold: f64, json: bool) -> Result<()> {
-    let model = root.join(MODEL_REL);
+    let model = crate::pyrunner::model_path(root, MODEL_FILE);
     if !model.is_file() {
         bail!("model not found: {}", model.display());
     }

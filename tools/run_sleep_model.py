@@ -16,11 +16,12 @@ import sys, json, sqlite3, datetime
 from pathlib import Path
 import torch
 
-from _common import resolve_db
+from _common import resolve_db, resolve_models_dir
 
 REPO = Path(__file__).resolve().parent.parent
 TZ = 1
-MODEL = str(REPO / "notes" / "models" / "sleepnet_moonstone_1_2_0.pt")
+MODEL_NAME = "sleepnet_moonstone_1_2_0.pt"
+MODEL = str(resolve_models_dir(REPO, MODEL_NAME) / MODEL_NAME)
 STAGE = {1: "DEEP", 2: "LIGHT", 3: "REM", 4: "WAKE"}
 
 JSON = "--json" in sys.argv

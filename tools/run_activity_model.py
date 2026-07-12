@@ -31,13 +31,14 @@ import warnings
 
 import torch
 
-from _common import resolve_db
+from _common import resolve_db, resolve_models_dir
 
 # The model triggers a benign non-contiguous torch.searchsorted perf warning.
 warnings.filterwarnings("ignore", message=".*searchsorted.*")
 
 REPO = Path(__file__).resolve().parent.parent
-MODEL = REPO / "notes" / "models" / "automatic_activity_detection_3_1_11.pt"
+MODEL_NAME = "automatic_activity_detection_3_1_11.pt"
+MODEL = resolve_models_dir(REPO, MODEL_NAME) / MODEL_NAME
 MODEL_VERSION = "3.1.11"
 
 # behavior-id -> name, from the model's behavior table (ActivityTypes.json).
