@@ -13,7 +13,10 @@
     <header class="top">
       <div class="brand">
         <span class="mark" aria-hidden="true"></span>
-        <span class="word">open_oura</span>
+        <span class="brand-copy">
+          <span class="word">open_oura</span>
+          <span class="brand-meta">local health observatory</span>
+        </span>
       </div>
       <div class="actions">
         <span id="batt" class="batt" title="Ring battery"></span>
@@ -35,51 +38,60 @@
       </div>
     </header>
 
-    <p id="digest" class="digest skeleton skeleton-text">&nbsp;</p>
+    <section class="brief" aria-labelledby="brief-label">
+      <span id="brief-label" class="brief-label">Latest interpretation</span>
+      <p id="digest" class="digest skeleton skeleton-text">&nbsp;</p>
+    </section>
 
-    <section class="panel" id="day-panel">
-      <div class="panel-head">
-        <h2><span class="ic" style="--i:url(/icons/moon.svg)"></span>Your day</h2>
-        <div class="legend" id="sleep-legend" hidden>
-          <span><i class="sw deep"></i>Deep</span>
-          <span><i class="sw light"></i>Light</span>
-          <span><i class="sw rem"></i>REM</span>
-          <span><i class="sw wake"></i>Awake</span>
+    <main class="dashboard-grid">
+      <div class="dashboard-main">
+        <section class="panel" id="day-panel">
+          <div class="panel-head">
+            <h2><span class="ic" style="--i:url(/icons/moon.svg)"></span>Your day</h2>
+            <div class="legend" id="sleep-legend" hidden>
+              <span><i class="sw deep"></i>Deep</span>
+              <span><i class="sw light"></i>Light</span>
+              <span><i class="sw rem"></i>REM</span>
+              <span><i class="sw wake"></i>Awake</span>
+            </div>
+          </div>
+          <div id="day" class="day">
+            <div class="skeleton skeleton-block"></div>
+          </div>
+        </section>
+
+        <section class="tiles" id="tiles" aria-label="Key vitals">
+          <article class="tile skeleton"></article>
+          <article class="tile skeleton"></article>
+          <article class="tile skeleton"></article>
+          <article class="tile skeleton"></article>
+        </section>
+
+        <div class="cols-2" id="clinical-grid">
+          <section class="panel" id="cardio-panel">
+            <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/heartbeat.svg)"></span>Cardiovascular</h2></div>
+            <div id="cardio" class="cardio-body"><div class="skeleton skeleton-block"></div></div>
+          </section>
+
+          <section class="panel" id="spo2-panel">
+            <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/wind.svg)"></span>Blood oxygen</h2></div>
+            <div id="spo2" class="spo2-body"><div class="skeleton skeleton-block"></div></div>
+          </section>
         </div>
       </div>
-      <div id="day" class="day">
-        <div class="skeleton skeleton-block"></div>
-      </div>
-    </section>
 
-    <section class="panel" id="sleep-debt-panel">
-      <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/moon.svg)"></span>Sleep debt</h2></div>
-      <div id="sleep-debt" class="sleep-debt"><div class="skeleton skeleton-block"></div></div>
-    </section>
+      <aside class="dashboard-side">
+        <section class="panel" id="sleep-debt-panel">
+          <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/moon.svg)"></span>Sleep debt</h2></div>
+          <div id="sleep-debt" class="sleep-debt"><div class="skeleton skeleton-block"></div></div>
+        </section>
 
-    <section class="tiles" id="tiles" aria-label="Key vitals">
-      <article class="tile skeleton"></article>
-      <article class="tile skeleton"></article>
-      <article class="tile skeleton"></article>
-      <article class="tile skeleton"></article>
-    </section>
-
-    <div class="cols-2">
-      <section class="panel" id="cardio-panel">
-        <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/heartbeat.svg)"></span>Cardiovascular</h2></div>
-        <div id="cardio" class="cardio-body"><div class="skeleton skeleton-block"></div></div>
-      </section>
-
-      <section class="panel" id="spo2-panel">
-        <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/wind.svg)"></span>Blood oxygen</h2></div>
-        <div id="spo2" class="spo2-body"><div class="skeleton skeleton-block"></div></div>
-      </section>
-    </div>
-
-    <section class="panel" id="device-panel">
-      <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/cpu.svg)"></span>Device &amp; data health</h2></div>
-      <div id="device" class="device"><div class="skeleton skeleton-block"></div></div>
-    </section>
+        <section class="panel" id="device-panel">
+          <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/cpu.svg)"></span>Device &amp; data health</h2></div>
+          <div id="device" class="device"><div class="skeleton skeleton-block"></div></div>
+        </section>
+      </aside>
+    </main>
 
     <footer class="foot">
       <span>Everything here is computed on this machine. Nothing left the device.</span>

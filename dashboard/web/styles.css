@@ -23,9 +23,9 @@
   --rem: #4fa6b0;
   --wake: #d2b06e;
 
-  --radius: 8px;
-  --radius-sm: 5px;
-  --maxw: 1000px;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --maxw: 1240px;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
   /* editorial display serif (system-only, no network — keeps the dashboard offline) */
@@ -124,7 +124,9 @@ html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
   font-family: var(--sans);
-  background: var(--bg);
+  background:
+    radial-gradient(900px 520px at 12% -12%, color-mix(in oklab, var(--accent) 5%, transparent), transparent 68%),
+    var(--bg);
   color: var(--text);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -134,7 +136,7 @@ body {
 .wrap {
   max-width: var(--maxw);
   margin: 0 auto;
-  padding: clamp(28px, 5vh, 64px) clamp(20px, 4vw, 40px) clamp(64px, 10vh, 120px);
+  padding: clamp(20px, 3.5vh, 44px) clamp(20px, 3vw, 40px) clamp(64px, 10vh, 120px);
 }
 
 /* ── header (flat instrument bar, hairline underline) ───── */
@@ -145,9 +147,11 @@ body {
   position: sticky;
   top: 0;
   z-index: 30;
-  margin-bottom: var(--s5);
+  margin-bottom: var(--s4);
   padding: var(--s2) 2px var(--s3);
-  background: var(--bg);
+  background: color-mix(in oklab, var(--bg) 88%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(130%);
   border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 11px; }
@@ -157,6 +161,11 @@ body {
   box-shadow: inset 0 0 0 3px var(--bg);
 }
 .word { font-weight: 600; letter-spacing: -0.01em; font-size: 16px; }
+.brand-copy { display: flex; align-items: baseline; gap: 11px; min-width: 0; }
+.brand-meta {
+  font-family: var(--mono); font-size: 9px; line-height: 1;
+  color: var(--faint); letter-spacing: 0.11em; text-transform: uppercase;
+}
 
 .actions { display: flex; align-items: center; gap: 8px; }
 .batt {
@@ -185,13 +194,22 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .action.syncing .ic { animation: none; } }
 
-/* ── digest (restrained status line, not an editorial hero) ── */
+/* ── latest interpretation: a compact lab-note band ───────── */
+.brief {
+  display: grid; grid-template-columns: 168px minmax(0, 1fr); align-items: baseline;
+  gap: var(--s4); margin: 0 0 var(--s4); padding: var(--s3) 2px var(--s4);
+  border-bottom: 1px solid var(--line-soft);
+}
+.brief-label {
+  font-family: var(--mono); font-size: 9.5px; font-weight: 600;
+  color: var(--faint); letter-spacing: 0.1em; text-transform: uppercase;
+}
 .digest {
   font-family: var(--sans);
   font-size: 15px;
   line-height: 1.5;
   font-weight: 400;
-  margin: 0 0 var(--s5);
+  margin: 0;
   max-width: 78ch;
   color: var(--muted);
 }
@@ -265,6 +283,21 @@ body {
   padding: var(--s5);
   margin-top: var(--s5);
 }
+
+/* ── desktop research workspace ─────────────────────────── */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.78fr) minmax(340px, 0.92fr);
+  gap: 20px;
+  align-items: start;
+}
+.dashboard-main, .dashboard-side { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.dashboard-grid .panel,
+.dashboard-grid .tiles,
+.dashboard-grid .cols-2 { margin-top: 0; margin-bottom: 0; }
+.dashboard-grid #device-panel .device { grid-template-columns: 1fr; gap: 20px; }
+.dashboard-grid #device-panel .dh-stats { grid-template-columns: repeat(2, 1fr); }
+.dashboard-grid #device-panel .dh-advanced { margin-top: 0; }
 .panel-head {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: var(--s4); padding-bottom: var(--s3); border-bottom: 1px solid var(--line-soft);
@@ -622,10 +655,38 @@ body.page-open { overflow: hidden; }
 }
 
 /* ── responsive ─────────────────────────────────────────── */
+@media (max-width: 1080px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  .dashboard-main, .dashboard-side { display: contents; }
+  .dashboard-grid #day-panel { grid-row: 1; }
+  .dashboard-grid #sleep-debt-panel { grid-row: 2; }
+  .dashboard-grid #tiles { grid-row: 3; }
+  .dashboard-grid #clinical-grid { grid-row: 4; }
+  .dashboard-grid #device-panel { grid-row: 5; }
+  .dashboard-grid #device-panel .device { grid-template-columns: repeat(2, 1fr); }
+  .dashboard-grid #device-panel .dh-stats { grid-template-columns: repeat(4, 1fr); }
+}
 @media (max-width: 760px) {
+  .wrap { padding-inline: 16px; }
+  .brand-meta { display: none; }
+  .brief { grid-template-columns: 1fr; gap: var(--s2); }
   .tiles { grid-template-columns: repeat(2, 1fr); }
   .cols-2 { grid-template-columns: 1fr; }
   .dh-stats { grid-template-columns: 1fr; }
+  .dashboard-grid #device-panel .device { grid-template-columns: 1fr; }
+  .dashboard-grid #device-panel .dh-stats { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 520px) {
+  .top { align-items: flex-start; }
+  .actions { gap: 5px; }
+  .action { padding-inline: 9px; }
+  .action span:not(.ic), .batt { display: none; }
+  .action.icon-only { padding: 7px; }
+  .legend { gap: 8px; font-size: 10px; }
+  .panel { padding: var(--s4); }
 }
 .error {
   padding: 24px; text-align: center; color: var(--muted); font-size: 14px;
