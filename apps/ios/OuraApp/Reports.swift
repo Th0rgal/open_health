@@ -741,16 +741,17 @@ struct ActivityReport: View {
     var body: some View {
         let st = s.activity_daily[day]
         let prof = s.activity_profile[day] ?? []
+        let steps = compactSteps(st?.steps)
 
         HStack(alignment: .top, spacing: 0) {
-            Readout(value: st.map { "\(Int($0.steps ?? 0))" } ?? "—", caption: "steps")
+            Readout(value: steps.value, caption: steps.unit)
             Readout(value: st.map { "\(Int($0.active_kcal ?? 0))" } ?? "—", caption: "active kcal")
             Readout(value: st.map { "\(Int($0.total_kcal ?? 0))" } ?? "—", caption: "total kcal")
-            if let d = st?.distance_m { Readout(value: String(format: "%.1f km", d / 1000), caption: "distance") }
+            if let d = st?.distance_m { Readout(value: String(format: "%.1f", d / 1000), caption: "distance · km") }
         }
 
         Rule("movement across the day")
-        MetProfile(prof: prof)
+        MetProfile(timeline: s.wakingActivityTimeline(for: day))
 
         let bucketMin = prof.isEmpty ? 15.0 : 24.0 * 60.0 / Double(prof.count)
         let activeMin = Double(prof.filter { $0 >= 3 }.count) * bucketMin
@@ -775,33 +776,72 @@ struct ActivityReport: View {
     }
 }
 
-// 24h MET-above-rest area with hour axis (0..24)
+private func compactSteps(_ steps: Double?) -> (value: String, unit: String) {
+    guard let steps else { return ("—", "steps") }
+    guard steps >= 1_000 else { return ("\(Int(steps.rounded()))", "steps") }
+    return (String(format: "%.1f", steps / 1_000), "k steps")
+}
+
+// MET-above-rest across the human waking day, rather than a calendar-day 00–24
+// window. The timeline can cross midnight and says when its bedtime is estimated.
 private struct MetProfile: View {
-    let prof: [Double]
+    let timeline: WakingActivityTimeline
+
+    private var ticks: [Double] {
+        var result = [timeline.startHour]
+        var hour = ceil(timeline.startHour / 6) * 6
+        while hour < timeline.endHour {
+            if hour - timeline.startHour > 1 { result.append(hour) }
+            hour += 6
+        }
+        if timeline.endHour - (result.last ?? timeline.startHour) > 1 { result.append(timeline.endHour) }
+        return result
+    }
+
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 7) {
+            HStack {
+                Text(timeline.startCaption)
+                Spacer()
+                Text(timeline.endCaption)
+            }
+            .font(Obs.mono(9, .medium))
+            .foregroundStyle(Obs.ink2)
+
             Canvas { ctx, size in
-                guard prof.count > 1 else { return }
-                let peak = max(1, prof.max() ?? 1)
-                for h in stride(from: 0, through: 24, by: 6) {
-                    let x = size.width * CGFloat(h) / 24
+                let span = max(1, timeline.endHour - timeline.startHour)
+                let x = { (hour: Double) in
+                    size.width * CGFloat((hour - timeline.startHour) / span)
+                }
+                for hour in ticks {
+                    let x = x(hour)
                     ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) },
                                with: .color(Obs.trace.opacity(0.2)), lineWidth: 0.5)
                 }
-                func pt(_ i: Int) -> CGPoint {
-                    CGPoint(x: size.width * CGFloat(i) / CGFloat(prof.count - 1),
-                            y: 6 + (1 - CGFloat(min(1, prof[i] / peak))) * (size.height - 12))
+                guard timeline.points.count > 1 else { return }
+                let peak = max(1, timeline.points.map(\.met).max() ?? 1)
+                func pt(_ point: TimedActivityPoint) -> CGPoint {
+                    CGPoint(x: x(point.hour),
+                            y: 6 + (1 - CGFloat(min(1, point.met / peak))) * (size.height - 12))
                 }
-                var line = Path(); line.move(to: pt(0)); for i in 1..<prof.count { line.addLine(to: pt(i)) }
-                var area = line; area.addLine(to: CGPoint(x: size.width, y: size.height)); area.addLine(to: CGPoint(x: 0, y: size.height)); area.closeSubpath()
+                var line = Path(); line.move(to: pt(timeline.points[0]))
+                for point in timeline.points.dropFirst() { line.addLine(to: pt(point)) }
+                var area = line
+                area.addLine(to: CGPoint(x: x(timeline.points.last!.hour), y: size.height))
+                area.addLine(to: CGPoint(x: x(timeline.points[0].hour), y: size.height))
+                area.closeSubpath()
                 ctx.fill(area, with: .color(Obs.teal.opacity(0.14)))
                 ctx.stroke(line, with: .color(Obs.teal), lineWidth: 1.3)
             }
             .frame(height: 120)
             GeometryReader { g in
-                ForEach([0, 6, 12, 18, 24], id: \.self) { h in
-                    Text(String(format: "%02d", h)).font(Obs.mono(9)).foregroundStyle(Obs.ink2)
-                        .position(x: g.size.width * CGFloat(h) / 24, y: 6)
+                let span = max(1, timeline.endHour - timeline.startHour)
+                ForEach(ticks, id: \.self) { hour in
+                    let rawX = g.size.width * CGFloat((hour - timeline.startHour) / span)
+                    Text(String(format: "%02d", Int(hour) % 24))
+                        .font(Obs.mono(9)).foregroundStyle(Obs.ink2)
+                        .frame(width: 24)
+                        .position(x: min(max(12, rawX), g.size.width - 12), y: 6)
                 }
             }.frame(height: 12)
         }

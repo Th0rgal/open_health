@@ -841,6 +841,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     let mut raw_beds: Vec<BedPeriod> = Vec::new();
     let mut sleep_support: Vec<(i64, i64)> = Vec::new();
     let mut pulse_support: Vec<(i64, i64, usize)> = Vec::new();
+    let mut latest_hr: Option<(f64, f64)> = None; // (wall-clock unix, bpm)
     let mut present_recent = std::collections::HashSet::new();
     // "recent" = within 10 days of the newest data, measured in wall-clock so it never
     // sweeps in an older epoch that happens to share a high raw ds.
@@ -891,6 +892,22 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             if let Ok(v) = serde_json::from_str::<Value>(jstr) {
                 if let Some(accepted) = v["hr_bpm"].as_array().map(Vec::len).filter(|&n| n > 0) {
                     pulse_support.push((*ds, *cu, accepted));
+                }
+                // `green_ibi_quality_event.hr_bpm` contains only pulse estimates the
+                // firmware's quality gate accepted. Surface its newest value as the
+                // latest synchronized HR; raw IBI-derived values are too noisy for a
+                // user-facing "current" measurement.
+                if n == "green_ibi_quality_event" {
+                    if let Some(bpm) = v["hr_bpm"]
+                        .as_array()
+                        .and_then(|values| values.iter().rev().find_map(Value::as_f64))
+                        .filter(|bpm| (30.0..=240.0).contains(bpm))
+                    {
+                        let at = unix_s_at(*ds, *cu);
+                        if latest_hr.map_or(true, |(current, _)| at > current) {
+                            latest_hr = Some((at, bpm));
+                        }
+                    }
                 }
             }
         }
@@ -1394,7 +1411,16 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         "activity": activity,
         "activity_profile": activity_profile,
         "activity_daily": activity_daily,
-        "vitals": { "hrv": trend(&hrv_stat), "rhr": trend(&rhr_stat) },
+        "vitals": {
+            "hrv": trend(&hrv_stat),
+            "rhr": trend(&rhr_stat),
+            "hr": latest_hr.map(|(at, bpm)| json!({
+                "latest": bpm.round(),
+                "date": date_label(at, tz),
+                "hm": hm(at, tz),
+                "at_unix": at.round() as i64,
+            })),
+        },
     }))
 }
 

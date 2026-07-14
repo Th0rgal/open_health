@@ -282,6 +282,12 @@ final class RingSync: ObservableObject {
     @Published var status: String = ""
     @Published var busy = false
     @Published var lastReport: SyncReport?
+    @Published private(set) var lastSuccessfulSyncAt: Date?
+
+    /// A launch/foreground refresh is useful, but reconnecting twice while someone
+    /// briefly switches apps is not. Manual sync remains available at any time.
+    static let automaticSyncCooldown: TimeInterval = 3 * 60
+    private static let lastSuccessfulSyncKey = "ring.last-successful-sync-at"
 
     private var transport: BLETransport?
     private var session: RingSession?
@@ -289,11 +295,39 @@ final class RingSync: ObservableObject {
     private var lastProgressBytes: UInt64?
     private var lastProgressAt: Date?
     private var smoothedBytesPerSecond: Double?
+    private var lastAutomaticAttemptAt: Date?
+
+    init() {
+        let timestamp = UserDefaults.standard.double(forKey: Self.lastSuccessfulSyncKey)
+        lastSuccessfulSyncAt = timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
+    }
+
+    var wasRecentlySynced: Bool {
+        lastSuccessfulSyncAt.map { Date().timeIntervalSince($0) < Self.automaticSyncCooldown } ?? false
+    }
+
+    /// Opportunistic one-shot refresh used at launch and when returning to the app.
+    /// It never prompts for a key and does not enter the interactive six-retry loop.
+    func syncAutomaticallyIfNeeded(now: Date = Date()) async -> SyncReport? {
+        guard !busy, let key = Keychain.loadKey() else { return nil }
+        if let successful = lastSuccessfulSyncAt,
+           now.timeIntervalSince(successful) < Self.automaticSyncCooldown {
+            return nil
+        }
+        // A failed scan should not immediately restart because scenePhase bounced.
+        if let attempted = lastAutomaticAttemptAt, now.timeIntervalSince(attempted) < 60 {
+            return nil
+        }
+        lastAutomaticAttemptAt = now
+        return await run(keyHex: key, maxAttempts: 1, source: "automatic")
+    }
 
     func resetLocalDatabase() {
         do {
             try DB.resetWritableStore()
             lastReport = nil
+            lastSuccessfulSyncAt = nil
+            UserDefaults.standard.removeObject(forKey: Self.lastSuccessfulSyncKey)
             status = "local sync database reset — run Connect & Sync again"
             dlog("db", "writable sync database reset")
         } catch {
@@ -303,7 +337,9 @@ final class RingSync: ObservableObject {
     }
 
     /// Connect, wire the inbound-frame pump, and run a full sync into the writable DB.
-    func run(keyHex: String) async {
+    @discardableResult
+    func run(keyHex: String, maxAttempts: Int = 6, source: String = "manual") async -> SyncReport? {
+        guard !busy else { return nil }
         lastReport = nil   // clear any prior success so a failed retry isn't read as one
         lastProgressBytes = nil
         lastProgressAt = nil
@@ -316,11 +352,11 @@ final class RingSync: ObservableObject {
         // exposing any key bytes (a raw slice would leak key material).
         let fp = SHA256.hash(data: Data(key.utf8)).prefix(4).map { String(format: "%02x", $0) }.joined()
         let hexOk = key.allSatisfy(\.isHexDigit)
-        dlog("sync", "run — key len=\(key.count), hex=\(hexOk), fp(sha256)=\(fp)")
+        dlog("sync", "run source=\(source) — key len=\(key.count), hex=\(hexOk), fp(sha256)=\(fp)")
         guard key.count == 32, key.allSatisfy(\.isHexDigit) else {
             dlog("sync", "rejected key: len=\(key.count) (need 32 hex chars)")
             status = "key must be 32 hex characters"
-            return
+            return nil
         }
         busy = true
         // A multi-hour first sync must not die because the screen locked; SyncView
@@ -342,7 +378,6 @@ final class RingSync: ObservableObject {
         // The drain checkpoints its cursor after every batch, so each retry RESUMES
         // where the link dropped rather than starting over — reconnect-and-retry is
         // safe and cheap. Retries cover both connect failures and mid-sync drops.
-        let maxAttempts = 6
         for attempt in 1...maxAttempts {
             if attempt > 1 {
                 dlog("sync", "attempt \(attempt)/\(maxAttempts) — resuming from the checkpointed cursor in 3 s")
@@ -383,9 +418,13 @@ final class RingSync: ObservableObject {
                 let report = try await s.sync(dbPath: DB.url.path, keyHex: key, progress: progress)
                 Keychain.saveKey(key)
                 lastReport = report
+                let completedAt = Date()
+                lastSuccessfulSyncAt = completedAt
+                UserDefaults.standard.set(completedAt.timeIntervalSince1970,
+                                          forKey: Self.lastSuccessfulSyncKey)
                 dlog("sync", "OK — serial=\(report.serial) inserted=\(report.inserted) events=\(report.eventsSynced) cursor=\(report.nextCursor)")
                 status = "synced — \(report.inserted) new events from \(report.serial)"
-                return
+                return report
             } catch {
                 // the Rust layer packs the diagnostic detail (auth state, missing
                 // summary, cursor) into this message — log it verbatim.
@@ -396,14 +435,16 @@ final class RingSync: ObservableObject {
                 if Self.isAuthenticationFailure(error) {
                     status = "auth failed — this key was rejected by the ring; paste the key exported from the phone that onboarded this exact ring"
                     dlog("sync", "not retrying: auth rejection is deterministic")
-                    return
+                    return nil
                 }
                 status = "sync interrupted: \(error)"
             }
         }
-        status = "sync failed after \(maxAttempts) attempts — progress is saved, " +
-            "run sync again to resume (\(status))"
+        status = source == "automatic"
+            ? "automatic sync couldn't reach the ring — tap the sync icon for details"
+            : "sync failed after \(maxAttempts) attempts — progress is saved, run sync again to resume (\(status))"
         dlog("sync", "giving up after \(maxAttempts) attempts — cursor is checkpointed, next sync resumes")
+        return nil
     }
 
     /// Render Rust-side progress into the status line.

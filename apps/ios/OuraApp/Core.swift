@@ -1,5 +1,36 @@
 import Foundation
 
+/// Last successfully rendered summary. It is display-only: the SQLite store remains
+/// the source of truth and a fresh summary always replaces this after launch. Keeping
+/// it out of UserDefaults avoids loading a potentially large signal payload there.
+enum SummaryCache {
+    private static let queue = DispatchQueue(label: "md.thomas.openoura.summary-cache", qos: .utility)
+    private static var url: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("summary-cache.json")
+    }
+
+    static func load() -> Summary? {
+        guard let data = try? Data(contentsOf: url),
+              let summary = try? JSONDecoder().decode(Summary.self, from: data),
+              summary.error == nil else { return nil }
+        return summary
+    }
+
+    static func save(_ summary: Summary) {
+        guard summary.error == nil else { return }
+        queue.async {
+            guard let data = try? JSONEncoder().encode(summary) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    static func clear() {
+        queue.sync { try? FileManager.default.removeItem(at: url) }
+    }
+}
+
 enum Core {
     /// Fast, model-free summary (vitals, activity ridges, device) straight from the
     /// shared-core JSON — safe to compute on a background queue and show immediately.
@@ -65,7 +96,13 @@ enum Core {
             let asleep = total - Double(stages.filter { $0 == 4 }.count)
             s.nights[i].efficiency = (asleep / total * 100).rounded()
         }
-        s.sleepDebt = s.stagedSleepDebt()
+        // Staging can be partial while model inputs are still arriving. Never replace
+        // a more complete model-free debt window with a transient "0 of 5" result;
+        // prefer staged sleep only when it covers at least as many distinct days.
+        if let stagedDebt = s.stagedSleepDebt(),
+           stagedDebt.valid_days >= (s.sleepDebt?.valid_days ?? 0) {
+            s.sleepDebt = stagedDebt
+        }
         if let cva {
             s.cardio = Cardio(vascular_age: cva.vascularAge, chronological_age: profile?.age ?? 30,
                               pwv_ms: cva.pwv, segments: cva.segments)

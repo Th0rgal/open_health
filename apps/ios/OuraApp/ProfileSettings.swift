@@ -124,7 +124,7 @@ struct ProfileSettingsView: View {
                 } header: {
                     Text("Your data")
                 } footer: {
-                    Text("Stored only on this iPhone and used by the cardiovascular-age, activity, and fitness calculations.")
+                    Text("Stored only on this iPhone and used by the cardiovascular and activity calculations.")
                 }
 
                 Section {

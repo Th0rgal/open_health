@@ -117,7 +117,8 @@ struct AllDaysView: View {
 // over BLE, drain history into the writable DB. BLE only works on a physical device.
 struct SyncView: View {
     @ObservedObject var ring: RingSync
-    let onSynced: () -> Void
+    let onSynced: (SyncReport) -> Void
+    let onReset: () -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var key = Keychain.loadKey() ?? ""
@@ -140,8 +141,7 @@ struct SyncView: View {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Obs.trace, lineWidth: 0.8))
                     Button {
                         Task {
-                            await ring.run(keyHex: key)
-                            if ring.lastReport != nil { onSynced() }
+                            if let report = await ring.run(keyHex: key) { onSynced(report) }
                         }
                     } label: {
                         HStack(spacing: 8) {
@@ -155,7 +155,7 @@ struct SyncView: View {
                     .disabled(ring.busy)
                     Button(role: .destructive) {
                         ring.resetLocalDatabase()
-                        onSynced()
+                        onReset()
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: "trash")
@@ -212,7 +212,10 @@ struct SyncView: View {
             .toolbarColorScheme(.dark, for: .navigationBar)
         }
         .preferredColorScheme(.dark)
-        .interactiveDismissDisabled(ring.busy)
+        // The sync belongs to RingSync, not to this presentation. Let the panel be
+        // tucked away while BLE keeps running; the top-bar indicator remains live
+        // and can reopen these diagnostics at any time.
+        .presentationDragIndicator(.visible)
         .onAppear {
             if ring.busy { IdleTimerLock.acquire("pair-screen") }
         }
@@ -235,14 +238,61 @@ struct SyncView: View {
     }
 }
 
+/// The top-bar sync affordance doubles as a live status light and the entry point
+/// to diagnostics. Motion stays quiet: one slow continuous turn only while BLE is
+/// active, plus a restrained teal halo that settles after success.
+private struct SyncIndicatorButton: View {
+    @ObservedObject var ring: RingSync
+    let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var rotation = 0.0
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(Obs.teal.opacity(ring.busy ? 0.14 : (ring.wasRecentlySynced ? 0.07 : 0)))
+                Circle()
+                    .stroke(Obs.teal.opacity(ring.busy ? 0.32 : 0.10), lineWidth: 0.7)
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(ring.busy || ring.wasRecentlySynced ? Obs.teal : Obs.ink2)
+                    .rotationEffect(.degrees(rotation))
+            }
+            .frame(width: 31, height: 31)
+            .shadow(color: Obs.teal.opacity(ring.busy ? 0.28 : 0), radius: 8)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(ring.busy ? "Ring sync in progress" : "Ring sync and diagnostics")
+        .accessibilityHint("Opens sync status, logs, and manual controls")
+        .onAppear(perform: updateAnimation)
+        .onChange(of: ring.busy) { _, _ in updateAnimation() }
+        .onChange(of: reduceMotion) { _, _ in updateAnimation() }
+    }
+
+    private func updateAnimation() {
+        if ring.busy && !reduceMotion {
+            rotation = 0
+            withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) {
+                rotation = 360
+            }
+        } else {
+            withAnimation(.easeOut(duration: 0.2)) { rotation = 0 }
+        }
+    }
+}
+
 // ── root ─────────────────────────────────────────────────────────────────────
 struct RootView: View {
-    @State private var s: Summary?
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var s: Summary? = SummaryCache.load()
     @State private var report: ReportSel?
     @State private var showAllDays = false
     @State private var showSync = false
     @State private var showProfile = false
     @State private var showSleepDebt = false
+    @State private var loadGeneration = 0
+    @State private var isRefreshingSummary = false
     @StateObject private var ring = RingSync()
     private func f(_ v: Double?, _ fallback: String = "—") -> String {
         v.map { "\(Int($0))" } ?? fallback
@@ -252,6 +302,21 @@ struct RootView: View {
         if diff < -0.05 { return "\(a) yr younger" }
         if diff > 0.05 { return "\(a) yr older" }
         return "in line"
+    }
+    private func localDay(_ date: Date = Date()) -> String {
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+    private func displayedDayLabel(_ day: String, now: Date = Date()) -> String {
+        if day == localDay(now) { return "today" }
+        if let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: now),
+           day == localDay(yesterday) { return "yesterday" }
+        return day
+    }
+    private func latestLabel(date: String?, time: String? = nil) -> String {
+        let day = date.map { String($0.suffix(5)) }
+        let stamp = [day, time].compactMap { $0 }.joined(separator: " · ")
+        return stamp.isEmpty ? "latest sync" : "latest · \(stamp)"
     }
     var body: some View {
         ZStack {
@@ -268,36 +333,107 @@ struct RootView: View {
         .preferredColorScheme(.dark)
         .fullScreenCover(item: $report) { sel in if let s { DayReportView(s: s, day: sel.day, tab: sel.sleep ? .sleep : .activity) } }
         .sheet(isPresented: $showAllDays) { if let s { AllDaysView(s: s) } }
-        .sheet(isPresented: $showSync) { SyncView(ring: ring, onSynced: reload) }
-        .sheet(isPresented: $showProfile) { ProfileSettingsView(profile: s?.profile, onSaved: reload) }
+        .sheet(isPresented: $showSync) {
+            SyncView(ring: ring, onSynced: refreshAfterSync, onReset: resetAndReload)
+        }
+        .sheet(isPresented: $showProfile) { ProfileSettingsView(profile: s?.profile, onSaved: refreshDerivedData) }
         .sheet(isPresented: $showSleepDebt) { if let debt = s?.sleepDebt { SleepDebtDetail(debt: debt) } }
-        .onAppear(perform: load)
+        .onAppear {
+            // A cached summary makes launch immediate; this forced load replaces it
+            // with SQLite + model output without blanking the existing Today card.
+            load(force: true, clearCurrent: false)
+            requestAutomaticSync()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { requestAutomaticSync() }
+        }
     }
 
     // re-read the DB after a sync brought in new events
     private func reload() {
-        s = nil
-        load()
+        load(force: true, clearCurrent: true)
+    }
+
+    private func resetAndReload() {
+        SummaryCache.clear()
+        reload()
+    }
+
+    /// Profile changes affect CVA and activity inference, but do not invalidate the
+    /// summary already on screen. Keep the last complete result visible until every
+    /// derived model has finished, avoiding a transient sleep-debt regression.
+    private func refreshDerivedData() {
+        load(force: true, clearCurrent: false)
+    }
+
+    /// New ring events invalidate every derived view. In particular this reruns AAD
+    /// after the database transaction has completed, so newly accumulated movement
+    /// cannot leave yesterday's activity sessions cached on screen.
+    private func refreshAfterSync(_ report: SyncReport) {
+        guard report.inserted > 0 else { return }
+        load(force: true, clearCurrent: false)
+    }
+
+    private func requestAutomaticSync() {
+        Task {
+            if let report = await ring.syncAutomaticallyIfNeeded() {
+                refreshAfterSync(report)
+            }
+        }
     }
 
     // The heavy on-device models run off the main thread (load): show the fast
     // model-free summary first, then fold in the hypnogram / CVA / activity results.
-    private func load() {
-        guard s == nil else { return }
+    private func load(force: Bool = false, clearCurrent: Bool = false) {
+        guard force || s == nil else { return }
+        isRefreshingSummary = true
+        loadGeneration += 1
+        let generation = loadGeneration
+        #if TORCH
+        let publishBase = s == nil || clearCurrent
+        #else
+        let publishBase = true
+        #endif
+        if clearCurrent { s = nil }
         DispatchQueue.global(qos: .userInitiated).async {
             let base = Core.base()
-            DispatchQueue.main.async { if s == nil { s = base } }
+            if publishBase {
+                DispatchQueue.main.async {
+                    guard generation == loadGeneration else { return }
+                    s = base
+                    SummaryCache.save(base)
+                }
+            }
             #if TORCH
             if base.error == nil {
                 let full = Core.withModels(base)
-                DispatchQueue.main.async { s = full }
+                DispatchQueue.main.async {
+                    guard generation == loadGeneration else { return }
+                    s = full
+                    SummaryCache.save(full)
+                    isRefreshingSummary = false
+                }
+            } else {
+                DispatchQueue.main.async {
+                    guard generation == loadGeneration else { return }
+                    isRefreshingSummary = false
+                }
+            }
+            #else
+            DispatchQueue.main.async {
+                guard generation == loadGeneration else { return }
+                isRefreshingSummary = false
             }
             #endif
         }
     }
 
     @ViewBuilder private func content(_ s: Summary) -> some View {
-        let latest = s.nights.first
+        let latestTemp = s.nights.first { $0.skin_temp != nil }
+        let latestOxygen = s.nights.first { $0.spo2_mean != nil }
+        let recentTemperatures = Array(s.nights.compactMap(\.skin_temp).prefix(14).reversed())
+        let recentOxygen = Array(s.nights.compactMap(\.spo2_mean).prefix(14).reversed())
+        let latestHR = s.vitals.hr
         ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
                     HStack {
@@ -310,10 +446,7 @@ struct RootView: View {
                             Image(systemName: "person.crop.circle")
                                 .font(.system(size: 17)).foregroundStyle(Obs.ink2)
                         }
-                        Button { showSync = true } label: {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 16)).foregroundStyle(Obs.teal)
-                        }
+                        SyncIndicatorButton(ring: ring) { showSync = true }
                     }
 
                     if let err = s.error {
@@ -328,49 +461,62 @@ struct RootView: View {
                         // today — last night's sleep + that day's activity as one unit, the
                         // hero of the home; tap the sleep or the activity region for its report.
                         if let day = s.days.first {
-                            ObsTag("today", icon: "sun.max.fill")
+                            HStack(spacing: 9) {
+                                ObsTag(displayedDayLabel(day), icon: "sun.max.fill")
+                                if ring.busy || isRefreshingSummary {
+                                    ProgressView().controlSize(.mini).scaleEffect(0.68).tint(Obs.teal)
+                                    Text("updating").font(Obs.mono(9, .medium))
+                                        .tracking(0.8).foregroundStyle(Obs.ink2)
+                                }
+                            }
+                            .animation(.easeInOut(duration: 0.2), value: ring.busy || isRefreshingSummary)
                             TodayCard(s: s, day: day,
                                       onSleep: { report = ReportSel(day: day, sleep: true) },
                                       onActivity: { report = ReportSel(day: day, sleep: false) })
                         }
 
                         // vitals
-                        ObsTag("vitals · last night", icon: "waveform.path.ecg")
+                        ObsTag("vitals", icon: "waveform.path.ecg")
                         HStack(alignment: .top, spacing: 24) {
-                            VitalCell(tag: "hrv", value: f(s.vitals.hrv.latest), unit: "ms",
-                                      delta: s.vitals.hrv.delta_pct, series: s.vitals.hrv.series)
-                            VitalCell(tag: "resting hr", value: f(s.vitals.rhr.latest), unit: "bpm",
-                                      delta: s.vitals.rhr.delta_pct, series: s.vitals.rhr.series,
-                                      deltaGoodWhenPositive: false)
+                            VitalCell(tag: "nightly hrv", value: f(s.vitals.hrv.latest), unit: "ms",
+                                      delta: s.vitals.hrv.delta_pct, series: s.vitals.hrv.series,
+                                      baseline: s.vitals.hrv.baseline)
+                            VitalCell(tag: "heart rate",
+                                      value: f(latestHR?.latest ?? s.vitals.rhr.latest), unit: "bpm",
+                                      detail: latestHR.map { latestLabel(date: $0.date, time: $0.hm) }
+                                          ?? "nightly minimum")
                         }
                         HStack(alignment: .top, spacing: 24) {
                             VitalCell(tag: "skin temp",
-                                      value: latest?.skin_temp.map { String(format: "%.1f", $0) } ?? "—",
-                                      unit: "°c")
-                            VitalCell(tag: "blood o₂", value: f(latest?.spo2_mean), unit: "%")
+                                      value: latestTemp?.skin_temp.map { String(format: "%.1f", $0) } ?? "—",
+                                      unit: "°c",
+                                      series: recentTemperatures,
+                                      detail: latestTemp.map { latestLabel(date: s.wakeYmd($0)) })
+                            VitalCell(tag: "blood o₂", value: f(latestOxygen?.spo2_mean), unit: "%",
+                                      series: recentOxygen,
+                                      detail: latestOxygen.map { latestLabel(date: s.wakeYmd($0)) })
                         }
 
                         if let debt = s.sleepDebt {
                             SleepDebtCard(debt: debt) { showSleepDebt = true }
                         }
 
-                        // cardiovascular age (on-device CVA model, from raw PPG)
-                        if let cv = s.cardio, let va = cv.vascular_age {
+                        // Cardiovascular estimates belong together: vascular age/PWV
+                        // from raw PPG plus the demographic VO₂max estimate.
+                        if s.cardio?.vascular_age != nil || s.fitness?.vo2max != nil {
                             ObsTag("cardiovascular", icon: "heart.fill")
                             VStack(spacing: 12) {
-                                ObsStat(label: "vascular age", value: String(format: "%.1f yr", va), accent: Obs.teal)
-                                if let ca = cv.chronological_age { ObsStat(label: "vs your age", value: relAge(va - ca)) }
-                                if let pwv = cv.pwv_ms { ObsStat(label: "pulse-wave velocity", value: String(format: "%.2f m/s", pwv)) }
-                                if let seg = cv.segments { ObsStat(label: "segments analysed", value: "\(seg)") }
+                                if let cv = s.cardio, let va = cv.vascular_age {
+                                    ObsStat(label: "vascular age", value: String(format: "%.1f yr", va), accent: Obs.teal)
+                                    if let ca = cv.chronological_age { ObsStat(label: "vs your age", value: relAge(va - ca)) }
+                                    if let pwv = cv.pwv_ms { ObsStat(label: "pulse-wave velocity", value: String(format: "%.2f m/s", pwv)) }
+                                    if let seg = cv.segments { ObsStat(label: "segments analysed", value: "\(seg)") }
+                                }
+                                if let vo = s.fitness?.vo2max {
+                                    ObsStat(label: "vo₂max estimate", value: String(format: "%.1f ml/kg/min", vo), accent: Obs.teal)
+                                }
                             }
                             .obsCard()
-                        }
-
-                        // fitness — anthropometric VO₂max estimate (model-free, from demographics)
-                        if let vo = s.fitness?.vo2max {
-                            ObsTag("fitness", icon: "bolt.heart.fill")
-                            ObsStat(label: "vo₂max estimate", value: String(format: "%.1f ml/kg/min", vo), accent: Obs.teal)
-                                .obsCard()
                         }
 
                         // browse every day → per-day detail (sleep + activity)

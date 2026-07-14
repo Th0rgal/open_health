@@ -65,20 +65,110 @@ struct SessionRow: View {
 struct Sparkline: View {
     let series: [Double]
     var accent: Color = Obs.teal
+    var baseline: Double? = nil
+
     var body: some View {
         Canvas { ctx, size in
-            guard series.count > 1 else { return }
-            let lo = series.min()!, hi = series.max()!
-            let span = max(hi - lo, 1e-6)
-            var p = Path()
-            for (i, v) in series.enumerated() {
-                let x = size.width * CGFloat(i) / CGFloat(series.count - 1)
-                let y = size.height * (1 - CGFloat((v - lo) / span))
-                i == 0 ? p.move(to: .init(x: x, y: y)) : p.addLine(to: .init(x: x, y: y))
+            let values = series.filter(\.isFinite)
+            guard values.count > 1 else { return }
+            let lo = values.min()!, hi = values.max()!
+            let observedSpan = hi - lo
+            let padding = max(observedSpan, 1e-6) * 0.12
+            let domainLo = lo - padding
+            let domainSpan = max(observedSpan + padding * 2, 1e-6)
+            let inset: CGFloat = 2.5
+            let chartHeight = max(1, size.height - inset * 2)
+            let points = values.enumerated().map { index, value in
+                let normalized = observedSpan <= 1e-6 ? 0.5 : (value - domainLo) / domainSpan
+                return CGPoint(
+                    x: inset + (size.width - inset * 2) * CGFloat(index) / CGFloat(values.count - 1),
+                    y: inset + chartHeight * (1 - CGFloat(normalized))
+                )
             }
-            ctx.stroke(p, with: .color(accent), style: .init(lineWidth: 1.2, lineJoin: .round))
+
+            // A reference line is useful when the summary has a real baseline. Keep it
+            // inside the observed domain rather than stretching the chart to manufacture
+            // visual movement around an off-screen reference.
+            if let baseline, baseline.isFinite, baseline >= lo, baseline <= hi {
+                let y = inset + chartHeight * (1 - CGFloat((baseline - domainLo) / domainSpan))
+                var reference = Path()
+                reference.move(to: CGPoint(x: inset, y: y))
+                reference.addLine(to: CGPoint(x: size.width - inset, y: y))
+                ctx.stroke(reference, with: .color(Obs.trace.opacity(0.55)),
+                           style: StrokeStyle(lineWidth: 0.65, dash: [2.5, 3]))
+            }
+
+            // Monotone cubic interpolation rounds the joins without overshooting the
+            // measured points. It is smoother than a polyline but does not invent peaks.
+            let path = monotonePath(points)
+            ctx.stroke(path, with: .color(accent.opacity(0.10)),
+                       style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
+            ctx.stroke(path, with: .color(accent.opacity(0.86)),
+                       style: StrokeStyle(lineWidth: 1.25, lineCap: .round, lineJoin: .round))
+
+            for (index, point) in points.enumerated() {
+                let isLatest = index == points.count - 1
+                let radius: CGFloat = isLatest ? 2.2 : 1.7
+                let dot = CGRect(x: point.x - radius, y: point.y - radius,
+                                 width: radius * 2, height: radius * 2)
+                // Real samples remain visible as quiet solid marks; the smooth path is
+                // only interpolation between them. The latest point is slightly stronger
+                // so the direction of time stays clear without a separate axis label.
+                ctx.fill(Path(ellipseIn: dot),
+                         with: .color(accent.opacity(isLatest ? 0.90 : 0.52)))
+            }
         }
-        .frame(height: 26)
+        .frame(height: 30)
+        .accessibilityHidden(true)
+    }
+
+    /// Fritsch-Carlson-style tangents for equally spaced samples. Sign changes flatten
+    /// the tangent, and the slope limiter prevents a Bézier segment leaving its data
+    /// interval (the common visual lie in generic Catmull-Rom sparklines).
+    private func monotonePath(_ points: [CGPoint]) -> Path {
+        guard points.count > 1 else { return Path() }
+        let deltas = (0..<(points.count - 1)).map { index in
+            (points[index + 1].y - points[index].y) / (points[index + 1].x - points[index].x)
+        }
+        var tangents = Array(repeating: CGFloat.zero, count: points.count)
+        tangents[0] = deltas[0]
+        tangents[points.count - 1] = deltas[deltas.count - 1]
+        if points.count > 2 {
+            for index in 1..<(points.count - 1) {
+                tangents[index] = deltas[index - 1] * deltas[index] <= 0
+                    ? 0
+                    : (deltas[index - 1] + deltas[index]) / 2
+            }
+        }
+        for index in deltas.indices {
+            if deltas[index] == 0 {
+                tangents[index] = 0
+                tangents[index + 1] = 0
+                continue
+            }
+            let a = tangents[index] / deltas[index]
+            let b = tangents[index + 1] / deltas[index]
+            let magnitude = a * a + b * b
+            if magnitude > 9 {
+                let scale = 3 / sqrt(magnitude)
+                tangents[index] = scale * a * deltas[index]
+                tangents[index + 1] = scale * b * deltas[index]
+            }
+        }
+
+        var path = Path()
+        path.move(to: points[0])
+        for index in 0..<(points.count - 1) {
+            let width = points[index + 1].x - points[index].x
+            path.addCurve(
+                to: points[index + 1],
+                control1: CGPoint(x: points[index].x + width / 3,
+                                  y: points[index].y + tangents[index] * width / 3),
+                control2: CGPoint(x: points[index + 1].x - width / 3,
+                                  y: points[index + 1].y - tangents[index + 1] * width / 3)
+            )
+        }
+        return path
     }
 }
 
@@ -89,7 +179,9 @@ struct VitalCell: View {
     let unit: String
     var delta: Double? = nil
     var series: [Double] = []
+    var baseline: Double? = nil
     var deltaGoodWhenPositive = true
+    var detail: String? = nil
     var body: some View {
         let good = (delta ?? 0) >= 0 ? deltaGoodWhenPositive : !deltaGoodWhenPositive
         VStack(alignment: .leading, spacing: 6) {
@@ -102,10 +194,13 @@ struct VitalCell: View {
                 Text("\(d >= 0 ? "+" : "")\(d, specifier: "%.0f")% vs base")
                     .font(Obs.mono(10))
                     .foregroundStyle(good ? Obs.teal : Obs.yellow)
-            } else {
-                Text("—").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
             }
-            if series.count > 1 { Sparkline(series: series, accent: good ? Obs.teal : Obs.yellow) }
+            if let detail {
+                Text(detail).font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+            }
+            if series.count > 1 {
+                Sparkline(series: series, accent: good ? Obs.teal : Obs.yellow, baseline: baseline)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -155,4 +250,3 @@ struct MovementRidge: View {
         .frame(height: height)
     }
 }
-
