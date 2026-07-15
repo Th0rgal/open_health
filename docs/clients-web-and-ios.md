@@ -91,7 +91,12 @@ sleep debt are computed **twice** and must stay identical: once in Rust (`oura-s
 for the web, and once in Swift (`Reports.swift` `Sleep.metrics` / `Sleep.smooth` +
 `Summary.stagedSleepDebt`) for iOS. Sleep debt groups every sleep session by wake-date,
 including naps in that day's total, then evaluates 14 calendar days with at least five
-valid days; this matches the decompiled Android input and UI. The web reads it from the
+valid days; this matches the decompiled Android input and UI. The nightly **sleep need**
+is personalized like Oura's (`SleepDebtInput.longTermSleepTimeAvgSeconds` ← the long-term
+`sleepTimeAvg` baseline): each day's need is the mean of that user's daily totals over the
+previous 90 days, IQR-outlier-filtered, clamped to 7–9 h, rounded to 15 min, causal (a
+night never sets its own need), with an 8 h fallback below 14 valid history days — see
+Rust `sleep_need_s` and its Swift mirror `needS(on:)` in `stagedSleepDebt`. The web reads it from the
 summary JSON; iOS recomputes from the
 **on-device** SleepNet hypnogram (`NightRow.stages`), because iOS runs `build_summary` with
 `NoModelRunner` (no server-side staging), so the FFI `stages_full`/`metrics` are empty there.

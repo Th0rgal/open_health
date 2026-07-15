@@ -350,7 +350,7 @@ function openSleepDebt(sd) {
     <div class="sd-tabs"><button type="button" data-mode="debt" class="active">Cumulative debt</button><button type="button" data-mode="sleep">Total sleep</button></div>
     <div class="sd-graph">${sleepDebtSvg(sd, "debt")}</div>
     <div class="sd-axis"><span>${esc((sd.days?.[0]?.date || "").slice(5))}</span><span>${esc((sd.days?.at(-1)?.date || "").slice(5))}</span></div>
-    <p class="subhead">How it works</p><p class="sd-copy">Sleep debt estimates missed sleep over the past 14 days. Total sleep combines main sleep and naps, recent days carry more weight, and the current estimate uses an ${sd.need_h}-hour sleep need.</p>
+    <p class="subhead">How it works</p><p class="sd-copy">Sleep debt estimates missed sleep over the past 14 days. Total sleep combines main sleep and naps, recent days carry more weight, and your sleep need (${debtDuration(sd.need_h * 60)}) is personalized from your typical sleep over the past 3 months, ignoring unusually short or long days.</p>
   </form>`;
   dlg.querySelectorAll(".sd-tabs button").forEach((button) => button.addEventListener("click", () => {
     dlg.querySelectorAll(".sd-tabs button").forEach((b) => b.classList.toggle("active", b === button));

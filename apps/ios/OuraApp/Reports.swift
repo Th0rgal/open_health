@@ -143,7 +143,7 @@ extension Summary {
     /// Android-compatible 14-day result after staging, grouping main sleep + naps by
     /// wake date. The web receives this exact shape directly from `oura-summary`.
     func stagedSleepDebt() -> SleepDebtSummary? {
-        let needS = 8.0 * 3600.0
+        let defaultNeedS = 8.0 * 3600.0
         var byDay: [String: Double] = [:]
         for n in nights where (n.stages?.count ?? 0) > 1 {
             guard let day = wakeYmd(n) else { continue }
@@ -161,26 +161,45 @@ extension Summary {
         func date(_ offset: Int, from base: Date) -> String {
             fmt.string(from: cal.date(byAdding: .day, value: offset, to: base)!)
         }
+        // Personalized daily need — the mirror of oura-summary's `sleep_need_s`
+        // (typical sleep over the last 90 days, IQR-filtered, clamped to 7–9 h,
+        // causal so a night never sets its own need). Keep the two in sync.
+        func needS(on day: Date) -> Double {
+            var vals: [Double] = (1...90).compactMap { byDay[date(-$0, from: day)] }.filter { $0 > 0 }
+            guard vals.count >= 14 else { return defaultNeedS }
+            vals.sort()
+            func quantile(_ p: Double) -> Double {
+                let idx = p * Double(vals.count - 1)
+                let lo = Int(idx.rounded(.down)), hi = Int(idx.rounded(.up))
+                return vals[lo] + (vals[hi] - vals[lo]) * (idx - Double(lo))
+            }
+            let q1 = quantile(0.25), q3 = quantile(0.75), fence = 1.5 * (q3 - q1)
+            let kept = vals.filter { $0 >= q1 - fence && $0 <= q3 + fence }
+            let mean = kept.reduce(0, +) / Double(kept.count)
+            return (min(max(mean, 7 * 3600), 9 * 3600) / 900).rounded() * 900
+        }
         func score(ending end: Date) -> (debt: Double, recent: Double, valid: Bool, count: Int) {
             let actual = (0..<14).map { byDay[date(-$0, from: end)] ?? 0 }
+            let needs = (0..<14).map { needS(on: cal.date(byAdding: .day, value: -$0, to: end)!) }
             let count = actual.filter { $0 > 0 }.count
             guard actual[0] > 0 else { return (0, 0, false, count) }
             let decay = 0.75 / 13.0
             var debt = 0.0
             for i in actual.indices where actual[i] > 0 {
-                debt += (1.0 - decay * Double(i)) * (needS - actual[i])
+                debt += (1.0 - decay * Double(i)) * (needs[i] - actual[i])
             }
             debt = min(max(debt, 0), 36_000)
             debt = (debt / 2700).rounded() * 2700
-            return (debt, needS - actual[0], count >= 5, count)
+            return (debt, needs[0] - actual[0], count >= 5, count)
         }
         let days: [SleepDebtDay] = (-13...0).map { offset in
             let d = cal.date(byAdding: .day, value: offset, to: anchorDate)!
             let key = fmt.string(from: d), total = byDay[key]
+            let need = needS(on: d)
             let result = score(ending: d)
             return SleepDebtDay(date: key, total_sleep_min: total.map { ($0 / 60).rounded() },
-                                sleep_need_min: needS / 60,
-                                shortfall_min: total.map { ((needS - $0) / 60).rounded() },
+                                sleep_need_min: (need / 60).rounded(),
+                                shortfall_min: total.map { ((need - $0) / 60).rounded() },
                                 cumulative_debt_min: result.valid ? (result.debt / 60).rounded() : nil,
                                 valid_days: result.count)
         }
@@ -189,7 +208,9 @@ extension Summary {
         let state = minutes >= 540 ? "high" : minutes >= 360 ? "moderate" : minutes >= 180 ? "low" : "none"
         return SleepDebtSummary(debt_min: minutes,
                                 recent_shortfall_min: current.valid ? (current.recent / 60).rounded() : 0,
-                                valid: current.valid, need_h: 8, valid_days: current.count,
+                                valid: current.valid,
+                                need_h: (needS(on: anchorDate) / 36).rounded() / 100,
+                                valid_days: current.count,
                                 window_days: 14, state: state, days: days)
     }
 }
@@ -545,7 +566,7 @@ struct SleepDebtDetail: View {
                         }.pickerStyle(.segmented)
                         SleepDebtChart(debt: debt, mode: graph)
                         Rule("how it works")
-                        Text("Sleep debt estimates missed sleep over the past 14 days. Total sleep combines main sleep and naps, recent days carry more weight, and the current estimate uses an \(String(format: "%.0f", debt.need_h))-hour sleep need.")
+                        Text("Sleep debt estimates missed sleep over the past 14 days. Total sleep combines main sleep and naps, recent days carry more weight, and your sleep need (\(debtDuration(debt.need_h * 60))) is personalized from your typical sleep over the past 3 months, ignoring unusually short or long days.")
                             .font(Obs.prose(14)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
                     }.padding(24)
                 }
@@ -706,7 +727,7 @@ struct SleepReport: View {
             if let d = s.sleepDebt, d.valid {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(debtDuration(d.debt_min)).font(Obs.mono(20, .medium)).foregroundStyle(Obs.teal)
-                    Text("accumulated sleep debt vs an \(String(format: "%.0f", d.need_h)) h nightly need" + (d.recent_shortfall_min > 0 ? " · last sleep day \(Int(d.recent_shortfall_min)) min short" : ""))
+                    Text("accumulated sleep debt vs your \(debtDuration(d.need_h * 60)) nightly need" + (d.recent_shortfall_min > 0 ? " · last sleep day \(Int(d.recent_shortfall_min)) min short" : ""))
                         .font(Obs.mono(11)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.top, 6)
