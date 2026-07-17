@@ -72,6 +72,7 @@ targets:
       - path: SleepStaging.swift
       - path: CvaModel.swift
       - path: ActivityModel.swift
+      - path: IllnessModel.swift
       - path: TorchBridge.mm
       - path: TorchBridge.h
       - path: ../generated/oura_core.swift
@@ -85,6 +86,8 @@ targets:
       - path: ../../../notes/models/mobile/automatic_activity_detection_3_1_11.ptl
         buildPhase: resources
       - path: ../../../notes/models/mobile/steps_motion_decoder_2_0_0.ptl
+        buildPhase: resources
+      - path: ../../../notes/models/mobile/illness_detection_0_5_1.ptl
         buildPhase: resources
       - path: ../../../oura.db
         buildPhase: resources
