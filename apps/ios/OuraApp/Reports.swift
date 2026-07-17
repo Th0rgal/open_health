@@ -497,24 +497,27 @@ struct SleepDebtCard: View {
     }
 }
 
-// Symptom Radar — on-device illness detection. Traffic-light status + the biomarkers
-// (breathing, lowest HR, HRV, temperature) that deviate from the personal baseline.
+// Symptom Radar — on-device illness detection. A radar blip for the traffic-light
+// status, then each biomarker plotted against its personal baseline band so you see
+// at a glance how far breathing / lowest HR / HRV / temperature sit from normal.
 struct IllnessCard: View {
     let illness: IllnessResult
+    static let coral = Color(red: 0.87, green: 0.36, blue: 0.34)
     private static let copy = [
-        "NO_SIGNS": "No signs of illness. Your biometrics are within your normal range.",
-        "MINOR_SIGNS": "Minor signs — a few biometrics are outside your usual range. Worth an easy day.",
+        "NO_SIGNS": "No signs of illness. Your biometrics are sitting within your normal range.",
+        "MINOR_SIGNS": "Minor signs — a few biometrics have drifted outside your usual range. Worth an easy day.",
         "MAJOR_SIGNS": "Major signs — several biometrics are elevated. Your body may be fighting something.",
     ]
     private static let label = ["NO_SIGNS": "No signs", "MINOR_SIGNS": "Minor signs", "MAJOR_SIGNS": "Major signs"]
     private static let bmName = [
-        "AverageBreath": "Breathing rate", "LowestHeartRate": "Lowest heart rate",
-        "AverageHrv": "HRV", "TemperatureDeviation": "Body temperature",
+        "AverageBreath": "Breathing", "LowestHeartRate": "Lowest HR",
+        "AverageHrv": "HRV", "TemperatureDeviation": "Body temp",
     ]
     private static let bmUnit = [
-        "AverageBreath": " br/min", "LowestHeartRate": " bpm", "AverageHrv": " ms", "TemperatureDeviation": "°C",
+        "AverageBreath": "br", "LowestHeartRate": "bpm", "AverageHrv": "ms", "TemperatureDeviation": "°C",
     ]
-    private static let coral = Color(red: 0.87, green: 0.36, blue: 0.34)
+    // display order matching Oura's card (breath, lowest HR, HRV, temperature)
+    private static let order = ["AverageBreath", "LowestHeartRate", "AverageHrv", "TemperatureDeviation"]
 
     private var tint: Color {
         switch illness.trafficLight {
@@ -525,56 +528,131 @@ struct IllnessCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
-                ObsTag("symptom radar", icon: "waveform.path.ecg")
+                ObsTag("symptom radar")
                 Spacer()
                 if illness.available {
-                    Text("\(illness.daysWithData)/30 days").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                    Text("\(illness.daysWithData)/30d").font(Obs.mono(10)).foregroundStyle(Obs.trace)
                 }
             }
             if !illness.available {
                 Text(illness.status == "MISSING_LAST_NIGHT_SLEEP"
                      ? "Wear the ring overnight and sync — last night's data is missing."
                      : "Needs more recent nights (at least 7 of the last 14).")
-                    .font(Obs.prose(14)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
-            } else {
-                HStack(spacing: 9) {
-                    Circle().fill(tint).frame(width: 11, height: 11)
-                        .shadow(color: tint.opacity(0.5), radius: 4)
-                    Text(Self.label[illness.trafficLight] ?? "—")
-                        .font(Obs.mono(16, .medium)).foregroundStyle(tint)
-                }
-                Text(Self.copy[illness.status] ?? "").font(Obs.prose(14)).foregroundStyle(Obs.ink2)
+                    .font(Obs.prose(14)).foregroundStyle(Obs.ink2)
                     .fixedSize(horizontal: false, vertical: true)
-                let flagged = illness.biomarkers.filter(\.indicatesSymptoms)
-                if !flagged.isEmpty {
-                    VStack(spacing: 6) {
-                        ForEach(flagged) { b in
-                            HStack {
-                                Text(Self.bmName[b.type] ?? b.type).font(Obs.mono(12)).foregroundStyle(Obs.ink)
-                                Spacer()
-                                Text("\(fmt(b.value))\(Self.bmUnit[b.type] ?? "")")
-                                    .font(Obs.mono(12, .medium)).foregroundStyle(Obs.ink)
-                                Text(b.reason == "ELEVATED" ? "↑" : "↓")
-                                    .font(Obs.mono(12, .medium))
-                                    .foregroundStyle(b.reason == "ELEVATED" ? Self.coral : Obs.yellow)
-                            }
-                            .padding(.vertical, 6).padding(.horizontal, 9)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(tint.opacity(0.08)))
+                    .padding(.top, 14)
+            } else {
+                // status: radar blip + word
+                HStack(spacing: 13) {
+                    RadarBlip(tint: tint)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(Self.label[illness.trafficLight] ?? "—")
+                            .font(Obs.prose(20, .semibold)).foregroundStyle(Obs.ink)
+                        Text("illness signals").font(Obs.mono(9)).tracking(1.5)
+                            .foregroundStyle(tint)
+                    }
+                }
+                .padding(.top, 16)
+
+                Text(Self.copy[illness.status] ?? "").font(Obs.prose(13.5)).foregroundStyle(Obs.ink2)
+                    .lineSpacing(2).fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 12)
+
+                Rectangle().fill(Obs.trace.opacity(0.28)).frame(height: 0.5)
+                    .padding(.top, 16)
+
+                let byType = Dictionary(uniqueKeysWithValues: illness.biomarkers.map { ($0.type, $0) })
+                VStack(spacing: 13) {
+                    ForEach(Self.order, id: \.self) { type in
+                        if let b = byType[type] {
+                            BiomarkerRow(name: Self.bmName[type] ?? type,
+                                         unit: Self.bmUnit[type] ?? "",
+                                         b: b, tint: tint)
                         }
                     }
                 }
+                .padding(.top, 16)
+
                 Text("on-device illness model · \(illness.date)")
                     .font(Obs.mono(9)).foregroundStyle(Obs.trace)
+                    .padding(.top, 16)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .obsCard()
     }
+}
 
+// concentric radar echo with a centre blip — the "Symptom Radar" motif.
+private struct RadarBlip: View {
+    let tint: Color
+    var body: some View {
+        ZStack {
+            Circle().strokeBorder(tint.opacity(0.18), lineWidth: 1).frame(width: 34, height: 34)
+            Circle().strokeBorder(tint.opacity(0.34), lineWidth: 1).frame(width: 22, height: 22)
+            Circle().fill(tint).frame(width: 9, height: 9)
+                .shadow(color: tint.opacity(0.7), radius: 5)
+        }
+        .frame(width: 34, height: 34)
+    }
+}
+
+// one biomarker: name, a value dot placed on its personal baseline band, and the value.
+private struct BiomarkerRow: View {
+    let name: String
+    let unit: String
+    let b: IllnessBiomarker
+    let tint: Color
+    private var dotColor: Color {
+        guard b.indicatesSymptoms else { return Obs.ink }
+        return b.reason == "ELEVATED" ? IllnessCard.coral : Obs.yellow
+    }
     private func fmt(_ v: Double) -> String {
-        v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
+        abs(v) < 10 && v != v.rounded() ? String(format: "%.1f", v) : String(Int(v.rounded()))
+    }
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(name).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                .frame(width: 74, alignment: .leading)
+            RangeTrack(value: b.value, lower: b.lower, upper: b.upper,
+                       dot: dotColor, flagged: b.indicatesSymptoms)
+                .frame(height: 14)
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(fmt(b.value)).font(Obs.mono(13, .medium))
+                    .foregroundStyle(b.indicatesSymptoms ? dotColor : Obs.ink).monospacedDigit()
+                Text(unit).font(Obs.mono(9)).foregroundStyle(Obs.trace)
+            }
+            .frame(width: 56, alignment: .trailing)
+        }
+    }
+}
+
+// a thin track with the normal [lower, upper] band highlighted and today's value as a
+// dot — the axis auto-frames to include both the band and the value.
+private struct RangeTrack: View {
+    let value, lower, upper: Double
+    let dot: Color
+    let flagged: Bool
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width, midY = geo.size.height / 2
+            let pad = max((upper - lower) * 0.7, 1e-6)
+            let lo = min(lower, value) - pad, hi = max(upper, value) + pad
+            let span = max(hi - lo, 1e-6)
+            let x = { (v: Double) in CGFloat((v - lo) / span) * w }
+            ZStack(alignment: .leading) {
+                Capsule().fill(Obs.trace.opacity(0.22)).frame(height: 3).position(x: w / 2, y: midY)
+                Capsule().fill(Obs.teal.opacity(0.30))
+                    .frame(width: max(0, x(upper) - x(lower)), height: 3)
+                    .position(x: (x(lower) + x(upper)) / 2, y: midY)
+                Circle().fill(dot).frame(width: 9, height: 9)
+                    .overlay(Circle().stroke(Obs.base.opacity(0.9), lineWidth: 1.5))
+                    .shadow(color: flagged ? dot.opacity(0.6) : .clear, radius: 3)
+                    .position(x: min(max(x(value), 4.5), w - 4.5), y: midY)
+            }
+        }
     }
 }
 
