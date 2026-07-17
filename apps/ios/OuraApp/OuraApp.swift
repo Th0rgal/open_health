@@ -501,6 +501,10 @@ struct RootView: View {
                             SleepDebtCard(debt: debt) { showSleepDebt = true }
                         }
 
+                        if let illness = s.illness {
+                            IllnessCard(illness: illness)
+                        }
+
                         // Cardiovascular estimates belong together: vascular age/PWV
                         // from raw PPG plus the demographic VO₂max estimate.
                         if s.cardio?.vascular_age != nil || s.fitness?.vo2max != nil {

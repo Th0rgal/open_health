@@ -43,6 +43,19 @@ int oura_activity(const char *model_path, const float *context, const float *use
 int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
                     const float *raw, int n_raw, int64_t *out_timestamps_ms,
                     float *out_features, int max_rows);
+
+// Illness detection ("Symptom Radar", illness_detection_0_5_1). Mirrors
+// tools/run_illness_model.py. `series` is row-major 7×30 (index 0 = today, NaN =
+// missing): average_breath, average_heart_rate, lowest_heart_rate, average_hrv,
+// temperature_deviation, sedentary_time(s), resting_time(s). `scalars` is 12 values:
+// age, BMI, sex(-1/+1/0), day_of_week, then the 8 long-term baselines
+// (resting_hr avg/dev, hrv avg/dev, temperature avg/dev, sedentary avg/dev). The
+// menstrual-cycle inputs are fed as NaN internally (male/no-cycle path -> group 0).
+// Writes the calibrated score and decision (0/1/2), and 4 shown biomarkers as
+// [is_out, value, lower, upper] × {breath, lowest_hr, hrv, temp} into
+// out_biomarkers (16 floats). Returns 0 / -1.
+int oura_illness(const char *model_path, const float *series, const float *scalars,
+                 double *out_score, int *out_decision, float *out_biomarkers);
 #ifdef __cplusplus
 }
 #endif

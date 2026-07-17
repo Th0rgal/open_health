@@ -369,6 +369,57 @@ function renderSleepDebt(d) {
   button.addEventListener("click", () => openSleepDebt(sd)); box.append(button);
 }
 
+// Symptom Radar: Oura's on-device illness-detection model. Traffic-light state from the
+// calibrated decision + the biomarkers (breath / lowest HR / HRV / temp) that deviate
+// from your personal baseline. See docs/algorithms/illness-detection.md.
+const ILLNESS_COPY = {
+  NO_SIGNS: "No signs of illness. Your biometrics are within your normal range.",
+  MINOR_SIGNS: "Minor signs. A few biometrics are outside your usual range — worth an easy day.",
+  MAJOR_SIGNS: "Major signs. Several biometrics are elevated — your body may be fighting something.",
+};
+const ILLNESS_LIGHT = { NO_SIGNS: "ok", MINOR_SIGNS: "warn", MAJOR_SIGNS: "alert" };
+const BIOMARKER_LABEL = {
+  AverageBreath: "Breathing rate", LowestHeartRate: "Lowest heart rate",
+  AverageHrv: "HRV", TemperatureDeviation: "Body temperature",
+};
+const BIOMARKER_UNIT = {
+  AverageBreath: " br/min", LowestHeartRate: " bpm", AverageHrv: " ms", TemperatureDeviation: "°C",
+};
+
+function renderIllness(d) {
+  const box = $("illness");
+  box.innerHTML = "";
+  const ill = d.illness;
+  if (!ill) { box.append(el("div", "error", "Symptom radar needs the model runner (desktop dashboard).")); return; }
+  if (!ill.available) {
+    const why = ill.status === "MISSING_LAST_NIGHT_SLEEP" ? "Last night's sleep is missing — wear the ring overnight and sync."
+      : ill.status === "MISSING_SLEEP_DATA" ? "Too many recent nights are missing (needs ≥ 7 of the last 14)."
+      : "Not enough history yet.";
+    box.append(el("div", "error", why));
+    return;
+  }
+  const light = ILLNESS_LIGHT[ill.traffic_light] || "ok";
+  const head = el("div", `il-status il-${light}`);
+  const label = ill.traffic_light === "NO_SIGNS" ? "No signs" : ill.traffic_light === "MINOR_SIGNS" ? "Minor signs" : "Major signs";
+  head.innerHTML = `<span class="il-dot"></span><span class="il-label">${label}</span>`;
+  box.append(head);
+  box.append(el("p", "il-copy", ILLNESS_COPY[ill.status] || ""));
+
+  const flagged = (ill.biomarkers || []).filter((b) => b.indicatesSymptoms);
+  if (flagged.length) {
+    const list = el("div", "il-biomarkers");
+    for (const b of flagged) {
+      const dir = b.reason === "ELEVATED" ? "↑ elevated" : "↓ decreased";
+      const unit = BIOMARKER_UNIT[b.type] || "";
+      list.append(el("div", `il-bm il-${b.reason === "ELEVATED" ? "up" : "down"}`,
+        `<span class="il-bm-name">${BIOMARKER_LABEL[b.type] || b.type}</span>` +
+        `<span class="il-bm-val">${b.value}${unit} <em>${dir}</em></span>`));
+    }
+    box.append(list);
+  }
+  box.append(el("div", "il-foot", `On-device illness model · ${ill.days_with_data} of 30 days · ${esc(ill.date)}`));
+}
+
 function renderCardio(d) {
   const box = $("cardio");
   const cv = d.cardio;
@@ -1446,6 +1497,7 @@ async function load() {
   renderTiles(d);
   renderDay(d);
   renderSleepDebt(d);
+  renderIllness(d);
   renderCardio(d);
   renderSpo2(d);
   renderDevice(d);

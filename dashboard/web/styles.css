@@ -831,3 +831,24 @@ body.page-open { overflow: hidden; }
 /* capabilities + battery tweaks */
 .adv-body .caps { max-width: 400px; margin-top: -2px; }
 .dh-stat.low .v { color: var(--warn); }
+
+/* Symptom radar (on-device illness detection) */
+.illness { display: flex; flex-direction: column; gap: 12px; }
+.il-status { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }
+.il-dot { width: 12px; height: 12px; border-radius: 50%; flex: none; box-shadow: 0 0 0 4px var(--il-glow, transparent); }
+.il-ok   { --il-c: var(--accent); }
+.il-warn { --il-c: var(--warn); }
+.il-alert{ --il-c: #d5524a; }
+.il-status .il-dot { background: var(--il-c); box-shadow: 0 0 0 4px color-mix(in oklab, var(--il-c) 18%, transparent); }
+.il-status .il-label { color: var(--il-c); }
+.il-copy { font-size: 13px; color: var(--muted); line-height: 1.45; margin: 0; }
+.il-biomarkers { display: flex; flex-direction: column; gap: 6px; }
+.il-bm { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  padding: 8px 10px; border-radius: 9px; background: var(--accent-soft);
+  border: 1px solid var(--line-soft); font-size: 13px; }
+.il-bm.il-up   { background: color-mix(in oklab, #d5524a 9%, transparent); }
+.il-bm.il-down { background: color-mix(in oklab, var(--warn) 9%, transparent); }
+.il-bm-name { color: var(--text); font-weight: 500; }
+.il-bm-val { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--text); }
+.il-bm-val em { font-style: normal; color: var(--muted); font-size: 11px; margin-left: 4px; }
+.il-foot { font-family: var(--mono); font-size: 10px; color: var(--faint); letter-spacing: 0.02em; }

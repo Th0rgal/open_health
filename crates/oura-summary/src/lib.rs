@@ -82,6 +82,7 @@ pub struct ModelOutputs {
     pub sleep_batch: Option<Value>, // run_sleep_model.py --batch
     pub cva: Option<Value>,         // run_cva_model.py
     pub activity: Option<Value>,    // run_activity_model.py
+    pub illness: Option<Value>,     // run_illness_model.py (Symptom Radar)
 }
 
 /// Runs the torch models. `oura-cli` shells out to Python; the native client runs
@@ -1062,6 +1063,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         sleep_batch,
         cva,
         activity: activity_raw,
+        illness,
     } = runner.run(ModelInputs {
         db,
         tz,
@@ -1451,6 +1453,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         "profile": demo.to_json(),
         "nights": nights_json,
         "sleep_debt": sleep_debt,
+        "illness": illness,
         "cardio": cva,
         "fitness": { "vo2max": (vo2max * 10.0).round() / 10.0 },
         "activity": activity,

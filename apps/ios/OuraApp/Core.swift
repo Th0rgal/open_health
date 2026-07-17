@@ -66,7 +66,8 @@ enum Core {
         var staged: [String: [Int]] = [:]
         var cva: CvaModel.Result?
         var workouts: [WorkoutSession] = []
-        var sleepErr: String?, cvaErr: String?, actErr: String?
+        var illness: IllnessResult?
+        var sleepErr: String?, cvaErr: String?, actErr: String?, illErr: String?
 
         let group = DispatchGroup()
         let q = DispatchQueue.global(qos: .userInitiated)
@@ -82,6 +83,7 @@ enum Core {
             cva = r.result; cvaErr = r.error
         }
         q.async(group: group) { let r = ActivityModel.run(profile: profile); workouts = r.sessions; actErr = r.error }
+        q.async(group: group) { let r = IllnessModel.run(profile: profile); illness = r.result; illErr = r.error }
         group.wait()
 
         // fold SleepNet's hypnogram + stage breakdown into each night, keyed by the exact
@@ -108,7 +110,8 @@ enum Core {
                               pwv_ms: cva.pwv, segments: cva.segments)
         }
         s.workouts = workouts
-        s.modelErrors = [sleepErr, cvaErr, actErr].compactMap { $0 }
+        s.illness = illness
+        s.modelErrors = [sleepErr, cvaErr, actErr, illErr].compactMap { $0 }
         return s
     }
     #endif

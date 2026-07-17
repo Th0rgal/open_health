@@ -8,6 +8,8 @@
 #include <torch/csrc/jit/mobile/module.h>
 #include <ATen/ATen.h>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -142,6 +144,47 @@ int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
         for (int i = 0; i < n; i++) out_timestamps_ms[i] = tp[i];
         for (int i = 0; i < n * 11; i++) out_features[i] = fp[i];
         return n;
+    } catch (const std::exception &e) {
+        return -1;
+    }
+}
+
+int oura_illness(const char *model_path, const float *series, const float *scalars,
+                 double *out_score, int *out_decision, float *out_biomarkers) {
+    try {
+        static std::unique_ptr<torch::jit::mobile::Module> cached;
+        static std::string cached_path;
+        if (!cached || cached_path != model_path) {
+            cached = std::make_unique<torch::jit::mobile::Module>(
+                torch::jit::_load_for_mobile(std::string(model_path), c10::nullopt));
+            cached_path = model_path;
+        }
+        auto &m = *cached;
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        // 7 daily series -> [30,1] columns (index 0 = today)
+        auto colf = [&](int k) { return blobFloat2d(series + k * 30, 30, 1); };
+        auto nanCol = at::full({30, 1}, nan, at::kFloat);   // cycle_phase / reason (male)
+        auto sc = [&](float v) { return at::full({1, 1}, v, at::kFloat); };
+        // scalars: 0 age,1 bmi,2 sex,3 dow, 4-11 baselines
+        std::vector<c10::IValue> inputs{
+            colf(0), colf(1), colf(2), colf(3), colf(4), colf(5), colf(6),  // 1-7 series
+            nanCol, nanCol,                                                 // 8-9 cycle/reason
+            sc(nan), sc(nan),                                               // 10-11 period/ovulation
+            sc(scalars[0]), sc(scalars[1]), sc(scalars[2]), sc(scalars[3]), // 12-15 age,bmi,sex,dow
+            sc(scalars[4]), sc(scalars[5]), sc(scalars[6]), sc(scalars[7]), // 16-19 rhr/hrv avg+dev
+            sc(scalars[8]), sc(scalars[9]), sc(scalars[10]), sc(scalars[11])}; // 20-23 temp/sed avg+dev
+        auto out = m.forward(inputs).toTuple();
+        auto &el = out->elements();
+        *out_score = el[0].toTensor().item<double>();
+        *out_decision = (int)std::lround(el[1].toTensor().item<double>());
+        // 4 shown biomarkers: output indices 2(breath) 4(lowest_hr) 5(hrv) 6(temp)
+        const int idx[4] = {2, 4, 5, 6};
+        for (int b = 0; b < 4; b++) {
+            auto v = el[idx[b]].toTensor().to(at::kFloat).contiguous();
+            const float *vp = v.data_ptr<float>();
+            for (int j = 0; j < 4; j++) out_biomarkers[b * 4 + j] = vp[j]; // [is_out,value,min,max]
+        }
+        return 0;
     } catch (const std::exception &e) {
         return -1;
     }

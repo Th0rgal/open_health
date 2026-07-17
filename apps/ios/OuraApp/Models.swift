@@ -81,6 +81,28 @@ struct Device: Codable {
     var days_of_data: Double?; var nights: Int?
     var synced: String?; var synced_hm: String?
 }
+// Symptom Radar (on-device illness detection). Mirrors the web summary's `illness`
+// block; computed on-device by IllnessModel so it isn't part of the FFI JSON.
+struct IllnessBiomarker: Identifiable {
+    let type: String        // AverageBreath | LowestHeartRate | AverageHrv | TemperatureDeviation
+    let value: Double
+    let lower: Double
+    let upper: Double
+    let indicatesSymptoms: Bool
+    let reason: String?     // "ELEVATED" | "DECREASED" | nil
+    var id: String { type }
+}
+struct IllnessResult {
+    var available: Bool
+    var status: String          // NO_SIGNS | MINOR_SIGNS | MAJOR_SIGNS | MISSING_LAST_NIGHT_SLEEP | MISSING_SLEEP_DATA
+    var trafficLight: String     // NO_SIGNS | MINOR_SIGNS | MAJOR_SIGNS
+    var score: Double
+    var decision: Int
+    var date: String
+    var daysWithData: Int
+    var biomarkers: [IllnessBiomarker]
+}
+
 struct Summary: Codable {
     var digest: String?
     var device: Device?
@@ -92,6 +114,7 @@ struct Summary: Codable {
     var cardio: Cardio?
     var fitness: Fitness?
     var sleepDebt: SleepDebtSummary?
+    var illness: IllnessResult?           // on-device only (Symptom Radar; not in the JSON)
     var workouts: [WorkoutSession] = []   // on-device only (not in the JSON)
     var modelErrors: [String] = []        // on-device model failures (not in the JSON)
     var error: String?

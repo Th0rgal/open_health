@@ -37,8 +37,8 @@ xcrun -sdk iphonesimulator swiftc \
     -I "$GEN/headers" \
     "$GEN/oura_core.swift" "$APPDIR/Theme.swift" "$APPDIR/OuraApp.swift" \
     "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" "$APPDIR/Reports.swift" \
-    "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" \
-    "$APPDIR/EventStore.swift" "$APPDIR/SleepStaging.swift" "$APPDIR/CvaModel.swift" "$APPDIR/ActivityModel.swift" "$BUILD/TorchBridge.o" \
+    "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" "$APPDIR/ProfileSettings.swift" \
+    "$APPDIR/EventStore.swift" "$APPDIR/SleepStaging.swift" "$APPDIR/CvaModel.swift" "$APPDIR/ActivityModel.swift" "$APPDIR/IllnessModel.swift" "$BUILD/TorchBridge.o" \
     -L "$XCF" -loura_core \
     -lc++ -lsqlite3 \
     -L "$LT/lib" -ltorch -ltorch_cpu -lc10 \
@@ -56,6 +56,7 @@ cp "$LT/lib/libtorch.dylib" "$LT/lib/libtorch_cpu.dylib" \
 cp "$REPO/notes/models/mobile/sleepnet_moonstone_1_2_0.ptl" "$APP/sleepnet_moonstone_1_2_0.ptl"
 cp "$REPO/notes/models/mobile/cva_2_1_0.ptl" "$APP/cva_2_1_0.ptl"
 cp "$REPO/notes/models/mobile/automatic_activity_detection_3_1_11.ptl" "$APP/automatic_activity_detection_3_1_11.ptl"
+cp "$REPO/notes/models/mobile/illness_detection_0_5_1.ptl" "$APP/illness_detection_0_5_1.ptl"
 cp "$REPO/oura.db" "$APP/oura.db"
 # app icon (asset catalog) for completeness
 [ -d "$APPDIR/Assets.xcassets" ] && xcrun actool "$APPDIR/Assets.xcassets" \

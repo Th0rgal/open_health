@@ -497,6 +497,87 @@ struct SleepDebtCard: View {
     }
 }
 
+// Symptom Radar — on-device illness detection. Traffic-light status + the biomarkers
+// (breathing, lowest HR, HRV, temperature) that deviate from the personal baseline.
+struct IllnessCard: View {
+    let illness: IllnessResult
+    private static let copy = [
+        "NO_SIGNS": "No signs of illness. Your biometrics are within your normal range.",
+        "MINOR_SIGNS": "Minor signs — a few biometrics are outside your usual range. Worth an easy day.",
+        "MAJOR_SIGNS": "Major signs — several biometrics are elevated. Your body may be fighting something.",
+    ]
+    private static let label = ["NO_SIGNS": "No signs", "MINOR_SIGNS": "Minor signs", "MAJOR_SIGNS": "Major signs"]
+    private static let bmName = [
+        "AverageBreath": "Breathing rate", "LowestHeartRate": "Lowest heart rate",
+        "AverageHrv": "HRV", "TemperatureDeviation": "Body temperature",
+    ]
+    private static let bmUnit = [
+        "AverageBreath": " br/min", "LowestHeartRate": " bpm", "AverageHrv": " ms", "TemperatureDeviation": "°C",
+    ]
+    private static let coral = Color(red: 0.87, green: 0.36, blue: 0.34)
+
+    private var tint: Color {
+        switch illness.trafficLight {
+        case "MINOR_SIGNS": return Obs.yellow
+        case "MAJOR_SIGNS": return Self.coral
+        default: return Obs.teal
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                ObsTag("symptom radar", icon: "waveform.path.ecg")
+                Spacer()
+                if illness.available {
+                    Text("\(illness.daysWithData)/30 days").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                }
+            }
+            if !illness.available {
+                Text(illness.status == "MISSING_LAST_NIGHT_SLEEP"
+                     ? "Wear the ring overnight and sync — last night's data is missing."
+                     : "Needs more recent nights (at least 7 of the last 14).")
+                    .font(Obs.prose(14)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
+            } else {
+                HStack(spacing: 9) {
+                    Circle().fill(tint).frame(width: 11, height: 11)
+                        .shadow(color: tint.opacity(0.5), radius: 4)
+                    Text(Self.label[illness.trafficLight] ?? "—")
+                        .font(Obs.mono(16, .medium)).foregroundStyle(tint)
+                }
+                Text(Self.copy[illness.status] ?? "").font(Obs.prose(14)).foregroundStyle(Obs.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+                let flagged = illness.biomarkers.filter(\.indicatesSymptoms)
+                if !flagged.isEmpty {
+                    VStack(spacing: 6) {
+                        ForEach(flagged) { b in
+                            HStack {
+                                Text(Self.bmName[b.type] ?? b.type).font(Obs.mono(12)).foregroundStyle(Obs.ink)
+                                Spacer()
+                                Text("\(fmt(b.value))\(Self.bmUnit[b.type] ?? "")")
+                                    .font(Obs.mono(12, .medium)).foregroundStyle(Obs.ink)
+                                Text(b.reason == "ELEVATED" ? "↑" : "↓")
+                                    .font(Obs.mono(12, .medium))
+                                    .foregroundStyle(b.reason == "ELEVATED" ? Self.coral : Obs.yellow)
+                            }
+                            .padding(.vertical, 6).padding(.horizontal, 9)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(tint.opacity(0.08)))
+                        }
+                    }
+                }
+                Text("on-device illness model · \(illness.date)")
+                    .font(Obs.mono(9)).foregroundStyle(Obs.trace)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .obsCard()
+    }
+
+    private func fmt(_ v: Double) -> String {
+        v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
+    }
+}
+
 private enum DebtGraph: String, CaseIterable { case debt = "Cumulative debt", sleep = "Total sleep" }
 
 private struct SleepDebtChart: View {
