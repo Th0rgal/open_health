@@ -169,8 +169,6 @@ struct ProfileSettingsView: View {
                     }
                 }
             }
-            .toolbarColorScheme(.dark, for: .navigationBar)
         }
-        .preferredColorScheme(.dark)
     }
 }

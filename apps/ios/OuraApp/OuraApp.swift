@@ -107,9 +107,7 @@ struct AllDaysView: View {
             }
             .navigationTitle("all days")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-            .toolbarColorScheme(.dark, for: .navigationBar)
         }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -129,7 +127,7 @@ struct SyncView: View {
             ZStack {
                 Obs.canvas.ignoresSafeArea()
                 VStack(alignment: .leading, spacing: 18) {
-                    Text("Pair your ring").font(Obs.prose(20, .semibold)).foregroundStyle(Obs.ink)
+                    Text("Pair your ring").font(Obs.serif(24)).foregroundStyle(Obs.ink)
                     // the ring advertises reliably only ON its charger, and its single
                     // BLE link is usually held by any phone running the official app.
                     Text("Put the ring on its charger next to this iPhone, turn off Bluetooth on any phone with the official Oura app, then paste the auth key you exported on your computer. The first sync pulls the ring's full history and can take a while — keep the app open; if the connection drops it reconnects and resumes automatically.")
@@ -209,9 +207,7 @@ struct SyncView: View {
                         .disabled(ring.busy)
                 }
             }
-            .toolbarColorScheme(.dark, for: .navigationBar)
         }
-        .preferredColorScheme(.dark)
         // The sync belongs to RingSync, not to this presentation. Let the panel be
         // tucked away while BLE keeps running; the top-bar indicator remains live
         // and can reopen these diagnostics at any time.
@@ -294,6 +290,7 @@ struct RootView: View {
     @State private var loadGeneration = 0
     @State private var isRefreshingSummary = false
     @StateObject private var ring = RingSync()
+    @StateObject private var modelProgress = ModelProgress()
     private func f(_ v: Double?, _ fallback: String = "—") -> String {
         v.map { "\(Int($0))" } ?? fallback
     }
@@ -330,7 +327,6 @@ struct RootView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
         .fullScreenCover(item: $report) { sel in if let s { DayReportView(s: s, day: sel.day, tab: sel.sleep ? .sleep : .activity) } }
         .sheet(isPresented: $showAllDays) { if let s { AllDaysView(s: s) } }
         .sheet(isPresented: $showSync) {
@@ -356,6 +352,9 @@ struct RootView: View {
 
     private func resetAndReload() {
         SummaryCache.clear()
+        #if TORCH
+        ModelCacheStore.clearAll()
+        #endif
         reload()
     }
 
@@ -394,7 +393,13 @@ struct RootView: View {
         #else
         let publishBase = true
         #endif
+        // Captured before the background hop: the last published summary is the
+        // fallback if a model read fails mid-sync (withModels never replaces real
+        // results with emptiness).
+        let previous = s
         if clearCurrent { s = nil }
+        modelProgress.begin(generation)
+        let progress = modelProgress.sink(generation)
         DispatchQueue.global(qos: .userInitiated).async {
             let base = Core.base()
             if publishBase {
@@ -406,17 +411,19 @@ struct RootView: View {
             }
             #if TORCH
             if base.error == nil {
-                let full = Core.withModels(base)
+                let full = Core.withModels(base, previous: previous, progress: progress)
                 DispatchQueue.main.async {
                     guard generation == loadGeneration else { return }
                     s = full
                     SummaryCache.save(full)
                     isRefreshingSummary = false
+                    modelProgress.report(generation, nil)
                 }
             } else {
                 DispatchQueue.main.async {
                     guard generation == loadGeneration else { return }
                     isRefreshingSummary = false
+                    modelProgress.report(generation, nil)
                 }
             }
             #else
@@ -437,7 +444,7 @@ struct RootView: View {
         ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
                     HStack {
-                        Text("open_oura").font(Obs.prose(20, .semibold)).foregroundStyle(Obs.ink)
+                        Text("open_oura").font(Obs.serif(24)).foregroundStyle(Obs.ink)
                         Text("BETA").font(Obs.mono(9, .bold)).tracking(1).foregroundStyle(Obs.ink2)
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .overlay(RoundedRectangle(cornerRadius: 5).stroke(Obs.trace, lineWidth: 0.8))
@@ -465,7 +472,7 @@ struct RootView: View {
                                 ObsTag(displayedDayLabel(day), icon: "sun.max.fill")
                                 if ring.busy || isRefreshingSummary {
                                     ProgressView().controlSize(.mini).scaleEffect(0.68).tint(Obs.teal)
-                                    Text("updating").font(Obs.mono(9, .medium))
+                                    Text(modelProgress.label ?? "updating").font(Obs.mono(9, .medium))
                                         .tracking(0.8).foregroundStyle(Obs.ink2)
                                 }
                             }

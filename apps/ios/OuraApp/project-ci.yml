@@ -48,6 +48,7 @@ targets:
       - path: BLETransport.swift
       - path: RingSync.swift
       - path: ProfileSettings.swift
+      - path: ModelProgress.swift
       - path: ../generated/oura_core.swift
       - path: Assets.xcassets
     dependencies:

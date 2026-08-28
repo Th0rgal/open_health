@@ -19,12 +19,11 @@ enum IllnessModel {
 
     struct Nightly { var breath, avgHr, lowHr, hrv, skinTemp, dur: Double }
 
-    static func run(profile: Profile?) -> (result: IllnessResult?, error: String?) {
+    static func run(profile: Profile?, events: [EventStore.Ev],
+                    clock: EventStore.RingClock) -> (result: IllnessResult?, error: String?) {
         guard let modelPath = Bundle.main.path(forResource: "illness_detection_0_5_1", ofType: "ptl")
         else { return (nil, "illness model file missing from the app bundle") }
-        let events = EventStore.decodedEvents(dbPath: DB.readPath())
         guard !events.isEmpty else { return (nil, nil) }
-        let clock = EventStore.RingClock(events: events)
         func u(_ ds: Int64, _ cu: Int64) -> Double { clock.unixSeconds(ds, capturedUnix: cu) }
         let tz = Double(TimeZone.current.secondsFromGMT())
 
@@ -197,7 +196,11 @@ enum IllnessModel {
         for (i, x) in v.enumerated() where abs(x - med) <= 0.30 * med { t2.append(t[i]); v2.append(x) }
         if v2.count < 30 || (t2.last! - t2.first!) < winS { return .nan }
         // 4 Hz resample (linear interp on the IBI tachogram)
-        let n = Int((t2.last! - t2.first!) * fs)
+        let span = t2.last! - t2.first!
+        // A mis-dated bedtime (ring reboot on a long hike) can span days and
+        // allocate tens of millions of samples. Cap at an implausible night.
+        if span > 18 * 3600 { return .nan }
+        let n = Int(span * fs)
         if n < Int(winS * fs) { return .nan }
         var x = [Double](repeating: 0, count: n)
         var j = 0

@@ -70,8 +70,8 @@ a nap doesn't shadow the real sleep.
 
 ## Where the two clients diverge
 
-- **Home layout**: same day-unit model on both, but the iOS "Observatory" theme floats data on
-  a black canvas (no panels) while the web uses bordered cards/dialogs. Match *data/features*,
+- **Home layout**: same day-unit model on both, but iOS uses thomas.md Quiet Ink (warm paper,
+  hairlines, serif titles) while the web still uses its own teal/card theme. Match *data/features*,
   not pixel-for-pixel layout. iOS opens details as sheets; the web as stacked `<dialog>`s.
 - **BLE sync**: iOS syncs **natively** — `RingSync.swift` (CoreBluetooth `BLETransport`)
   drives the Rust `RingSession` FFI (`oura-core`) to authenticate + drain into a writable

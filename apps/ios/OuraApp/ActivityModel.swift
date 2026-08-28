@@ -23,13 +23,26 @@ enum ActivityModel {
         let values: [Float]
     }
 
-    static func run(profile: Profile?) -> (sessions: [WorkoutSession], error: String?) {
+    /// Everything the AAD model receives for one local day — also the exact
+    /// material the incremental cache fingerprints, so cache identity and model
+    /// input can never disagree. `rawStep` is the undecoded 27-col gait packets;
+    /// the decoder runs only on a cache miss so hiking days don't decode twice.
+    private struct DayInputs {
+        let dayStart: Date
+        let context: [Float]
+        let met: (flat: [Float], count: Int)
+        let rawStep: [TimedRow]
+        let motion: (flat: [Float], count: Int)
+        let temp: (flat: [Float], count: Int)
+        let hr: (flat: [Float], count: Int)
+    }
+
+    static func run(profile: Profile?, events: [EventStore.Ev], clock: EventStore.RingClock,
+                    progress: @escaping @Sendable (String) -> Void = { _ in }) -> (sessions: [WorkoutSession], error: String?) {
         guard let aadPath = Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl")
         else { return ([], "activity model file missing from the app bundle") }
 
-        let events = EventStore.decodedEvents(dbPath: DB.readPath())
         guard !events.isEmpty else { return ([], nil) }
-        let clock = EventStore.RingClock(events: events)
         let nan = Float.nan
         func number(_ value: Any?) -> Float { (value as? NSNumber)?.floatValue ?? 0 }
 
@@ -68,21 +81,20 @@ enum ActivityModel {
         }
         guard !met.isEmpty else { return ([], nil) }
 
-        let stepMotion = decodeStepMotion(events: events, clock: clock)
+        let stepPackets = collectStepPackets(events: events, clock: clock)
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
+        // Newest first: today's card is the one the user is waiting on, and a
+        // mid-run kill loses the least-relevant (oldest) days.
         let dayStarts = Set(met.map {
             calendar.startOfDay(for: Date(timeIntervalSince1970: $0.unixMinute * 60))
-        }).sorted()
+        }).sorted(by: >)
 
         let sex: Float = profile?.sex?.uppercased() == "M" ? 1 : 0
-        var user: [Float] = [Float(profile?.age ?? 30), sex, Float(profile?.height_m ?? 1.78),
+        let user: [Float] = [Float(profile?.age ?? 30), sex, Float(profile?.height_m ?? 1.78),
                              Float(profile?.weight_kg ?? 75)] + Array(repeating: nan, count: 10)
-        let stamp = DateFormatter(); stamp.timeZone = .current; stamp.dateFormat = "yyyy-MM-dd HH:mm"
-        let time = DateFormatter(); time.timeZone = .current; time.dateFormat = "HH:mm"
-        var sessions: [WorkoutSession] = []
 
-        for dayStart in dayStarts {
+        func dayInputs(_ dayStart: Date) -> DayInputs? {
             let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart)!
             let lo = dayStart.timeIntervalSince1970 / 60
             let hi = nextDay.timeIntervalSince1970 / 60
@@ -95,67 +107,167 @@ enum ActivityModel {
                 return (selected.flatMap { [Float($0.unixMinute - lo)] + $0.values }, selected.count)
             }
             let metDay = matrix(met, columns: 2)
-            guard metDay.count > 0 else { continue }
+            guard metDay.count > 0 else { return nil }
             let motionDay = matrix(motion, columns: 9)
             let tempDay = matrix(temperature, columns: 2)
             let hrDay = matrix(heartRate, columns: 2)
-            var stepDay = stepMotion.filter { $0.unixMinute >= lo && $0.unixMinute < hi }
+            let rawStep = stepPackets.filter { $0.unixMinute >= lo && $0.unixMinute < hi }
                 .sorted { $0.unixMinute < $1.unixMinute }
-            // Boundary rows keep the AAD valid-time window equal to the complete MET day.
-            let firstMet = metDay.flat[0]
-            let lastMet = metDay.flat[(metDay.count - 1) * 2]
-            stepDay.insert(TimedRow(unixMinute: lo + Double(firstMet), values: Array(repeating: nan, count: 11)), at: 0)
-            stepDay.append(TimedRow(unixMinute: lo + Double(lastMet), values: Array(repeating: nan, count: 11)))
-            let stepDayMatrix = matrix(stepDay, columns: 12)
-
             let components = calendar.dateComponents([.year, .month, .day, .weekday], from: dayStart)
-            var context: [Float] = [Float(components.year!), Float(components.month!), Float(components.day!),
+            let context: [Float] = [Float(components.year!), Float(components.month!), Float(components.day!),
                                     Float((components.weekday! + 5) % 7)]
-            var metFlat = metDay.flat, stepFlat = stepDayMatrix.flat
-            var motionFlat = motionDay.flat, tempFlat = tempDay.flat, hrFlat = hrDay.flat
-            var output = [Float](repeating: 0, count: 256 * 9)
-            let count = oura_activity(aadPath, &context, &user,
-                                      &metFlat, Int32(metDay.count), &stepFlat, Int32(stepDayMatrix.count),
-                                      &motionFlat, Int32(motionDay.count), &tempFlat, Int32(tempDay.count),
-                                      &hrFlat, Int32(hrDay.count), 0.5, 10.0, &output, 256)
-            guard count > 0 else { continue }
-            for row in 0..<Int(count) {
-                let values = Array(output[row * 9..<row * 9 + 9])
-                let start = dayStart.addingTimeInterval(Double(values[0]) * 60)
-                let end = dayStart.addingTimeInterval(Double(values[1]) * 60)
-                sessions.append(WorkoutSession(
-                    start: stamp.string(from: start), end: time.string(from: end),
-                    durationMin: Int((values[1] - values[0]).rounded()),
-                    label: behavior[Int(values[3])] ?? "activity", isWorkout: Double(values[2])
-                ))
+            return DayInputs(dayStart: dayStart, context: context,
+                             met: metDay, rawStep: rawStep,
+                             motion: motionDay, temp: tempDay, hr: hrDay)
+        }
+
+        // A day's fingerprint covers its exact model inputs; profile and timezone
+        // live in the global key. A hit is therefore the result the model would
+        // have produced for those inputs.
+        func fingerprint(_ inputs: DayInputs) -> String {
+            var h = FNV64()
+            h.combine(inputs.dayStart.timeIntervalSince1970)
+            h.combine(inputs.context)
+            h.combine(inputs.met.flat); h.combine(inputs.met.count)
+            h.combine(inputs.rawStep.count)
+            for row in inputs.rawStep { h.combine(row.unixMinute); h.combine(row.values) }
+            h.combine(inputs.motion.flat); h.combine(inputs.motion.count)
+            h.combine(inputs.temp.flat); h.combine(inputs.temp.count)
+            h.combine(inputs.hr.flat); h.combine(inputs.hr.count)
+            return h.hex
+        }
+        let globalKey = ModelCacheStore.globalKey(profile: profile)
+        var cache: [String: ActivityDayEntry] = ModelCacheStore.load(ModelCacheStore.activityFile,
+                                                                     globalKey: globalKey)
+        let dayKeyFmt = DateFormatter()
+        dayKeyFmt.timeZone = .current
+        dayKeyFmt.dateFormat = "yyyy-MM-dd"
+
+        var sessions: [WorkoutSession] = []
+        var dirty: [(key: String, inputs: DayInputs, fp: String)] = []
+        var currentKeys = Set<String>()
+        for dayStart in dayStarts {
+            guard let inputs = dayInputs(dayStart) else { continue }
+            let key = dayKeyFmt.string(from: dayStart)
+            let fp = fingerprint(inputs)
+            currentKeys.insert(key)
+            if let entry = cache[key], entry.fp == fp {
+                sessions.append(contentsOf: entry.sessions)
+            } else {
+                dirty.append((key, inputs, fp))
             }
+        }
+        dlog("models", "activity: \(dirty.count)/\(currentKeys.count) days to recompute")
+        for (index, day) in dirty.enumerated() {
+            progress("detecting activity · day \(index + 1)/\(dirty.count)")
+            let daySessions = runDay(day.inputs, user: user, aadPath: aadPath, nan: nan)
+            sessions.append(contentsOf: daySessions)
+            cache[day.key] = ActivityDayEntry(fp: day.fp, sessions: daySessions)
+            // Save after every completed day: a mid-run kill resumes here instead
+            // of restarting the whole history.
+            ModelCacheStore.save(ModelCacheStore.activityFile, globalKey: globalKey, entries: cache)
+        }
+        // Drop days the current data no longer produces (e.g. re-dated by a clock
+        // re-anchor) so the file tracks the DB instead of growing stale keys.
+        let pruned = cache.filter { currentKeys.contains($0.key) }
+        if pruned.count != cache.count {
+            ModelCacheStore.save(ModelCacheStore.activityFile, globalKey: globalKey, entries: pruned)
         }
         return (sessions.sorted { $0.start < $1.start }, nil)
     }
 
-    private static func decodeStepMotion(events: [EventStore.Ev], clock: EventStore.RingClock) -> [TimedRow] {
-        guard let modelPath = Bundle.main.path(forResource: "steps_motion_decoder_2_0_0", ofType: "ptl")
-        else { return [] }
+    /// One AAD inference over one local day's inputs.
+    private static func runDay(_ inputs: DayInputs, user: [Float], aadPath: String, nan: Float) -> [WorkoutSession] {
+        let decoded = decodeStepPackets(inputs.rawStep)
+        let lo = inputs.dayStart.timeIntervalSince1970 / 60
+        let firstMet = inputs.met.flat[0]
+        let lastMet = inputs.met.flat[(inputs.met.count - 1) * 2]
+        // Boundary rows keep the AAD valid-time window equal to the complete MET day.
+        // unixMinute is absolute; column 0 of the tensor is minutes since local midnight.
+        var stepRows = [TimedRow(unixMinute: lo + Double(firstMet), values: Array(repeating: nan, count: 11))]
+        stepRows.append(contentsOf: decoded)
+        stepRows.append(TimedRow(unixMinute: lo + Double(lastMet), values: Array(repeating: nan, count: 11)))
+        let stepFlat = stepRows.flatMap { [Float($0.unixMinute - lo)] + $0.values }
+        let stepCount = stepRows.count
+
+        var context = inputs.context, userVec = user
+        var metFlat = inputs.met.flat
+        var step = stepFlat
+        var motionFlat = inputs.motion.flat, tempFlat = inputs.temp.flat, hrFlat = inputs.hr.flat
+        var output = [Float](repeating: 0, count: 512 * 9)
+        let count = oura_activity(aadPath, &context, &userVec,
+                                  &metFlat, Int32(inputs.met.count), &step, Int32(stepCount),
+                                  &motionFlat, Int32(inputs.motion.count), &tempFlat, Int32(inputs.temp.count),
+                                  &hrFlat, Int32(inputs.hr.count), 0.5, 10.0, &output, 512)
+        guard count > 0 else { return [] }
+        let stamp = DateFormatter(); stamp.timeZone = .current; stamp.dateFormat = "yyyy-MM-dd HH:mm"
+        let time = DateFormatter(); time.timeZone = .current; time.dateFormat = "HH:mm"
+        var sessions: [WorkoutSession] = []
+        for row in 0..<Int(count) {
+            let values = Array(output[row * 9..<row * 9 + 9])
+            let start = inputs.dayStart.addingTimeInterval(Double(values[0]) * 60)
+            let end = inputs.dayStart.addingTimeInterval(Double(values[1]) * 60)
+            sessions.append(WorkoutSession(
+                start: stamp.string(from: start), end: time.string(from: end),
+                durationMin: Int((values[1] - values[0]).rounded()),
+                label: behavior[Int(values[3])] ?? "activity", isWorkout: Double(values[2])
+            ))
+        }
+        return sessions
+    }
+
+    private static func collectStepPackets(events: [EventStore.Ev], clock: EventStore.RingClock) -> [TimedRow] {
         var secondPackets: [Int64: Data] = [:]
         for event in events where event.tag == 0x7F {
             guard let body = event.body, body.count == 14 else { continue }
             let wallDecisecond = Int64((clock.unixSeconds(event.ds, capturedUnix: event.cu) * 10).rounded())
             secondPackets[wallDecisecond] = body
         }
-        var timestamps: [Int64] = []
-        var raw: [Float] = []
+        var rows: [TimedRow] = []
         for event in events where event.tag == 0x7E {
             guard let first = event.body, first.count == 14 else { continue }
             let wallDecisecond = Int64((clock.unixSeconds(event.ds, capturedUnix: event.cu) * 10).rounded())
             guard let second = secondPackets[wallDecisecond + 1] else { continue }
-            raw.append(contentsOf: unpack(first: [UInt8](first), second: [UInt8](second)).map(Float.init))
-            timestamps.append(wallDecisecond * 100)
+            let values = unpack(first: [UInt8](first), second: [UInt8](second)).map(Float.init)
+            rows.append(TimedRow(unixMinute: Double(wallDecisecond) / 10.0 / 60.0, values: values))
         }
-        guard !timestamps.isEmpty else { return [] }
-        let capacity = timestamps.count * 3
+        return rows
+    }
+
+    /// Decode one day's (or a chunked slice of a day's) 27-col gait packets.
+    /// Hiking days can be thousands of pairs; the old path fed the whole history
+    /// as one tensor and jetsam-killed the app.
+    private static func decodeStepPackets(_ packets: [TimedRow]) -> [TimedRow] {
+        guard !packets.isEmpty,
+              let modelPath = Bundle.main.path(forResource: "steps_motion_decoder_2_0_0", ofType: "ptl")
+        else { return [] }
+        let chunk = 4096
+        let overlap = 24
+        if packets.count <= chunk {
+            return runStepDecoder(packets, modelPath: modelPath)
+        }
+        var out: [TimedRow] = []
+        var seen = Set<Int64>()
+        var i = 0
+        while i < packets.count {
+            let end = min(packets.count, i + chunk)
+            for row in runStepDecoder(Array(packets[i..<end]), modelPath: modelPath) {
+                let key = Int64((row.unixMinute * 60_000).rounded())
+                if seen.insert(key).inserted { out.append(row) }
+            }
+            if end == packets.count { break }
+            i = end - overlap
+        }
+        return out
+    }
+
+    private static func runStepDecoder(_ packets: [TimedRow], modelPath: String) -> [TimedRow] {
+        var timestamps = packets.map { Int64(($0.unixMinute * 60_000).rounded()) }
+        var raw = packets.flatMap(\.values)
+        let capacity = packets.count * 3
         var outputTimestamps = [Int64](repeating: 0, count: capacity)
         var outputFeatures = [Float](repeating: 0, count: capacity * 11)
-        let count = oura_stepmotion(modelPath, &timestamps, &raw, Int32(timestamps.count),
+        let count = oura_stepmotion(modelPath, &timestamps, &raw, Int32(packets.count),
                                     &outputTimestamps, &outputFeatures, Int32(capacity))
         guard count > 0 else { return [] }
         let order = [6, 7, 9, 10, 8, 5, 4, 0, 3, 1, 2]

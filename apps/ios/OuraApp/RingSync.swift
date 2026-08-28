@@ -1,6 +1,7 @@
 import Foundation
 import Security
 import os
+import Darwin
 import CryptoKit
 import UIKit
 
@@ -92,6 +93,10 @@ final class RingDiag: ObservableObject, @unchecked Sendable {
 func dlog(_ tag: String, _ msg: String) {
     RingDiag.shared.log(tag, msg)
     ringLog.info("[\(tag, privacy: .public)] \(msg, privacy: .public)")
+}
+
+func memLog(_ tag: String) {
+    dlog("mem", "\(tag) avail=\(os_proc_available_memory() / 1_048_576)MB")
 }
 
 @MainActor
@@ -288,6 +293,10 @@ final class RingSync: ObservableObject {
     /// briefly switches apps is not. Manual sync remains available at any time.
     static let automaticSyncCooldown: TimeInterval = 3 * 60
     private static let lastSuccessfulSyncKey = "ring.last-successful-sync-at"
+    // Set the moment a drain reports real progress, cleared only on a completed
+    // sync — so it survives an app kill mid-drain and distinguishes "interrupted
+    // with data on the ring" (resume eagerly) from "never reached the ring".
+    private static let syncIncompleteKey = "ring.sync-incomplete"
 
     private var transport: BLETransport?
     private var session: RingSession?
@@ -296,6 +305,15 @@ final class RingSync: ObservableObject {
     private var lastProgressAt: Date?
     private var smoothedBytesPerSecond: Double?
     private var lastAutomaticAttemptAt: Date?
+    private var markedIncompleteThisRun = false
+
+    var hasIncompleteSync: Bool {
+        UserDefaults.standard.bool(forKey: Self.syncIncompleteKey)
+    }
+
+    private func clearIncompleteSync() {
+        UserDefaults.standard.removeObject(forKey: Self.syncIncompleteKey)
+    }
 
     init() {
         let timestamp = UserDefaults.standard.double(forKey: Self.lastSuccessfulSyncKey)
@@ -306,11 +324,16 @@ final class RingSync: ObservableObject {
         lastSuccessfulSyncAt.map { Date().timeIntervalSince($0) < Self.automaticSyncCooldown } ?? false
     }
 
-    /// Opportunistic one-shot refresh used at launch and when returning to the app.
-    /// It never prompts for a key and does not enter the interactive six-retry loop.
+    /// Opportunistic refresh used at launch and when returning to the app. It never
+    /// prompts for a key. Normally a timid single attempt behind a cooldown — but
+    /// when the last sync was interrupted mid-drain, the checkpointed cursor means
+    /// data is sitting half-transferred on the ring, so resume eagerly with the
+    /// retry loop instead of silently giving up.
     func syncAutomaticallyIfNeeded(now: Date = Date()) async -> SyncReport? {
         guard !busy, let key = Keychain.loadKey() else { return nil }
-        if let successful = lastSuccessfulSyncAt,
+        let resuming = hasIncompleteSync
+        if !resuming,
+           let successful = lastSuccessfulSyncAt,
            now.timeIntervalSince(successful) < Self.automaticSyncCooldown {
             return nil
         }
@@ -319,7 +342,10 @@ final class RingSync: ObservableObject {
             return nil
         }
         lastAutomaticAttemptAt = now
-        return await run(keyHex: key, maxAttempts: 1, source: "automatic")
+        if resuming { status = "resuming interrupted sync from checkpoint…" }
+        return await run(keyHex: key,
+                         maxAttempts: resuming ? 3 : 1,
+                         source: resuming ? "resume" : "automatic")
     }
 
     func resetLocalDatabase() {
@@ -328,6 +354,7 @@ final class RingSync: ObservableObject {
             lastReport = nil
             lastSuccessfulSyncAt = nil
             UserDefaults.standard.removeObject(forKey: Self.lastSuccessfulSyncKey)
+            clearIncompleteSync()
             status = "local sync database reset — run Connect & Sync again"
             dlog("db", "writable sync database reset")
         } catch {
@@ -359,6 +386,7 @@ final class RingSync: ObservableObject {
             return nil
         }
         busy = true
+        markedIncompleteThisRun = false
         // A multi-hour first sync must not die because the screen locked; SyncView
         // refreshes this when the app becomes active again.
         IdleTimerLock.acquire("ring-sync")
@@ -422,6 +450,7 @@ final class RingSync: ObservableObject {
                 lastSuccessfulSyncAt = completedAt
                 UserDefaults.standard.set(completedAt.timeIntervalSince1970,
                                           forKey: Self.lastSuccessfulSyncKey)
+                clearIncompleteSync()
                 dlog("sync", "OK — serial=\(report.serial) inserted=\(report.inserted) events=\(report.eventsSynced) cursor=\(report.nextCursor)")
                 status = "synced — \(report.inserted) new events from \(report.serial)"
                 return report
@@ -435,14 +464,21 @@ final class RingSync: ObservableObject {
                 if Self.isAuthenticationFailure(error) {
                     status = "auth failed — this key was rejected by the ring; paste the key exported from the phone that onboarded this exact ring"
                     dlog("sync", "not retrying: auth rejection is deterministic")
+                    // Deterministic rejection — an eager resume would just re-fail.
+                    clearIncompleteSync()
                     return nil
                 }
                 status = "sync interrupted: \(error)"
             }
         }
-        status = source == "automatic"
-            ? "automatic sync couldn't reach the ring — tap the sync icon for details"
-            : "sync failed after \(maxAttempts) attempts — progress is saved, run sync again to resume (\(status))"
+        switch source {
+        case "automatic":
+            status = "automatic sync couldn't reach the ring — tap the sync icon for details"
+        case "resume":
+            status = "couldn't resume the interrupted sync — it will retry when you return to the app"
+        default:
+            status = "sync failed after \(maxAttempts) attempts — progress is saved, run sync again to resume (\(status))"
+        }
         dlog("sync", "giving up after \(maxAttempts) attempts — cursor is checkpointed, next sync resumes")
         return nil
     }
@@ -450,6 +486,12 @@ final class RingSync: ObservableObject {
     /// Render Rust-side progress into the status line.
     private func showProgress(stage: String, bytesLeft: UInt64, events: UInt32) {
         dlog("progress", "stage=\(stage) bytesLeft=\(bytesLeft) events=\(events)")
+        // Real drain progress means data is mid-transfer: from here until the sync
+        // completes, an interruption should resume eagerly on return to the app.
+        if events > 0, !markedIncompleteThisRun {
+            markedIncompleteThisRun = true
+            UserDefaults.standard.set(true, forKey: Self.syncIncompleteKey)
+        }
         switch stage {
         case "auth":
             status = "authenticating…"

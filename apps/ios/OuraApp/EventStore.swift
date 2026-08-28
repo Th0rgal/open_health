@@ -6,6 +6,19 @@ import Foundation
 // the same decoded-JSON event stream and time anchor; this is that read in one place
 // (CvaModel reads raw PPG blobs instead, so it opens the DB itself).
 enum EventStore {
+    /// A failed read must never masquerade as "no data": a truncated event list
+    /// would wipe every model-derived panel and get persisted by SummaryCache.
+    enum ReadError: Error, CustomStringConvertible {
+        case open(String), prepare(String), step(String)
+        var description: String {
+            switch self {
+            case .open(let m): return "couldn't open the ring database: \(m)"
+            case .prepare(let m): return "couldn't query the ring database: \(m)"
+            case .step(let m): return "ring database read was interrupted: \(m)"
+            }
+        }
+    }
+
     // A decoded event row: ring timestamp (ds), tag, decoded JSON, capture unix time.
     struct Ev {
         let ds: Int64
@@ -15,34 +28,57 @@ enum EventStore {
         let body: Data?
     }
 
-    /// All events with decoded JSON, ordered by ring timestamp. Empty on any failure.
-    static func decodedEvents(dbPath: String) -> [Ev] {
+    /// All events with decoded JSON, ordered by sync order. Throws on any failure —
+    /// callers must distinguish "no data" (empty array) from "couldn't read".
+    static func decodedEvents(dbPath: String) throws -> [Ev] {
         var db: OpaquePointer?
-        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return [] }
+        // Read-only: the sync writer may hold the file; the busy timeout rides out
+        // its lock windows instead of surfacing a partial row set.
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            let msg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
+            sqlite3_close(db)
+            throw ReadError.open(msg)
+        }
         defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 5000)
 
         var events: [Ev] = []
         var stmt: OpaquePointer?
         let sql = "SELECT ring_timestamp, tag, decoded_json, captured_unix, body FROM events WHERE decoded_json IS NOT NULL ORDER BY captured_unix, id"
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw ReadError.prepare(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var rc = sqlite3_step(stmt)
+        while rc == SQLITE_ROW {
+            defer { rc = sqlite3_step(stmt) }  // runs on continue too
+            let tag = Int(sqlite3_column_int(stmt, 1))
+            let body: Data?
+            if let bytes = sqlite3_column_blob(stmt, 4) {
+                body = Data(bytes: bytes, count: Int(sqlite3_column_bytes(stmt, 4)))
+            } else {
+                body = nil
+            }
+            // real_step packets (0x7E/0x7F) are 14-byte bodies. Parsing their JSON
+            // on hiking-heavy histories is a large share of the analysis RAM spike
+            // and the models never read that JSON.
+            var obj: [String: Any] = [:]
+            if tag != 0x7E, tag != 0x7F {
                 guard let cText = sqlite3_column_text(stmt, 2),
                       let data = String(cString: cText).data(using: .utf8),
-                      let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
-                let body: Data?
-                if let bytes = sqlite3_column_blob(stmt, 4) {
-                    body = Data(bytes: bytes, count: Int(sqlite3_column_bytes(stmt, 4)))
-                } else {
-                    body = nil
-                }
-                events.append(Ev(ds: sqlite3_column_int64(stmt, 0),
-                                 tag: Int(sqlite3_column_int(stmt, 1)),
-                                 json: obj,
-                                 cu: sqlite3_column_int64(stmt, 3),
-                                 body: body))
+                      let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                else { continue }
+                obj = parsed
             }
+            events.append(Ev(ds: sqlite3_column_int64(stmt, 0),
+                             tag: tag,
+                             json: obj,
+                             cu: sqlite3_column_int64(stmt, 3),
+                             body: body))
         }
-        sqlite3_finalize(stmt)
+        guard rc == SQLITE_DONE else {
+            throw ReadError.step(String(cString: sqlite3_errmsg(db)))
+        }
         return events
     }
 

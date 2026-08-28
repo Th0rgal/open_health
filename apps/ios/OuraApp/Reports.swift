@@ -732,8 +732,7 @@ struct SleepDebtDetail: View {
             }
             .navigationTitle("sleep debt").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-            .toolbarColorScheme(.dark, for: .navigationBar)
-        }.preferredColorScheme(.dark)
+        }
     }
 }
 
@@ -775,7 +774,6 @@ struct DayReportView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 }
 

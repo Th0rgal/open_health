@@ -48,7 +48,7 @@ struct NightRow: Codable, Identifiable {
 struct DailyStat: Codable { var active_kcal: Double?; var total_kcal: Double?; var steps: Double?; var distance_m: Double? }
 struct Profile: Codable { var sex: String?; var age: Double?; var height_m: Double?; var weight_kg: Double?; var ring_size: Double? }
 // a detected activity session (on-device automatic_activity_detection)
-struct WorkoutSession: Identifiable {
+struct WorkoutSession: Identifiable, Codable {
     let start: String; let end: String; let durationMin: Int; let label: String; let isWorkout: Double
     var id: String { start + label }
     var dayLabel: String { String(start.prefix(10)) }      // YYYY-MM-DD

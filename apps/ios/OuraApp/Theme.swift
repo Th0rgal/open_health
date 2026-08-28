@@ -1,47 +1,53 @@
 import SwiftUI
+import UIKit
 
-// "Observatory" design tokens (see apps/ios/GOAL.md), shared design language with the
-// web dashboard: a calm near-black canvas with a faint teal aurora, translucent glass
-// surfaces, one accent, monospace numerics. Science-refined minimalism.
+// thomas.md Quiet Ink on native SwiftUI. Warm paper, hairlines, serif titles,
+// sans UI, mono numbers. Light and dark from the same tokens. No glass, no teal.
+
 enum Obs {
-    static let black = Color.black
-    // deep, slightly-cool base of the gradient canvas (matches web --bg #0b0c0f)
-    static let base = Color(red: 0.043, green: 0.047, blue: 0.059)
-    static let baseLow = Color(red: 0.024, green: 0.027, blue: 0.035)
-
-    static let ink = Color(white: 0.93)        // primary
-    static let ink2 = Color(white: 0.54)       // secondary
-    static let trace = Color(white: 0.27)       // structural traces / dashes
-
-    static let teal = Color(red: 0.176, green: 0.831, blue: 0.749) // accent, == web #2dd4bf
-    static let yellow = Color(red: 0.90, green: 0.75, blue: 0.30) // the one threshold
-
-    /// The shared calm canvas: a soft vertical gradient with a faint teal aurora bloom
-    /// top-center — the iOS echo of the web dashboard's ambient glow. Use behind screens
-    /// via `Obs.canvas.ignoresSafeArea()` instead of a flat fill.
-    static var canvas: some View {
-        LinearGradient(colors: [base, baseLow], startPoint: .top, endPoint: .bottom)
-            .overlay(alignment: .top) {
-                RadialGradient(
-                    colors: [teal.opacity(0.10), .clear],
-                    center: .top, startRadius: 0, endRadius: 460
-                )
-                .blendMode(.screen)
-            }
+    private static func adaptive(light: UInt32, dark: UInt32) -> Color {
+        Color(uiColor: UIColor { trait in
+            let hex = trait.userInterfaceStyle == .dark ? dark : light
+            return UIColor(
+                red: CGFloat((hex >> 16) & 0xff) / 255,
+                green: CGFloat((hex >> 8) & 0xff) / 255,
+                blue: CGFloat(hex & 0xff) / 255,
+                alpha: 1)
+        })
     }
 
-    // sleep-stage hues, matching the web dashboard's dark theme (deep darkest → awake
-    // lightest). Used by the hypnogram + stage breakdown.
-    static let deep = Color(red: 0.365, green: 0.412, blue: 0.537)
-    static let light = Color(red: 0.549, green: 0.592, blue: 0.702)
-    static let rem = Color(red: 0.435, green: 0.631, blue: 0.659)
-    static let wake = Color(red: 0.757, green: 0.690, blue: 0.561)
-    /// stage code 1=deep 2=light 3=rem 4=wake (matches run_sleep_model.py)
+    // Paper / ink — same values as thomas.md (dark paper is one step from #121110).
+    static let paper = adaptive(light: 0xfbfaf6, dark: 0x131110)
+    static let ink = adaptive(light: 0x26231e, dark: 0xefebe2)       // headings
+    static let ink2 = adaptive(light: 0x57534b, dark: 0xcfc9bf)      // body
+    static let muted = adaptive(light: 0x6e695f, dark: 0xa8a195)
+    static let link = adaptive(light: 0x2e2b26, dark: 0xe3ddd2)
+    static let rule = adaptive(light: 0xe7e3da, dark: 0x2c2925)
+    static let warn = adaptive(light: 0x8a5a32, dark: 0xc4a07a)
+
+    // Back-compat names used across screens. Charts and tappable bits follow link
+    // ink; "notice" follows warn; filled buttons sit on link with paper text.
+    static var teal: Color { link }
+    static var yellow: Color { warn }
+    static var black: Color { paper }
+    static var base: Color { paper }
+    static var baseLow: Color { paper }
+    static var trace: Color { rule }
+
+    static var canvas: some View { paper.ignoresSafeArea() }
+
+    // Sleep stages on warm paper: deep darkest → awake lightest, still four hues.
+    static let deep = adaptive(light: 0x3f3b34, dark: 0x6a6358)
+    static let light = adaptive(light: 0x8a8276, dark: 0x9a9286)
+    static let rem = adaptive(light: 0x5a6a5c, dark: 0x7a8a7a)
+    static let wake = adaptive(light: 0xc4b48a, dark: 0xd4c4a0)
     static func stage(_ s: Int) -> Color {
         switch s { case 1: return deep; case 2: return light; case 3: return rem; default: return wake }
     }
 
-    // Type — SF Mono for every number/axis/tag; SF Pro for prose.
+    static func serif(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: .serif)
+    }
     static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .monospaced)
     }
@@ -50,8 +56,6 @@ enum Obs {
     }
 }
 
-// A small all-caps mono section tag with an optional leading SF Symbol — the section
-// header voice, mirroring the web dashboard's icon + label panel heads.
 struct ObsTag: View {
     let text: String
     var icon: String? = nil
@@ -61,49 +65,37 @@ struct ObsTag: View {
             if let icon {
                 Image(systemName: icon)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Obs.ink2.opacity(0.85))
+                    .foregroundStyle(Obs.muted)
             }
             Text(text.uppercased())
                 .font(Obs.mono(11, .medium))
                 .tracking(2)
-                .foregroundStyle(Obs.ink2)
+                .foregroundStyle(Obs.muted)
         }
     }
 }
 
-// ── glass surface ─────────────────────────────────────────────────────────────
-// A translucent "liquid glass" card: an ultra-thin material with a 1px light rim and a
-// soft top sheen (a web-glassmorphism-style approximation of the web dashboard panels;
-// not Apple's system Liquid Glass API). Degrades to the material fill under reduced
-// transparency automatically.
+// Paper panel: hairline on paper, 10pt radius. No blur, no glass.
 struct ObsCard: ViewModifier {
     var padding: CGFloat = 18
-    var radius: CGFloat = 18
+    var radius: CGFloat = 10
     func body(content: Content) -> some View {
         content
             .padding(padding)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .background(Obs.paper, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [.white.opacity(0.16), .white.opacity(0.03)],
-                            startPoint: .top, endPoint: .bottom
-                        ),
-                        lineWidth: 0.8
-                    )
+                    .strokeBorder(Obs.rule, lineWidth: 1)
             )
-            .shadow(color: .black.opacity(0.28), radius: 18, x: 0, y: 10)
     }
 }
 
 extension View {
-    func obsCard(padding: CGFloat = 18, radius: CGFloat = 18) -> some View {
+    func obsCard(padding: CGFloat = 18, radius: CGFloat = 10) -> some View {
         modifier(ObsCard(padding: padding, radius: radius))
     }
 }
 
-// One labelled datum, value in mono. The atom of the readout panels.
 struct ObsStat: View {
     let label: String
     let value: String

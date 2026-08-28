@@ -54,12 +54,12 @@ enum Core {
     /// The slow part: run the three on-device torch models and fold their results into
     /// the summary. Call off the main thread (see RootView.load); never on launch.
     ///
-    /// The models are independent (each opens its own DB read), so they run concurrently
-    /// — wall-clock is the slowest single model, not their sum. Each reports a per-model
-    /// error for genuine failures (missing model / inference failure); those surface in
-    /// `modelErrors` so the UI can say a section didn't compute instead of silently
-    /// showing the model-free state.
-    static func withModels(_ base: Summary) -> Summary {
+    /// Models share one LibTorch runtime, so they run one after another (TorchBridge
+    /// also serializes `forward()`). Concurrent inference raced the interpreter and
+    /// peaked RAM on hiking-heavy histories. Each reports a per-model error for
+    /// genuine failures; those surface in `modelErrors`.
+    static func withModels(_ base: Summary, previous: Summary?,
+                           progress: @escaping @Sendable (String) -> Void = { _ in }) -> Summary {
         var s = base
         let profile = base.profile
 
@@ -69,23 +69,50 @@ enum Core {
         var illness: IllnessResult?
         var sleepErr: String?, cvaErr: String?, actErr: String?, illErr: String?
 
-        let group = DispatchGroup()
-        let q = DispatchQueue.global(qos: .userInitiated)
-        q.async(group: group) {
-            let r = SleepStaging.run(nights: base.nights)
-            staged = r.staged
-            sleepErr = r.error
+        // One shared read: one failure point, one lock-contention window, and the
+        // RingClock epoch recovery is paid once instead of once per model.
+        progress("reading ring data…")
+        var events: [EventStore.Ev] = []
+        var readErr: String?
+        do {
+            events = try EventStore.decodedEvents(dbPath: DB.readPath())
+        } catch {
+            readErr = "\(error)"
         }
-        q.async(group: group) {
-            let r = CvaModel.run(sex: profile?.sex ?? "M", age: profile?.age ?? 30,
-                                 heightM: profile?.height_m ?? 1.78, weightKg: profile?.weight_kg ?? 75,
-                                 ringSize: profile?.ring_size ?? 10)
-            cva = r.result; cvaErr = r.error
-        }
-        q.async(group: group) { let r = ActivityModel.run(profile: profile); workouts = r.sessions; actErr = r.error }
-        q.async(group: group) { let r = IllnessModel.run(profile: profile); illness = r.result; illErr = r.error }
-        group.wait()
+        memLog("read \(events.count) events")
 
+        if readErr == nil, !events.isEmpty {
+            let clock = EventStore.RingClock(events: events)
+            let rSleep = SleepStaging.run(nights: base.nights, events: events, clock: clock, progress: progress)
+            staged = rSleep.staged
+            sleepErr = rSleep.error
+            memLog("after sleep")
+            let rAct = ActivityModel.run(profile: profile, events: events, clock: clock, progress: progress)
+            workouts = rAct.sessions; actErr = rAct.error
+            memLog("after activity")
+            let rIll = IllnessModel.run(profile: profile, events: events, clock: clock)
+            illness = rIll.result; illErr = rIll.error
+            memLog("after illness")
+        } else if let readErr {
+            // The shared read failed: every event-fed model is unavailable this
+            // pass. Surface one error; the publish below falls back to `previous`.
+            sleepErr = readErr; actErr = readErr; illErr = readErr
+        }
+        let rCva = CvaModel.run(sex: profile?.sex ?? "M", age: profile?.age ?? 30,
+                                heightM: profile?.height_m ?? 1.78, weightKg: profile?.weight_kg ?? 75,
+                                ringSize: profile?.ring_size ?? 10)
+        cva = rCva.result; cvaErr = rCva.error
+        memLog("after cva")
+
+        // If staging failed outright, refill from the last published summary so a
+        // transient read failure can't strip hypnograms that were already on screen.
+        if sleepErr != nil, staged.isEmpty, let previous {
+            for night in previous.nights {
+                if let sds = night.start_ds, let stages = night.stages, !stages.isEmpty {
+                    staged[String(sds)] = stages
+                }
+            }
+        }
         // fold SleepNet's hypnogram + stage breakdown into each night, keyed by the exact
         // bedtime start_ds so two sleeps on one calendar day don't collide.
         for i in s.nights.indices {
@@ -108,10 +135,17 @@ enum Core {
         if let cva {
             s.cardio = Cardio(vascular_age: cva.vascularAge, chronological_age: profile?.age ?? 30,
                               pwv_ms: cva.pwv, segments: cva.segments)
+        } else if cvaErr != nil {
+            s.cardio = previous?.cardio
         }
-        s.workouts = workouts
-        s.illness = illness
+        // Never let a failed run replace real results with emptiness (the same
+        // principle as the staged-sleep-debt coverage guard above).
+        s.workouts = (actErr == nil || !workouts.isEmpty) ? workouts : (previous?.workouts ?? [])
+        s.illness = (illErr == nil || illness != nil) ? illness : previous?.illness
+        // Deduplicated: a failed shared read sets the same message on three models.
+        var seen = Set<String>()
         s.modelErrors = [sleepErr, cvaErr, actErr, illErr].compactMap { $0 }
+            .filter { seen.insert($0).inserted }
         return s
     }
     #endif
