@@ -16,11 +16,12 @@ import sys, json, sqlite3, datetime
 from pathlib import Path
 import torch
 
-from _common import resolve_db
+from _common import resolve_db, resolve_models_dir
 
 REPO = Path(__file__).resolve().parent.parent
 TZ = 1
-MODEL = str(REPO / "notes" / "models" / "sleepnet_moonstone_1_2_0.pt")
+MODEL_NAME = "sleepnet_moonstone_1_2_0.pt"
+MODEL = str(resolve_models_dir(REPO, MODEL_NAME) / MODEL_NAME)
 STAGE = {1: "DEEP", 2: "LIGHT", 3: "REM", 4: "WAKE"}
 
 JSON = "--json" in sys.argv
@@ -39,14 +40,14 @@ DB = resolve_db(db_arg, REPO)
 
 con = sqlite3.connect(str(DB))
 rows = con.execute("SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events "
-                   "WHERE decoded_json IS NOT NULL ORDER BY ring_timestamp").fetchall()
+                   "WHERE decoded_json IS NOT NULL ORDER BY captured_unix, id").fetchall()
 # Anchor ring deciseconds to wall-clock per boot epoch (ds resets on reboot; a single
 # global anchor mis-dates older epochs — see epoch_time / crates/oura-summary).
 from epoch_time import build_epochs, make_unix_s
-_epochs = build_epochs([(r[0], r[3]) for r in rows])
+_epochs = build_epochs(rows)
 _unix_s = make_unix_s(_epochs)
-def ms(ds):  # device deciseconds -> absolute epoch ms (int64), consistent across signals
-    return int(_unix_s(ds) * 1000)
+def ms(ds, cu=None):  # device deciseconds -> absolute epoch ms (int64), consistent across signals
+    return int(_unix_s(ds, cu) * 1000)
 def hm(ms_):
     return datetime.datetime.utcfromtimestamp(ms_/1000 + TZ*3600).strftime("%H:%M")
 
@@ -58,13 +59,15 @@ def score_window(start_ds, end_ds):
     """Score one bedtime window. Returns (out_dict, ts, stages) or (err_str, None, None)."""
     lo, hi = start_ds - 6000, end_ds + 6000  # ±10 min margin
     beats, acm, temp = [], [], []
-    for ds, tag, js, _ in rows:
+    bed_cu = next((cu for ds, tag, js, cu in rows if tag == 0x76 and
+                   json.loads(js).get("bedtime_start_ds") == start_ds), None)
+    for ds, tag, js, cu in rows:
         if not (lo <= ds <= hi):
             continue
         v = json.loads(js)
         if tag in (0x60, 0x80) and v.get("ibi_ms"):  # ibi_and_amplitude + green_ibi_quality
             ibi = v["ibi_ms"]; amp = v.get("amplitude", [0] * len(ibi))
-            t = ms(ds); acc = 0
+            t = ms(ds, cu); acc = 0
             for i, x in enumerate(ibi):
                 if x <= 0:  # zero/negative IBI can't advance the beat clock — skip (matches run_bdi)
                     continue
@@ -72,9 +75,9 @@ def score_window(start_ds, end_ds):
                 valid = 1 if 300 <= x <= 2000 else 0
                 beats.append((t + acc, float(x), float(amp[i] if i < len(amp) else 0), valid))
         elif tag == 0x47 and v.get("motion_seconds") is not None:
-            acm.append((ms(ds), float(v["motion_seconds"])))
+            acm.append((ms(ds, cu), float(v["motion_seconds"])))
         elif tag == 0x46 and v.get("temps_c"):
-            temp.append((ms(ds), float(v["temps_c"][0])))
+            temp.append((ms(ds, cu), float(v["temps_c"][0])))
 
     beats.sort(); acm.sort(); temp.sort()
     if not beats or not any(b[3] == 1 for b in beats):
@@ -88,7 +91,7 @@ def score_window(start_ds, end_ds):
     acm_val = torch.tensor([[a[1]] for a in acm], dtype=torch.float32)
     temp_ts = torch.tensor(col(temp, 0), dtype=torch.int64)
     temp_val = torch.tensor([[t[1]] for t in temp], dtype=torch.float32)
-    bedtime = torch.tensor([ms(start_ds), ms(end_ds)], dtype=torch.int64)
+    bedtime = torch.tensor([ms(start_ds, bed_cu), ms(end_ds, bed_cu)], dtype=torch.int64)
     spo2_val = torch.empty(0, 1, dtype=torch.float32)
     spo2_ts = torch.empty(0, dtype=torch.int64)
     scalars = torch.tensor([35, 25, 0, 0, 0], dtype=torch.float32)
@@ -131,7 +134,7 @@ if BATCH:
     sys.exit(0)
 
 if start_ds is None:  # default: most recent bedtime_period in the DB (matches run_models.last_bedtime)
-    bt = con.execute("SELECT decoded_json FROM events WHERE tag=118 ORDER BY ring_timestamp DESC").fetchone()
+    bt = con.execute("SELECT decoded_json FROM events WHERE tag=118 ORDER BY captured_unix DESC, id DESC").fetchone()
     if bt is None:
         raise SystemExit("no bedtime_period (tag 0x76) in DB — pass start/end deciseconds or sync overnight data first")
     v = json.loads(bt[0])

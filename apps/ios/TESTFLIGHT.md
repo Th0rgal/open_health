@@ -10,7 +10,7 @@ signing requires *your* Apple Developer account.
 - Install xcodegen: `brew install xcodegen`.
 
 ## Build & upload
-Current upload version is configured as **0.1.1 (5)** in
+Current upload version is configured as **0.1.1 (22)** in
 `OuraApp/project.yml` and `OuraApp/project-ci.yml`.
 
 ```bash

@@ -12,11 +12,11 @@ name = "oura_core"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
-oura-analysis = { git = "https://github.com/Th0rgal/open_oura", branch = "split-open-health" }
-oura-store = { git = "https://github.com/Th0rgal/open_oura", branch = "split-open-health" }
+oura-analysis = { git = "https://github.com/Th0rgal/open_oura", rev = "b1b52a0da36a592d5fe8967b0024dcc40d5c746f" }
+oura-store = { git = "https://github.com/Th0rgal/open_oura", rev = "b1b52a0da36a592d5fe8967b0024dcc40d5c746f" }
 oura-summary = { path = "../oura-summary" }
 # the ring client + transport trait, WITHOUT btleplug (iOS supplies the transport)
-oura-link = { git = "https://github.com/Th0rgal/open_oura", branch = "split-open-health", default-features = false }
+oura-link = { git = "https://github.com/Th0rgal/open_oura", rev = "b1b52a0da36a592d5fe8967b0024dcc40d5c746f", default-features = false }
 uniffi = { version = "0.28", features = ["cli", "tokio"] }
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
 async-trait = "0.1"

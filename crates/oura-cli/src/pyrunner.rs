@@ -47,10 +47,39 @@ pub fn resolve_db(db: &Path) -> Result<PathBuf> {
 
 /// The repo venv's python (which has torch) if present, else `python3` on PATH.
 pub fn venv_python(root: &Path) -> PathBuf {
-    let venv = root.join(".venv/bin/python");
-    if venv.is_file() {
-        venv
-    } else {
-        PathBuf::from("python3")
+    if let Some(configured) = std::env::var_os("OURA_PYTHON") {
+        return PathBuf::from(configured);
     }
+
+    let candidates = [
+        root.join(".venv/bin/python"),
+        root.parent()
+            .unwrap_or(root)
+            .join("open_oura/.venv/bin/python"),
+    ];
+    candidates
+        .into_iter()
+        .find(|python| python.is_file())
+        .unwrap_or_else(|| PathBuf::from("python3"))
+}
+
+/// Locate one private desktop model in either the product checkout or the
+/// sibling protocol checkout used before the repository split.
+#[cfg(feature = "torch")]
+pub fn model_path(root: &Path, filename: &str) -> PathBuf {
+    if let Some(dir) = std::env::var_os("OURA_MODELS_DIR") {
+        return PathBuf::from(dir).join(filename);
+    }
+    let candidates = [
+        root.join("notes/models").join(filename),
+        root.parent()
+            .unwrap_or(root)
+            .join("open_oura/notes/models")
+            .join(filename),
+    ];
+    candidates
+        .iter()
+        .find(|model| model.is_file())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone())
 }

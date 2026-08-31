@@ -23,9 +23,9 @@
   --rem: #4fa6b0;
   --wake: #d2b06e;
 
-  --radius: 8px;
-  --radius-sm: 5px;
-  --maxw: 1000px;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --maxw: 1240px;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
   /* editorial display serif (system-only, no network — keeps the dashboard offline) */
@@ -124,7 +124,9 @@ html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
   font-family: var(--sans);
-  background: var(--bg);
+  background:
+    radial-gradient(900px 520px at 12% -12%, color-mix(in oklab, var(--accent) 5%, transparent), transparent 68%),
+    var(--bg);
   color: var(--text);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -134,7 +136,7 @@ body {
 .wrap {
   max-width: var(--maxw);
   margin: 0 auto;
-  padding: clamp(28px, 5vh, 64px) clamp(20px, 4vw, 40px) clamp(64px, 10vh, 120px);
+  padding: clamp(20px, 3.5vh, 44px) clamp(20px, 3vw, 40px) clamp(64px, 10vh, 120px);
 }
 
 /* ── header (flat instrument bar, hairline underline) ───── */
@@ -145,9 +147,11 @@ body {
   position: sticky;
   top: 0;
   z-index: 30;
-  margin-bottom: var(--s5);
+  margin-bottom: var(--s4);
   padding: var(--s2) 2px var(--s3);
-  background: var(--bg);
+  background: color-mix(in oklab, var(--bg) 88%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(130%);
   border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 11px; }
@@ -157,6 +161,11 @@ body {
   box-shadow: inset 0 0 0 3px var(--bg);
 }
 .word { font-weight: 600; letter-spacing: -0.01em; font-size: 16px; }
+.brand-copy { display: flex; align-items: baseline; gap: 11px; min-width: 0; }
+.brand-meta {
+  font-family: var(--mono); font-size: 9px; line-height: 1;
+  color: var(--faint); letter-spacing: 0.11em; text-transform: uppercase;
+}
 
 .actions { display: flex; align-items: center; gap: 8px; }
 .batt {
@@ -185,13 +194,22 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .action.syncing .ic { animation: none; } }
 
-/* ── digest (restrained status line, not an editorial hero) ── */
+/* ── latest interpretation: a compact lab-note band ───────── */
+.brief {
+  display: grid; grid-template-columns: 168px minmax(0, 1fr); align-items: baseline;
+  gap: var(--s4); margin: 0 0 var(--s4); padding: var(--s3) 2px var(--s4);
+  border-bottom: 1px solid var(--line-soft);
+}
+.brief-label {
+  font-family: var(--mono); font-size: 9.5px; font-weight: 600;
+  color: var(--faint); letter-spacing: 0.1em; text-transform: uppercase;
+}
 .digest {
   font-family: var(--sans);
   font-size: 15px;
   line-height: 1.5;
   font-weight: 400;
-  margin: 0 0 var(--s5);
+  margin: 0;
   max-width: 78ch;
   color: var(--muted);
 }
@@ -265,6 +283,21 @@ body {
   padding: var(--s5);
   margin-top: var(--s5);
 }
+
+/* ── desktop research workspace ─────────────────────────── */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.78fr) minmax(340px, 0.92fr);
+  gap: 20px;
+  align-items: start;
+}
+.dashboard-main, .dashboard-side { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.dashboard-grid .panel,
+.dashboard-grid .tiles,
+.dashboard-grid .cols-2 { margin-top: 0; margin-bottom: 0; }
+.dashboard-grid #device-panel .device { grid-template-columns: 1fr; gap: 20px; }
+.dashboard-grid #device-panel .dh-stats { grid-template-columns: repeat(2, 1fr); }
+.dashboard-grid #device-panel .dh-advanced { margin-top: 0; }
 .panel-head {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: var(--s4); padding-bottom: var(--s3); border-bottom: 1px solid var(--line-soft);
@@ -461,6 +494,28 @@ body.page-open { overflow: hidden; }
 .id-v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 560; color: var(--accent); }
 .id-k { font-size: 12.5px; color: var(--muted); line-height: 1.4; }
 
+/* Android-parity sleep debt card + 14-day detail */
+.sd-card { width: 100%; text-align: left; color: inherit; background: none; border: 0; padding: 2px; cursor: pointer; font: inherit; }
+.sd-card:hover .sd-period { color: var(--accent); }
+.sd-card-value { font: 560 30px/1.1 var(--mono); color: var(--accent); font-variant-numeric: tabular-nums; }
+.sd-card-value span { font: 600 11px var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-left: 8px; }
+.sd-card-value.pending { color: var(--text); font-size: 20px; }
+.sd-card p, .sd-copy { color: var(--muted); max-width: 62ch; line-height: 1.5; margin: 10px 0; }
+.sd-period { font: 11px var(--mono); color: var(--faint); transition: color .15s; }
+.sleep-debt-dialog { width: min(680px, calc(100vw - 32px)); }
+.sd-detail-head { display: flex; align-items: start; justify-content: space-between; }
+.sd-value { font: 560 38px var(--mono); color: var(--accent); font-variant-numeric: tabular-nums; margin: 18px 0 4px; }
+.sd-value span { font: 600 11px var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+.sd-value.small { color: var(--text); font: 500 24px var(--serif); }
+.sd-tabs { display: grid; grid-template-columns: 1fr 1fr; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; padding: 3px; margin: 22px 0 14px; }
+.sd-tabs button { border: 0; background: none; color: var(--muted); padding: 8px; border-radius: 5px; cursor: pointer; }
+.sd-tabs button.active { color: var(--text); background: var(--surface); box-shadow: 0 0 0 1px var(--line); }
+.sd-chart { width: 100%; height: 190px; overflow: visible; }
+.sd-grid line { stroke: var(--line); stroke-width: 1; }
+.sd-line { fill: none; stroke: var(--accent); stroke-width: 3; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+.sd-need { stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 6 6; vector-effect: non-scaling-stroke; }
+.sd-axis { display: flex; justify-content: space-between; font: 10px var(--mono); color: var(--faint); margin: 6px 0 24px; }
+
 /* activity movement profile */
 .met-wrap { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; box-shadow: var(--sheen), var(--shadow); }
 .met-svg { display: block; width: 100%; height: 120px; overflow: visible; }
@@ -600,10 +655,38 @@ body.page-open { overflow: hidden; }
 }
 
 /* ── responsive ─────────────────────────────────────────── */
+@media (max-width: 1080px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  .dashboard-main, .dashboard-side { display: contents; }
+  .dashboard-grid #day-panel { grid-row: 1; }
+  .dashboard-grid #sleep-debt-panel { grid-row: 2; }
+  .dashboard-grid #tiles { grid-row: 3; }
+  .dashboard-grid #clinical-grid { grid-row: 4; }
+  .dashboard-grid #device-panel { grid-row: 5; }
+  .dashboard-grid #device-panel .device { grid-template-columns: repeat(2, 1fr); }
+  .dashboard-grid #device-panel .dh-stats { grid-template-columns: repeat(4, 1fr); }
+}
 @media (max-width: 760px) {
+  .wrap { padding-inline: 16px; }
+  .brand-meta { display: none; }
+  .brief { grid-template-columns: 1fr; gap: var(--s2); }
   .tiles { grid-template-columns: repeat(2, 1fr); }
   .cols-2 { grid-template-columns: 1fr; }
   .dh-stats { grid-template-columns: 1fr; }
+  .dashboard-grid #device-panel .device { grid-template-columns: 1fr; }
+  .dashboard-grid #device-panel .dh-stats { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 520px) {
+  .top { align-items: flex-start; }
+  .actions { gap: 5px; }
+  .action { padding-inline: 9px; }
+  .action span:not(.ic), .batt { display: none; }
+  .action.icon-only { padding: 7px; }
+  .legend { gap: 8px; font-size: 10px; }
+  .panel { padding: var(--s4); }
 }
 .error {
   padding: 24px; text-align: center; color: var(--muted); font-size: 14px;
@@ -748,3 +831,24 @@ body.page-open { overflow: hidden; }
 /* capabilities + battery tweaks */
 .adv-body .caps { max-width: 400px; margin-top: -2px; }
 .dh-stat.low .v { color: var(--warn); }
+
+/* Symptom radar (on-device illness detection) */
+.illness { display: flex; flex-direction: column; gap: 12px; }
+.il-status { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }
+.il-dot { width: 12px; height: 12px; border-radius: 50%; flex: none; box-shadow: 0 0 0 4px var(--il-glow, transparent); }
+.il-ok   { --il-c: var(--accent); }
+.il-warn { --il-c: var(--warn); }
+.il-alert{ --il-c: #d5524a; }
+.il-status .il-dot { background: var(--il-c); box-shadow: 0 0 0 4px color-mix(in oklab, var(--il-c) 18%, transparent); }
+.il-status .il-label { color: var(--il-c); }
+.il-copy { font-size: 13px; color: var(--muted); line-height: 1.45; margin: 0; }
+.il-biomarkers { display: flex; flex-direction: column; gap: 6px; }
+.il-bm { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  padding: 8px 10px; border-radius: 9px; background: var(--accent-soft);
+  border: 1px solid var(--line-soft); font-size: 13px; }
+.il-bm.il-up   { background: color-mix(in oklab, #d5524a 9%, transparent); }
+.il-bm.il-down { background: color-mix(in oklab, var(--warn) 9%, transparent); }
+.il-bm-name { color: var(--text); font-weight: 500; }
+.il-bm-val { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--text); }
+.il-bm-val em { font-style: normal; color: var(--muted); font-size: 11px; margin-left: 4px; }
+.il-foot { font-family: var(--mono); font-size: 10px; color: var(--faint); letter-spacing: 0.02em; }

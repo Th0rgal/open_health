@@ -309,6 +309,117 @@ function renderDay(d) {
   }
 }
 
+const debtDuration = (minutes) => {
+  const m = Math.max(0, Math.round(minutes || 0));
+  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+};
+const debtStateCopy = (state) => ({
+  high: "Your sleep debt is high right now. Prioritize several consistent nights with enough sleep.",
+  moderate: "You’ve built up a moderate amount of sleep debt. A few longer nights can help you recover.",
+  low: "You’re mostly meeting your sleep need, with a small amount left to recover.",
+  none: "You’ve met your sleep need consistently over the past two weeks.",
+}[state] || "You’ve met your sleep need consistently over the past two weeks.");
+
+function sleepDebtSvg(sd, mode) {
+  const values = (sd.days || []).map((x) => mode === "debt" ? x.cumulative_debt_min : x.total_sleep_min);
+  const w = 900, h = 190, max = mode === "debt" ? 600 : Math.max(720, ...values.filter((x) => x != null));
+  const x = (i) => i / Math.max(1, values.length - 1) * w;
+  const y = (v) => h - Math.min(1, Math.max(0, v / max)) * h;
+  let path = "", started = false;
+  values.forEach((v, i) => {
+    if (v == null) { started = false; return; }
+    path += `${started ? " L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`; started = true;
+  });
+  const grid = [0.25, 0.5, 0.75].map((f) => `<line x1="0" y1="${h * (1-f)}" x2="${w}" y2="${h * (1-f)}"/>`).join("");
+  const need = mode === "sleep" ? `<line class="sd-need" x1="0" y1="${y(sd.need_h * 60)}" x2="${w}" y2="${y(sd.need_h * 60)}"/>` : "";
+  return `<svg class="sd-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><g class="sd-grid">${grid}</g>${need}<path class="sd-line" d="${path}"/></svg>`;
+}
+
+function openSleepDebt(sd) {
+  let dlg = $("sleep-debt-dialog");
+  if (!dlg) {
+    dlg = el("dialog", "dialog sleep-debt-dialog"); dlg.id = "sleep-debt-dialog";
+    document.body.append(dlg);
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+  }
+  const valid = sd.valid;
+  dlg.innerHTML = `<form method="dialog">
+    <div class="sd-detail-head"><div><h3>Sleep debt</h3><div class="dialog-sub">Past ${sd.window_days || 14} days</div></div><button class="dd-close" aria-label="Close">×</button></div>
+    ${valid ? `<div class="sd-value">${debtDuration(sd.debt_min)} <span>${esc(sd.state)}</span></div><p class="sd-copy">${debtStateCopy(sd.state)}</p>`
+      : `<div class="sd-value small">Not enough data yet</div><p class="sd-copy">${sd.valid_days || 0} of 5 sleep days available within the past 2 weeks.</p>`}
+    <div class="sd-tabs"><button type="button" data-mode="debt" class="active">Cumulative debt</button><button type="button" data-mode="sleep">Total sleep</button></div>
+    <div class="sd-graph">${sleepDebtSvg(sd, "debt")}</div>
+    <div class="sd-axis"><span>${esc((sd.days?.[0]?.date || "").slice(5))}</span><span>${esc((sd.days?.at(-1)?.date || "").slice(5))}</span></div>
+    <p class="subhead">How it works</p><p class="sd-copy">Sleep debt estimates missed sleep over the past 14 days. Total sleep combines main sleep and naps, recent days carry more weight, and your sleep need (${debtDuration(sd.need_h * 60)}) is personalized from your typical sleep over the past 3 months, ignoring unusually short or long days.</p>
+  </form>`;
+  dlg.querySelectorAll(".sd-tabs button").forEach((button) => button.addEventListener("click", () => {
+    dlg.querySelectorAll(".sd-tabs button").forEach((b) => b.classList.toggle("active", b === button));
+    dlg.querySelector(".sd-graph").innerHTML = sleepDebtSvg(sd, button.dataset.mode);
+  }));
+  dlg.showModal();
+}
+
+function renderSleepDebt(d) {
+  const box = $("sleep-debt"), sd = d.sleep_debt;
+  box.innerHTML = "";
+  if (!sd) { box.append(el("div", "error", "No sleep data yet.")); return; }
+  const button = el("button", "sd-card"); button.type = "button";
+  if (sd.valid) button.innerHTML = `<div class="sd-card-value">${debtDuration(sd.debt_min)} <span>${esc(sd.state)}</span></div><p>${debtStateCopy(sd.state)}</p><span class="sd-period">Past ${sd.window_days || 14} days · view details →</span>`;
+  else button.innerHTML = `<div class="sd-card-value pending">${sd.valid_days || 0} of 5 days available</div><p>5 days of sleep data are needed within the past 2 weeks.</p><span class="sd-period">View details →</span>`;
+  button.addEventListener("click", () => openSleepDebt(sd)); box.append(button);
+}
+
+// Symptom Radar: Oura's on-device illness-detection model. Traffic-light state from the
+// calibrated decision + the biomarkers (breath / lowest HR / HRV / temp) that deviate
+// from your personal baseline. See docs/algorithms/illness-detection.md.
+const ILLNESS_COPY = {
+  NO_SIGNS: "No signs of illness. Your biometrics are within your normal range.",
+  MINOR_SIGNS: "Minor signs. A few biometrics are outside your usual range — worth an easy day.",
+  MAJOR_SIGNS: "Major signs. Several biometrics are elevated — your body may be fighting something.",
+};
+const ILLNESS_LIGHT = { NO_SIGNS: "ok", MINOR_SIGNS: "warn", MAJOR_SIGNS: "alert" };
+const BIOMARKER_LABEL = {
+  AverageBreath: "Breathing rate", LowestHeartRate: "Lowest heart rate",
+  AverageHrv: "HRV", TemperatureDeviation: "Body temperature",
+};
+const BIOMARKER_UNIT = {
+  AverageBreath: " br/min", LowestHeartRate: " bpm", AverageHrv: " ms", TemperatureDeviation: "°C",
+};
+
+function renderIllness(d) {
+  const box = $("illness");
+  box.innerHTML = "";
+  const ill = d.illness;
+  if (!ill) { box.append(el("div", "error", "Symptom radar needs the model runner (desktop dashboard).")); return; }
+  if (!ill.available) {
+    const why = ill.status === "MISSING_LAST_NIGHT_SLEEP" ? "Last night's sleep is missing — wear the ring overnight and sync."
+      : ill.status === "MISSING_SLEEP_DATA" ? "Too many recent nights are missing (needs ≥ 7 of the last 14)."
+      : "Not enough history yet.";
+    box.append(el("div", "error", why));
+    return;
+  }
+  const light = ILLNESS_LIGHT[ill.traffic_light] || "ok";
+  const head = el("div", `il-status il-${light}`);
+  const label = ill.traffic_light === "NO_SIGNS" ? "No signs" : ill.traffic_light === "MINOR_SIGNS" ? "Minor signs" : "Major signs";
+  head.innerHTML = `<span class="il-dot"></span><span class="il-label">${label}</span>`;
+  box.append(head);
+  box.append(el("p", "il-copy", ILLNESS_COPY[ill.status] || ""));
+
+  const flagged = (ill.biomarkers || []).filter((b) => b.indicatesSymptoms);
+  if (flagged.length) {
+    const list = el("div", "il-biomarkers");
+    for (const b of flagged) {
+      const dir = b.reason === "ELEVATED" ? "↑ elevated" : "↓ decreased";
+      const unit = BIOMARKER_UNIT[b.type] || "";
+      list.append(el("div", `il-bm il-${b.reason === "ELEVATED" ? "up" : "down"}`,
+        `<span class="il-bm-name">${BIOMARKER_LABEL[b.type] || b.type}</span>` +
+        `<span class="il-bm-val">${b.value}${unit} <em>${dir}</em></span>`));
+    }
+    box.append(list);
+  }
+  box.append(el("div", "il-foot", `On-device illness model · ${ill.days_with_data} of 30 days · ${esc(ill.date)}`));
+}
+
 function renderCardio(d) {
   const box = $("cardio");
   const cv = d.cardio;
@@ -500,18 +611,19 @@ function hypnoSvg(stages, w, h) {
 }
 
 // smooth auto-scaled line + faint area + dashed mean, for one signal lane
-function laneSvg(v, w, h, color) {
+function laneSvg(v, w, h, color, span = [0, 1]) {
   if (v.length < 2) return null;
   const min = Math.min(...v), max = Math.max(...v), rng = (max - min) || 1;
   const mean = v.reduce((a, b) => a + b, 0) / v.length;
   const pad = 5, y = (val) => pad + (1 - (val - min) / rng) * (h - 2 * pad);
-  const pts = v.map((val, i) => [(i / (v.length - 1)) * w, y(val)]);
+  const x0 = span[0] * w, x1 = span[1] * w;
+  const pts = v.map((val, i) => [x0 + (i / (v.length - 1)) * (x1 - x0), y(val)]);
   const line = smoothPath(pts), my = y(mean).toFixed(1);
   return {
     mean, min, max,
     svg: `<svg class="lane-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">` +
-      `<path d="${line} L${w} ${h} L0 ${h} Z" fill="${color}" opacity="0.09"/>` +
-      `<line x1="0" y1="${my}" x2="${w}" y2="${my}" stroke="${color}" stroke-width="0.6" stroke-dasharray="3 3" opacity="0.45"/>` +
+      `<path d="${line} L${x1} ${h} L${x0} ${h} Z" fill="${color}" opacity="0.09"/>` +
+      `<line x1="${x0}" y1="${my}" x2="${x1}" y2="${my}" stroke="${color}" stroke-width="0.6" stroke-dasharray="3 3" opacity="0.45"/>` +
       `<path d="${line}" fill="none" stroke="${color}" stroke-width="1.4" vector-effect="non-scaling-stroke"/></svg>`,
   };
 }
@@ -624,20 +736,20 @@ function sleepReport(d, ymd) {
     label: "Hypnogram", summary: "", tall: true, svg: hypnoSvg(stages, W, HH),
     valueAt: (f) => (STAGE[stages[Math.round(f * (stages.length - 1))]] || {}).name || "",
   }];
-  const addLane = (key, label, unit, color, dp = 0) => {
+  const addLane = (key, label, unit, color, dp = 0, span = [0, 1]) => {
     const v = (s[key] || []).filter((x) => x != null);
-    const L = laneSvg(v, W, LH, color);
+    const L = laneSvg(v, W, LH, color, span);
     if (!L) return;
     const fmt = (x) => (dp ? x.toFixed(dp) : Math.round(x));
     lanes.push({
       label, svg: L.svg, summary: `${fmt(L.mean)} ${unit}`,
-      valueAt: (f) => `${fmt(v[Math.round(f * (v.length - 1))])} ${unit}`,
+      valueAt: (f) => f < span[0] || f > span[1] ? "—" : `${fmt(v[Math.round(((f - span[0]) / Math.max(1e-9, span[1] - span[0])) * (v.length - 1))])} ${unit}`,
     });
   };
   addLane("hr", "Heart rate", "bpm", "var(--warn)");
   addLane("hrv", "HRV", "ms", "var(--accent)");
   addLane("spo2", "Blood O₂", "%", "var(--rem)");
-  addLane("temp", "Skin temp", "°C", "var(--light)", 1);
+  addLane("temp", "Skin temp", "°C", "var(--light)", 1, s.temp_span || [0, 1]);
   addLane("motion", "Motion", "s", "var(--faint)");
   root.append(el("p", "subhead", "Overnight polysomnograph"), polysomnograph(n, lanes));
 
@@ -1384,6 +1496,8 @@ async function load() {
   renderActions(d);
   renderTiles(d);
   renderDay(d);
+  renderSleepDebt(d);
+  renderIllness(d);
   renderCardio(d);
   renderSpo2(d);
   renderDevice(d);

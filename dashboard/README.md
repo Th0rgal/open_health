@@ -81,7 +81,11 @@ dashboard/
 ```
 
 Models are Oura's proprietary IP and are **not** committed; the runners reference
-your own locally-decrypted copies under `notes/models/`.
+your own locally-decrypted copies under `notes/models/`. After a split checkout,
+the sibling `../open_oura/notes/models/` is detected automatically; set
+`OURA_MODELS_DIR=/absolute/path/to/models` for any other layout. The sibling
+`../open_oura/.venv` is likewise reused when present; override its interpreter
+with `OURA_PYTHON=/absolute/path/to/python`.
 
 Icons are from [Phosphor](https://phosphoricons.com) (MIT), vendored under
 `dashboard/web/icons/` so the dashboard stays fully offline.

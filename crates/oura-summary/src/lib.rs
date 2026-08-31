@@ -12,6 +12,8 @@
 //! *render* it: web `dashboard/web/app.js`, iOS `apps/ios/OuraApp/OuraApp.swift`. See
 //! `docs/clients-web-and-ios.md`.
 
+mod ring_time;
+
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +21,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
 use oura_store::storage::Store;
+use ring_time::RingClock;
 
 /// User anthropometrics — only the CVA model needs them; everything else is
 /// signal-derived. Stored in an editable `profile.json` next to the DB.
@@ -79,6 +82,7 @@ pub struct ModelOutputs {
     pub sleep_batch: Option<Value>, // run_sleep_model.py --batch
     pub cva: Option<Value>,         // run_cva_model.py
     pub activity: Option<Value>,    // run_activity_model.py
+    pub illness: Option<Value>,     // run_illness_model.py (Symptom Radar)
 }
 
 /// Runs the torch models. `oura-cli` shells out to Python; the native client runs
@@ -192,6 +196,127 @@ fn ymd_label(unix_s: f64, tz: i64) -> String {
     let (y, m, d) = civil(days);
     format!("{y:04}-{m:02}-{d:02}")
 }
+
+const SLEEP_DEBT_DAYS: i64 = 14;
+/// Fallback need while there isn't enough history to personalize.
+const SLEEP_NEED_DEFAULT_H: f64 = 8.0;
+const SLEEP_NEED_WINDOW_DAYS: i64 = 90;
+const SLEEP_NEED_MIN_VALID_DAYS: usize = 14;
+const SLEEP_NEED_FLOOR_S: f64 = 7.0 * 3600.0;
+const SLEEP_NEED_CEIL_S: f64 = 9.0 * 3600.0;
+const SLEEP_NEED_ROUND_S: f64 = 900.0;
+
+/// Personalized daily sleep need, matching what the Oura app feeds ecore's
+/// `sleep_debt_calculate` (`SleepDebtInput.longTermSleepTimeAvgSeconds`, the
+/// long-term `sleepTimeAvg` baseline): the user's typical sleep over the last
+/// ~3 months, with unusually short or long days filtered out. Causal — only
+/// days strictly before `day` count, so a night never sets its own need.
+/// The IQR fence is our outlier filter (Oura only documents "unusually short
+/// or extra-long nights are filtered out"), and the result is clamped to the
+/// 7–9 h band the app itself cites so chronic under-sleep can't ratify itself
+/// as a low need. Falls back to 8 h until 14 valid days exist.
+fn sleep_need_s(asleep_by_day: &std::collections::BTreeMap<i64, i32>, day: i64) -> i32 {
+    let mut vals: Vec<f64> = asleep_by_day
+        .range(day - SLEEP_NEED_WINDOW_DAYS..day)
+        .map(|(_, &s)| s as f64)
+        .filter(|&s| s > 0.0)
+        .collect();
+    if vals.len() < SLEEP_NEED_MIN_VALID_DAYS {
+        return (SLEEP_NEED_DEFAULT_H * 3600.0) as i32;
+    }
+    vals.sort_by(f64::total_cmp);
+    let quantile = |p: f64| -> f64 {
+        let idx = p * (vals.len() - 1) as f64;
+        let (lo, hi) = (idx.floor() as usize, idx.ceil() as usize);
+        vals[lo] + (vals[hi] - vals[lo]) * (idx - lo as f64)
+    };
+    let (q1, q3) = (quantile(0.25), quantile(0.75));
+    let fence = 1.5 * (q3 - q1);
+    let kept: Vec<f64> = vals
+        .iter()
+        .copied()
+        .filter(|&v| v >= q1 - fence && v <= q3 + fence)
+        .collect();
+    let mean = kept.iter().sum::<f64>() / kept.len() as f64;
+    let need = mean.clamp(SLEEP_NEED_FLOOR_S, SLEEP_NEED_CEIL_S);
+    ((need / SLEEP_NEED_ROUND_S).round() * SLEEP_NEED_ROUND_S) as i32
+}
+
+/// Android's sleep-debt screen works on calendar days, not individual sleep sessions:
+/// a main sleep and a nap ending on the same day both contribute to that day's total.
+/// Build the complete 14-day series here so every client renders the same result.
+fn sleep_debt_summary(asleep_by_day: &std::collections::BTreeMap<i64, i32>) -> Value {
+    use oura_analysis::ported::sleep_debt::{sleep_debt, SleepDebtConfig};
+
+    let Some(&anchor) = asleep_by_day.keys().next_back() else {
+        return json!({
+            "debt_min": 0, "recent_shortfall_min": 0, "valid": false,
+            "need_h": SLEEP_NEED_DEFAULT_H, "valid_days": 0, "window_days": SLEEP_DEBT_DAYS,
+            "state": "none", "days": [],
+        });
+    };
+    let first = anchor - (SLEEP_DEBT_DAYS - 1);
+    let mut days = Vec::with_capacity(SLEEP_DEBT_DAYS as usize);
+
+    // ecore takes a per-day need array, so each day of the window is scored
+    // against the need that was current *that* day.
+    let window = |day: i64| -> (Vec<i32>, Vec<i32>) {
+        let range = (day - (SLEEP_DEBT_DAYS - 1)..=day).rev();
+        let actual = range
+            .clone()
+            .map(|d| asleep_by_day.get(&d).copied().unwrap_or(0))
+            .collect();
+        let need = range.map(|d| sleep_need_s(asleep_by_day, d)).collect();
+        (actual, need)
+    };
+
+    for day in first..=anchor {
+        let (actual, need) = window(day);
+        let debt = sleep_debt(&actual, &need, &SleepDebtConfig::default());
+        let total = asleep_by_day.get(&day).copied();
+        let need_s = sleep_need_s(asleep_by_day, day);
+        let valid_days = actual.iter().filter(|&&s| s > 0).count();
+        let (y, m, d) = civil(day);
+        days.push(json!({
+            "date": format!("{y:04}-{m:02}-{d:02}"),
+            "total_sleep_min": total.map(|s| (s as f64 / 60.0).round()),
+            "sleep_need_min": (need_s as f64 / 60.0).round(),
+            "shortfall_min": total.map(|s| ((need_s - s) as f64 / 60.0).round()),
+            "cumulative_debt_min": debt.valid.then(|| (debt.debt_s as f64 / 60.0).round()),
+            "valid_days": valid_days,
+        }));
+    }
+
+    let (actual, need) = window(anchor);
+    let valid_days = actual.iter().filter(|&&s| s > 0).count();
+    let debt = sleep_debt(&actual, &need, &SleepDebtConfig::default());
+    let debt_min = if debt.valid {
+        (debt.debt_s as f64 / 60.0).round()
+    } else {
+        0.0
+    };
+    let state = match debt_min {
+        d if d >= 540.0 => "high",
+        d if d >= 360.0 => "moderate",
+        d if d >= 180.0 => "low",
+        _ => "none",
+    };
+    let recent_shortfall_min = if debt.valid && debt.recent_shortfall_s != i32::MAX {
+        (debt.recent_shortfall_s as f64 / 60.0).round()
+    } else {
+        0.0
+    };
+    json!({
+        "debt_min": debt_min,
+        "recent_shortfall_min": recent_shortfall_min,
+        "valid": debt.valid,
+        "need_h": (sleep_need_s(asleep_by_day, anchor) as f64 / 3600.0 * 100.0).round() / 100.0,
+        "valid_days": valid_days,
+        "window_days": SLEEP_DEBT_DAYS,
+        "state": state,
+        "days": days,
+    })
+}
 fn hm(unix_s: f64, tz: i64) -> String {
     let sod = (unix_s as i64 + tz * 3600).rem_euclid(86400);
     format!("{:02}:{:02}", sod / 3600, (sod % 3600) / 60)
@@ -225,10 +350,14 @@ fn nightly_skin_temp(temps_c: &[f64]) -> Option<f64> {
 struct Night {
     start_ds: i64,
     end_ds: i64,
+    raw_start_ds: i64,
+    raw_end_ds: i64,
     captured_unix: i64,
     rmssd: Vec<f64>,
     hr: Vec<f64>,
     temp: Vec<f64>,
+    temp_start_ds: Option<i64>,
+    temp_end_ds: Option<i64>,
     spo2: Vec<f64>,
     motion: Vec<f64>,
     // timestamped (time_ds, value) HRV/HR samples for stage-resolved autonomics — the
@@ -236,6 +365,173 @@ struct Night {
     // hypnogram stage.
     hrv_t: Vec<(i64, f64)>,
     hr_t: Vec<(i64, f64)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BedPeriod {
+    start_ds: i64,
+    end_ds: i64,
+    raw_start_ds: i64,
+    raw_end_ds: i64,
+    captured_unix: i64,
+}
+
+const MAX_BED_BREAK_DS: i64 = 60 * 60 * 10;
+const MAX_SLEEP_SIGNAL_EXTENSION_DS: i64 = 3 * 60 * 60 * 10;
+const EPOCH_ALIGNMENT_SLACK_S: f64 = 5.0 * 60.0;
+const PULSE_BURST_GAP_DS: i64 = 2 * 60 * 10;
+const MAX_PULSE_CONTINUATION_GAP_DS: i64 = 15 * 60 * 10;
+const MIN_ACCEPTED_BEATS_PER_BURST: usize = 2;
+const MIN_LONG_SLEEP_DS: i64 = 3 * 60 * 60 * 10;
+const MIN_PREMATURE_END_EVIDENCE_DS: i64 = 30 * 60 * 10;
+
+/// Return the end of a continuous sequence of pulse-measurement bursts after the
+/// explicit sleep sensors stop. Ring 5 may briefly leave sleep mode after an awakening
+/// while still recording good PPG/IBI every ~10 minutes. A lone daytime HR sample is
+/// not enough evidence: each accepted burst needs multiple packets and every burst must
+/// remain close to the preceding accepted sleep evidence.
+fn pulse_continuation_end(
+    raw_end_ds: i64,
+    explicit_end_ds: i64,
+    captured_unix: i64,
+    pulse_support: &[(i64, i64, usize)],
+    unix_s_at: impl Fn(i64, i64) -> f64 + Copy,
+) -> i64 {
+    let raw_end_unix = unix_s_at(raw_end_ds, captured_unix);
+    let max_end_ds = raw_end_ds + MAX_SLEEP_SIGNAL_EXTENSION_DS;
+    let mut candidates: Vec<(i64, i64, usize)> = pulse_support
+        .iter()
+        .copied()
+        .filter(|&(ds, cu, _)| {
+            if ds < explicit_end_ds || ds > max_end_ds {
+                return false;
+            }
+            let raw_elapsed = (ds - raw_end_ds) as f64 / 10.0;
+            (unix_s_at(ds, cu) - raw_end_unix - raw_elapsed).abs() <= EPOCH_ALIGNMENT_SLACK_S
+        })
+        .collect();
+    candidates.sort_by_key(|&(ds, _, _)| ds);
+
+    let mut bursts: Vec<Vec<(i64, i64, usize)>> = Vec::new();
+    for point in candidates {
+        let continues =
+            bursts
+                .last()
+                .and_then(|b| b.last())
+                .is_some_and(|&(last_ds, last_cu, _)| {
+                    let raw_gap = point.0 - last_ds;
+                    let wall_gap = unix_s_at(point.0, point.1) - unix_s_at(last_ds, last_cu);
+                    (0..=PULSE_BURST_GAP_DS).contains(&raw_gap)
+                        && (0.0..=PULSE_BURST_GAP_DS as f64 / 10.0).contains(&wall_gap)
+                });
+        if continues {
+            bursts.last_mut().expect("burst exists").push(point);
+        } else {
+            bursts.push(vec![point]);
+        }
+    }
+
+    let mut accepted_end = explicit_end_ds;
+    let mut accepted_cu = captured_unix;
+    for burst in bursts
+        .into_iter()
+        .filter(|b| b.iter().map(|point| point.2).sum::<usize>() >= MIN_ACCEPTED_BEATS_PER_BURST)
+    {
+        let first = burst[0];
+        let raw_gap = first.0 - accepted_end;
+        let wall_gap = unix_s_at(first.0, first.1) - unix_s_at(accepted_end, accepted_cu);
+        if raw_gap > MAX_PULSE_CONTINUATION_GAP_DS
+            || wall_gap > MAX_PULSE_CONTINUATION_GAP_DS as f64 / 10.0
+        {
+            break;
+        }
+        if raw_gap >= -PULSE_BURST_GAP_DS && wall_gap >= -(PULSE_BURST_GAP_DS as f64 / 10.0) {
+            if let Some(&(ds, cu, _)) = burst.last() {
+                accepted_end = accepted_end.max(ds);
+                accepted_cu = cu;
+            }
+        }
+    }
+    accepted_end
+}
+
+/// Turn the ring's raw bedtime markers into user-facing sleep windows.
+///
+/// A short wake can produce two adjacent `bedtime_period` records, and an early
+/// marker can be followed by hours of sleep-only sensor packets. SleepNet cannot
+/// recover either case because bedtime is an input boundary, so normalize that
+/// boundary before both the summary and model runners consume it.
+fn normalize_bed_periods(
+    mut periods: Vec<BedPeriod>,
+    sleep_support: &[(i64, i64)],
+    pulse_support: &[(i64, i64, usize)],
+    unix_s_at: impl Fn(i64, i64) -> f64 + Copy,
+) -> Vec<BedPeriod> {
+    periods.sort_by(|a, b| {
+        unix_s_at(a.start_ds, a.captured_unix).total_cmp(&unix_s_at(b.start_ds, b.captured_unix))
+    });
+
+    let merge_adjacent = |periods: Vec<BedPeriod>| {
+        let mut merged: Vec<BedPeriod> = Vec::new();
+        for period in periods {
+            let Some(previous) = merged.last_mut() else {
+                merged.push(period);
+                continue;
+            };
+            let raw_gap_ds = period.start_ds - previous.end_ds;
+            let wall_gap_s = unix_s_at(period.start_ds, period.captured_unix)
+                - unix_s_at(previous.end_ds, previous.captured_unix);
+            let same_epoch =
+                (wall_gap_s - raw_gap_ds as f64 / 10.0).abs() <= EPOCH_ALIGNMENT_SLACK_S;
+            if same_epoch
+                && raw_gap_ds <= MAX_BED_BREAK_DS
+                && wall_gap_s <= MAX_BED_BREAK_DS as f64 / 10.0
+                && raw_gap_ds >= -MAX_SLEEP_SIGNAL_EXTENSION_DS
+                && wall_gap_s >= -(MAX_SLEEP_SIGNAL_EXTENSION_DS as f64 / 10.0)
+            {
+                previous.end_ds = previous.end_ds.max(period.end_ds);
+                previous.raw_start_ds = previous.raw_start_ds.min(period.raw_start_ds);
+                previous.raw_end_ds = previous.raw_end_ds.max(period.raw_end_ds);
+                previous.captured_unix = previous.captured_unix.max(period.captured_unix);
+            } else {
+                merged.push(period);
+            }
+        }
+        merged
+    };
+
+    let mut periods = merge_adjacent(periods);
+    for period in &mut periods {
+        let original_end = period.end_ds;
+        let end_unix = unix_s_at(original_end, period.captured_unix);
+        for &(support_ds, support_captured) in sleep_support {
+            let raw_delta_ds = support_ds - original_end;
+            if !(0..=MAX_SLEEP_SIGNAL_EXTENSION_DS).contains(&raw_delta_ds) {
+                continue;
+            }
+            let wall_delta_s = unix_s_at(support_ds, support_captured) - end_unix;
+            let same_epoch =
+                (wall_delta_s - raw_delta_ds as f64 / 10.0).abs() <= EPOCH_ALIGNMENT_SLACK_S;
+            if same_epoch
+                && (0.0..=MAX_SLEEP_SIGNAL_EXTENSION_DS as f64 / 10.0).contains(&wall_delta_s)
+            {
+                period.end_ds = period.end_ds.max(support_ds);
+            }
+        }
+        let raw_duration = period.raw_end_ds - period.raw_start_ds;
+        let explicit_extension = period.end_ds - period.raw_end_ds;
+        if raw_duration >= MIN_LONG_SLEEP_DS && explicit_extension >= MIN_PREMATURE_END_EVIDENCE_DS
+        {
+            period.end_ds = pulse_continuation_end(
+                period.raw_end_ds,
+                period.end_ds,
+                period.captured_unix,
+                pulse_support,
+                unix_s_at,
+            );
+        }
+    }
+    merge_adjacent(periods)
 }
 
 /// Mean HR / HRV within each sleep stage, mapping each timestamped sample to the
@@ -487,7 +783,7 @@ fn smooth_stages(vals: &[i64], win: usize) -> Vec<i64> {
             }
             (1..=4)
                 .max_by_key(|&k| counts[k as usize])
-                .unwrap_or(vals[i]) as i64
+                .unwrap_or(vals[i])
         })
         .collect()
 }
@@ -585,62 +881,13 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             db.display()
         ));
     }
-    // `ring_timestamp` (ds) is a per-boot relative deciseconds counter: it resets to ~0
-    // every time the ring reboots (battery drain, firmware reset). A single global
-    // anchor therefore scatters older boots to nonsense dates. Recover each boot
-    // "epoch" by walking events in real sync order (captured_unix, then ds) and
-    // splitting on any large backward jump in ds, then anchor each epoch independently:
-    // its newest ds is pinned to that event's capture time and the rest offset by the
-    // decisecond delta. Raw ds is left untouched everywhere else — it is still the DB /
-    // model query key; only the ds→wall-clock mapping becomes epoch-aware.
-    struct Epoch {
-        min_ds: i64,
-        max_ds: i64,
-        anchor_unix: i64,
-    }
-    // A real reboot drops ds by millions; 6 h of slack absorbs minor out-of-order
-    // framing within an epoch without ever splitting one.
-    const EPOCH_RESET_SLACK_DS: i64 = 6 * 3600 * 10;
-    let mut order: Vec<(i64, i64)> = events.iter().map(|(ds, _, _, cu)| (*cu, *ds)).collect();
-    order.sort_unstable();
-    let mut epochs: Vec<Epoch> = Vec::new();
-    for (cu, ds) in order {
-        match epochs.last_mut() {
-            Some(e) if ds >= e.max_ds - EPOCH_RESET_SLACK_DS => {
-                if ds >= e.max_ds {
-                    e.max_ds = ds;
-                    e.anchor_unix = cu;
-                }
-                e.min_ds = e.min_ds.min(ds);
-            }
-            _ => epochs.push(Epoch {
-                min_ds: ds,
-                max_ds: ds,
-                anchor_unix: cu,
-            }),
-        }
-    }
-    // Newest epoch's capture time — a wall-clock "now" reference and fallback anchor.
-    let anchor_unix = epochs.iter().map(|e| e.anchor_unix).max().unwrap();
-    // Map a raw ds to wall-clock seconds via the epoch it belongs to. Epochs usually
-    // do not overlap, but after a ring reboot a new ds range can sit inside an older
-    // range. In that case choose the epoch whose predicted wall time is closest to the
-    // event's real capture time; otherwise recent events can be dated days too early.
-    let unix_s_at = |ds: i64, captured_unix: i64| -> f64 {
-        let e = epochs
-            .iter()
-            .filter(|e| {
-                ds >= e.min_ds - EPOCH_RESET_SLACK_DS && ds <= e.max_ds + EPOCH_RESET_SLACK_DS
-            })
-            .min_by_key(|e| {
-                let predicted_tick = e.anchor_unix.saturating_mul(10) - (e.max_ds - ds);
-                let captured_tick = captured_unix.saturating_mul(10);
-                (predicted_tick - captured_tick).unsigned_abs()
-            })
-            .unwrap_or_else(|| epochs.last().expect("events is non-empty"));
-        e.anchor_unix as f64 - (e.max_ds - ds) as f64 / 10.0
-    };
-    let mut beds: Vec<(i64, i64, i64)> = Vec::new();
+    let clock = RingClock::from_events(&events);
+    let unix_s_at = |ds: i64, captured_unix: i64| clock.unix_s(ds, captured_unix);
+    let anchor_unix = clock.latest_unix();
+    let mut raw_beds: Vec<BedPeriod> = Vec::new();
+    let mut sleep_support: Vec<(i64, i64)> = Vec::new();
+    let mut pulse_support: Vec<(i64, i64, usize)> = Vec::new();
+    let mut latest_hr: Option<(f64, f64)> = None; // (wall-clock unix, bpm)
     let mut present_recent = std::collections::HashSet::new();
     // "recent" = within 10 days of the newest data, measured in wall-clock so it never
     // sweeps in an older epoch that happens to share a high raw ds.
@@ -656,27 +903,71 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 if let (Some(s), Some(e)) =
                     (v["bedtime_start_ds"].as_i64(), v["bedtime_end_ds"].as_i64())
                 {
-                    match beds.iter_mut().find(|(bs, _, bcu)| {
-                        *bs == s && (*bcu - *cu).abs() <= 12 * 3600
+                    match raw_beds.iter_mut().find(|bed| {
+                        bed.start_ds == s
+                            && (unix_s_at(bed.start_ds, bed.captured_unix) - unix_s_at(s, *cu))
+                                .abs()
+                                <= 5.0 * 60.0
                     }) {
-                        Some(b) => {
-                            b.1 = b.1.max(e);
-                            b.2 = b.2.max(*cu);
+                        Some(bed) => {
+                            bed.end_ds = bed.end_ds.max(e);
+                            bed.raw_end_ds = bed.raw_end_ds.max(e);
+                            bed.captured_unix = bed.captured_unix.max(*cu);
                         }
-                        None => beds.push((s, e, *cu)),
+                        None => raw_beds.push(BedPeriod {
+                            start_ds: s,
+                            end_ds: e,
+                            raw_start_ds: s,
+                            raw_end_ds: e,
+                            captured_unix: *cu,
+                        }),
+                    }
+                }
+            }
+        }
+        if matches!(
+            n,
+            "sleep_acm_period" | "sleep_temp_event" | "spo2_r_pi_event"
+        ) {
+            sleep_support.push((*ds, *cu));
+        }
+        // Both SleepNet implementations already consume these two streams. `hr_bpm`
+        // is populated only when the firmware accepted a pulse estimate, so it is a
+        // stronger continuation signal than raw/invalid IBI values.
+        if matches!(n, "ibi_and_amplitude_event" | "green_ibi_quality_event") {
+            if let Ok(v) = serde_json::from_str::<Value>(jstr) {
+                if let Some(accepted) = v["hr_bpm"].as_array().map(Vec::len).filter(|&n| n > 0) {
+                    pulse_support.push((*ds, *cu, accepted));
+                }
+                // `green_ibi_quality_event.hr_bpm` contains only pulse estimates the
+                // firmware's quality gate accepted. Surface its newest value as the
+                // latest synchronized HR; raw IBI-derived values are too noisy for a
+                // user-facing "current" measurement.
+                if n == "green_ibi_quality_event" {
+                    if let Some(bpm) = v["hr_bpm"]
+                        .as_array()
+                        .and_then(|values| values.iter().rev().find_map(Value::as_f64))
+                        .filter(|bpm| (30.0..=240.0).contains(bpm))
+                    {
+                        let at = unix_s_at(*ds, *cu);
+                        if latest_hr.map_or(true, |(current, _)| at > current) {
+                            latest_hr = Some((at, bpm));
+                        }
                     }
                 }
             }
         }
     }
-    beds.sort();
+    let beds = normalize_bed_periods(raw_beds, &sleep_support, &pulse_support, unix_s_at);
 
     let mut nights: Vec<Night> = beds
         .iter()
-        .map(|&(s, e, cu)| Night {
-            start_ds: s,
-            end_ds: e,
-            captured_unix: cu,
+        .map(|bed| Night {
+            start_ds: bed.start_ds,
+            end_ds: bed.end_ds,
+            raw_start_ds: bed.raw_start_ds,
+            raw_end_ds: bed.raw_end_ds,
+            captured_unix: bed.captured_unix,
             ..Default::default()
         })
         .collect();
@@ -725,14 +1016,24 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                     }
                 }
             }
-            "temp_event" | "sleep_temp_event" => {
-                // Keep every in-window sample (not just the first): the ecore nightly
-                // algorithm needs a dense series. `find_night` already restricts these
-                // to the bedtime window, so they're all nocturnal skin-temp readings.
+            "sleep_temp_event" => {
+                // Only the dedicated nocturnal stream is calibrated as skin
+                // temperature. Generic `temp_event` contains several device/ambient
+                // channels; mixing it here creates a false plunge when sleep mode ends.
                 if let Some(a) = v["temps_c"].as_array() {
                     nights[idx]
                         .temp
                         .extend(a.iter().filter_map(|x| x.as_f64()).filter(|&c| c > 0.0));
+                    nights[idx].temp_start_ds = Some(
+                        nights[idx]
+                            .temp_start_ds
+                            .map_or(*ds, |current| current.min(*ds)),
+                    );
+                    nights[idx].temp_end_ds = Some(
+                        nights[idx]
+                            .temp_end_ds
+                            .map_or(*ds, |current| current.max(*ds)),
+                    );
                 }
             }
             "spo2_r_pi_event" => {
@@ -762,6 +1063,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         sleep_batch,
         cva,
         activity: activity_raw,
+        illness,
     } = runner.run(ModelInputs {
         db,
         tz,
@@ -798,7 +1100,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     };
 
     let mut nights_json = Vec::new();
-    let mut asleep_by_night: Vec<i32> = Vec::new(); // oldest-first, for sleep debt
+    let mut asleep_by_day: std::collections::BTreeMap<i64, i32> = Default::default();
     for nt in &nights {
         let hyp = hyps.get(&nt.start_ds);
         let raw_stages: Vec<i64> = hyp
@@ -811,15 +1113,32 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         let stage_cells = (!full_stages.is_empty()).then(|| downsample_codes(&full_stages, 120));
         let in_bed_s = (nt.end_ds - nt.start_ds) as f64 / 10.0;
         let (metrics, asleep_s) = sleep_metrics(&full_stages, in_bed_s);
-        asleep_by_night.push(asleep_s);
         let autonomic =
             autonomic_by_stage(&nt.hrv_t, &nt.hr_t, &full_stages, nt.start_ds, nt.end_ds);
         let start_unix = unix_s_at(nt.start_ds, nt.captured_unix);
         let end_unix = unix_s_at(nt.end_ds, nt.captured_unix);
+        let span_ds = (nt.end_ds - nt.start_ds).max(1) as f64;
+        let temp_span = match (nt.temp_start_ds, nt.temp_end_ds) {
+            (Some(start), Some(end)) => Some([
+                ((start - nt.start_ds) as f64 / span_ds).clamp(0.0, 1.0),
+                ((end - nt.start_ds) as f64 / span_ds).clamp(0.0, 1.0),
+            ]),
+            _ => None,
+        };
+        if asleep_s > 0 {
+            let wake_day = (end_unix as i64 + tz * 3600).div_euclid(86_400);
+            *asleep_by_day.entry(wake_day).or_default() += asleep_s;
+        }
         nights_json.push(json!({
             "date": date_label(start_unix, tz),
             "ymd": ymd_label(start_unix, tz),
             "start_ds": nt.start_ds, // exact bedtime key for on-device model injection
+            "end_ds": nt.end_ds,
+            // Android's interim schema likewise preserves bedtime_start/end_original
+            // beside detector-adjusted bounds. Keep both for audits and future models.
+            "raw_start_ds": nt.raw_start_ds,
+            "raw_end_ds": nt.raw_end_ds,
+            "bedtime_adjusted": nt.start_ds != nt.raw_start_ds || nt.end_ds != nt.raw_end_ds,
             "start": hm(start_unix, tz),
             "end": hm(end_unix, tz),
             "in_bed_h": ((nt.end_ds - nt.start_ds) as f64 / 10.0 / 3600.0 * 10.0).round() / 10.0,
@@ -840,6 +1159,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 "hr": series(&nt.hr, 0),
                 "hrv": series(&nt.rmssd, 0),
                 "temp": series(&nt.temp, 2),
+                "temp_span": temp_span,
                 "spo2": series(&nt.spo2, 0),
                 "motion": series(&nt.motion, 0),
             },
@@ -851,22 +1171,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     }
     nights_json.reverse();
 
-    // sleep debt over the recent nights (newest-first for the linear-decay weighting),
-    // against an 8 h nightly need — the same ecore-ported algorithm as the ring.
-    let need_h = 8.0;
-    let sleep_debt = {
-        use oura_analysis::ported::sleep_debt::{sleep_debt, SleepDebtConfig};
-        let mut actual: Vec<i32> = asleep_by_night.clone();
-        actual.reverse(); // newest-first
-        let need = vec![(need_h * 3600.0) as i32; actual.len()];
-        let d = sleep_debt(&actual, &need, &SleepDebtConfig::default());
-        json!({
-            "debt_min": (d.debt_s as f64 / 60.0).round(),
-            "recent_shortfall_min": (d.recent_shortfall_s as f64 / 60.0).round(),
-            "valid": d.valid,
-            "need_h": need_h,
-        })
-    };
+    let sleep_debt = sleep_debt_summary(&asleep_by_day);
 
     let mut activity = activity_raw
         .as_ref()
@@ -1126,7 +1431,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         "synced": synced_unix.map(|s| date_label(s, tz)),
         "synced_hm": synced_unix.map(|s| hm(s, tz)),
         "fresh_hours": synced_unix.map(|s| ((now - s) / 3600.0 * 10.0).round() / 10.0),
-        "days_of_data": ((epochs.iter().map(|e| (e.max_ds - e.min_ds) as f64).sum::<f64>() / 10.0 / 86400.0) * 10.0).round() / 10.0,
+        "days_of_data": ((clock.total_span_ds() as f64 / 10.0 / 86400.0) * 10.0).round() / 10.0,
         "total_events": events.len(),
         "nights": nights.len(),
         "battery_pct": battery.map(|b| b.0),
@@ -1148,11 +1453,196 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         "profile": demo.to_json(),
         "nights": nights_json,
         "sleep_debt": sleep_debt,
+        "illness": illness,
         "cardio": cva,
         "fitness": { "vo2max": (vo2max * 10.0).round() / 10.0 },
         "activity": activity,
         "activity_profile": activity_profile,
         "activity_daily": activity_daily,
-        "vitals": { "hrv": trend(&hrv_stat), "rhr": trend(&rhr_stat) },
+        "vitals": {
+            "hrv": trend(&hrv_stat),
+            "rhr": trend(&rhr_stat),
+            "hr": latest_hr.map(|(at, bpm)| json!({
+                "latest": bpm.round(),
+                "date": date_label(at, tz),
+                "hm": hm(at, tz),
+                "at_unix": at.round() as i64,
+            })),
+        },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bed(start_ds: i64, end_ds: i64) -> BedPeriod {
+        BedPeriod {
+            start_ds,
+            end_ds,
+            raw_start_ds: start_ds,
+            raw_end_ds: end_ds,
+            captured_unix: 1,
+        }
+    }
+
+    #[test]
+    fn sleep_debt_aggregates_sessions_and_uses_fourteen_calendar_days() {
+        let mut sleep = std::collections::BTreeMap::new();
+        for day in 100..105 {
+            sleep.insert(day, 7 * 3600);
+        }
+        // A one-hour nap belongs to the latest calendar day, making its total 8 h.
+        *sleep.entry(104).or_default() += 3600;
+        let value = sleep_debt_summary(&sleep);
+        assert_eq!(value["valid"], true);
+        assert_eq!(value["valid_days"], 5);
+        assert_eq!(value["days"].as_array().unwrap().len(), 14);
+        assert_eq!(value["days"][13]["total_sleep_min"], 480.0);
+        assert_eq!(value["recent_shortfall_min"], 0.0);
+    }
+
+    #[test]
+    fn sleep_need_defaults_until_enough_history_then_personalizes() {
+        let mut sleep = std::collections::BTreeMap::new();
+        for day in 100..113 {
+            sleep.insert(day, 27000); // 7.5 h × 13 days — one short of the minimum
+        }
+        assert_eq!(sleep_need_s(&sleep, 113), 28800); // still the 8 h default
+        sleep.insert(113, 27000); // 14th valid day
+        assert_eq!(sleep_need_s(&sleep, 114), 27000); // typical sleep becomes the need
+        // causal: a day's own sleep is not part of its need window
+        assert_eq!(sleep_need_s(&sleep, 113), 28800);
+    }
+
+    #[test]
+    fn sleep_need_filters_outliers_and_clamps_to_healthy_band() {
+        let mut sleep = std::collections::BTreeMap::new();
+        for day in 100..120 {
+            sleep.insert(day, 27000); // 7.5 h typical
+        }
+        sleep.insert(120, 2 * 3600); // an unusually short night
+        sleep.insert(121, 13 * 3600); // and an unusually long one
+        assert_eq!(sleep_need_s(&sleep, 122), 27000); // both filtered out
+
+        let short: std::collections::BTreeMap<i64, i32> =
+            (100..120).map(|d| (d, 5 * 3600)).collect(); // chronic 5 h sleeper
+        assert_eq!(sleep_need_s(&short, 120), 7 * 3600); // clamped to the 7 h floor
+    }
+
+    #[test]
+    fn sleep_debt_requires_five_distinct_days_not_five_sessions() {
+        let sleep = std::collections::BTreeMap::from([
+            (100, 8 * 3600),
+            (101, 8 * 3600),
+            (102, 8 * 3600),
+            (103, 8 * 3600),
+        ]);
+        let value = sleep_debt_summary(&sleep);
+        assert_eq!(value["valid"], false);
+        assert_eq!(value["valid_days"], 4);
+    }
+
+    #[test]
+    fn brief_wake_does_not_split_one_night() {
+        let periods = vec![
+            bed(0, 5 * 3600 * 10),
+            bed(5 * 3600 * 10 + 7 * 60 * 10, 7 * 3600 * 10),
+        ];
+        let got = normalize_bed_periods(periods, &[], &[], |ds, _| ds as f64 / 10.0);
+        assert_eq!(got, vec![bed(0, 7 * 3600 * 10)]);
+    }
+
+    #[test]
+    fn nocturnal_signals_extend_a_premature_bedtime_end() {
+        let support_end = 7 * 3600 * 10;
+        let got = normalize_bed_periods(
+            vec![bed(0, 5 * 3600 * 10)],
+            &[(support_end, 1)],
+            &[],
+            |ds, _| ds as f64 / 10.0,
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].end_ds, support_end);
+        assert_eq!(got[0].raw_end_ds, 5 * 3600 * 10);
+    }
+
+    #[test]
+    fn clustered_valid_pulses_recover_sleep_after_brief_wakes() {
+        let minute = 60 * 10;
+        // Observed Ring 5 shape: explicit sleep streams stop at 05:34, followed by
+        // short good-IBI bursts roughly every ten minutes through 06:27. A final lone
+        // poor-quality packet at 06:38 must not extend the window.
+        let raw_end = 0;
+        let explicit_end = 93 * minute;
+        let mut pulses = Vec::new();
+        for offset_min in [105, 116, 126, 136, 146] {
+            pulses.push((offset_min * minute, 1, 1));
+            pulses.push((offset_min * minute + 10 * 10, 1, 1));
+        }
+        pulses.push((157 * minute, 1, 1));
+        let got = normalize_bed_periods(
+            vec![bed(-6 * 3600 * 10, raw_end)],
+            &[(explicit_end, 1)],
+            &pulses,
+            |ds, _| ds as f64 / 10.0,
+        );
+        assert_eq!(got[0].end_ds, 146 * minute + 10 * 10);
+        assert_eq!(got[0].raw_end_ds, raw_end);
+    }
+
+    #[test]
+    fn isolated_daytime_pulse_does_not_extend_sleep() {
+        let minute = 60 * 10;
+        let got = normalize_bed_periods(
+            vec![bed(-6 * 3600 * 10, 0)],
+            &[],
+            &[(10 * minute, 1, 4)],
+            |ds, _| ds as f64 / 10.0,
+        );
+        assert_eq!(got[0].end_ds, 0);
+    }
+
+    #[test]
+    fn daytime_nap_is_not_extended_by_periodic_hr_sampling() {
+        let minute = 60 * 10;
+        let pulses: Vec<_> = (10..=150).step_by(10).map(|m| (m * minute, 1, 6)).collect();
+        let got = normalize_bed_periods(
+            vec![bed(-20 * minute, 0)],
+            &[(5 * minute, 1)],
+            &pulses,
+            |ds, _| ds as f64 / 10.0,
+        );
+        assert_eq!(got[0].end_ds, 5 * minute);
+    }
+
+    #[test]
+    fn clean_long_sleep_end_is_not_extended_by_daytime_hr_sampling() {
+        let minute = 60 * 10;
+        let pulses = [(30 * minute, 1, 6), (30 * minute + 30 * 10, 1, 6)];
+        let got = normalize_bed_periods(
+            vec![bed(-7 * 60 * minute, 0)],
+            &[(20 * minute, 1)],
+            &pulses,
+            |ds, _| ds as f64 / 10.0,
+        );
+        assert_eq!(got[0].end_ds, 20 * minute);
+    }
+
+    #[test]
+    fn pulse_cluster_after_long_gap_does_not_extend_sleep() {
+        let minute = 60 * 10;
+        let pulses = [(20 * minute, 1, 2), (20 * minute + 10 * 10, 1, 2)];
+        let got = normalize_bed_periods(vec![bed(-6 * 3600 * 10, 0)], &[], &pulses, |ds, _| {
+            ds as f64 / 10.0
+        });
+        assert_eq!(got[0].end_ds, 0);
+    }
+
+    #[test]
+    fn daytime_gap_remains_a_separate_sleep() {
+        let periods = vec![bed(0, 30 * 60 * 10), bed(4 * 3600 * 10, 11 * 3600 * 10)];
+        let got = normalize_bed_periods(periods.clone(), &[], &[], |ds, _| ds as f64 / 10.0);
+        assert_eq!(got, periods);
+    }
 }

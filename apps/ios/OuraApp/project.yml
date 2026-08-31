@@ -16,15 +16,32 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
 
+schemes:
+  OuraApp:
+    build:
+      targets:
+        OuraApp: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
 settings:
   base:
     MARKETING_VERSION: "0.1.1"
-    CURRENT_PROJECT_VERSION: "5"
+    CURRENT_PROJECT_VERSION: "22"
     PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openoura
     TARGETED_DEVICE_FAMILY: "1"   # iPhone only (no iPad multitasking orientation reqs)
     CODE_SIGN_STYLE: Automatic
     CODE_SIGN_ENTITLEMENTS: OuraApp.entitlements
     DEVELOPMENT_TEAM: "BQ6Z84B8L5"
+    # Xcode's current project recommendations. There are no target shell-script
+    # phases, so sandboxing is safe; generated symbols are opt-in conveniences
+    # and do not change the existing asset/string lookup APIs.
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    LOCALIZATION_PREFERS_STRING_CATALOGS: YES
+    STRING_CATALOG_GENERATE_SYMBOLS: YES
+    ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
 
 targets:
   OuraApp:
@@ -34,6 +51,8 @@ targets:
       base:
         INFOPLIST_FILE: Info.plist
         GENERATE_INFOPLIST_FILE: NO
+        SWIFT_EMIT_LOC_STRINGS: YES
+        STRING_CATALOG_GENERATE_SYMBOLS: YES
         TARGETED_DEVICE_FAMILY: "1"   # iPhone-only (target-level, overrides xcodegen's 1,2 default)
         # on-device torch: bridging header + TORCH flag + C++ + libtorch headers
         SWIFT_OBJC_BRIDGING_HEADER: TorchBridge.h
@@ -58,12 +77,20 @@ targets:
       - path: Theme.swift
       - path: BLETransport.swift
       - path: RingSync.swift
+      - path: ProfileSettings.swift
       - path: EventStore.swift
+      - path: ModelCache.swift
+      - path: ModelProgress.swift
       - path: SleepStaging.swift
       - path: CvaModel.swift
       - path: ActivityModel.swift
+      - path: IllnessModel.swift
       - path: TorchBridge.mm
       - path: TorchBridge.h
+      - path: CrashCatch.c
+      - path: CrashCatch.h
+      - path: Diagnostics.swift
+      - path: HealthExport.swift
       - path: ../generated/oura_core.swift
       - path: Assets.xcassets
       # bundled models + data (gitignored local files). oura.db is temporary until the
@@ -74,9 +101,14 @@ targets:
         buildPhase: resources
       - path: ../../../notes/models/mobile/automatic_activity_detection_3_1_11.ptl
         buildPhase: resources
+      - path: ../../../notes/models/mobile/steps_motion_decoder_2_0_0.ptl
+        buildPhase: resources
+      - path: ../../../notes/models/mobile/illness_detection_0_5_1.ptl
+        buildPhase: resources
       - path: ../../../oura.db
         buildPhase: resources
     dependencies:
+      - sdk: HealthKit.framework
       # Rust core (static lib in an xcframework) — link, don't embed
       - framework: ../OuraCore.xcframework
         embed: false

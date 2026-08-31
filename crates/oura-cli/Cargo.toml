@@ -11,9 +11,9 @@ name = "oura"
 path = "src/main.rs"
 
 [dependencies]
-oura-protocol = { git = "https://github.com/Th0rgal/open_oura", branch = "split-open-health" }
-oura-link = { git = "https://github.com/Th0rgal/open_oura", branch = "split-open-health" }
-oura-store = { git = "https://github.com/Th0rgal/open_oura", branch = "split-open-health" }
+oura-protocol = { git = "https://github.com/Th0rgal/open_oura", rev = "b1b52a0da36a592d5fe8967b0024dcc40d5c746f" }
+oura-link = { git = "https://github.com/Th0rgal/open_oura", rev = "b1b52a0da36a592d5fe8967b0024dcc40d5c746f" }
+oura-store = { git = "https://github.com/Th0rgal/open_oura", rev = "b1b52a0da36a592d5fe8967b0024dcc40d5c746f" }
 oura-summary = { path = "../oura-summary" }
 oura-dna = { path = "../oura-dna" }
 clap = { version = "4", features = ["derive"] }

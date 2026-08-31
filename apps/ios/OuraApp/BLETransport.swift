@@ -67,6 +67,16 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     // silently dropping all frames after the first link loss.
     private(set) var notifications: AsyncStream<Data> = AsyncStream { _ in }
 
+    // Ring 5 history arrives as thousands of tiny CoreBluetooth notifications. Passing
+    // every one through AsyncStream + UniFFI separately (and hex-logging it) costs more
+    // than parsing it. Coalesce only history payload packets; command replies and the
+    // terminal batch summary remain immediate. Rust's Packet::parse_many already
+    // accepts concatenated packets, so this does not change protocol semantics.
+    private var historyBuffer = Data()
+    private var historyFrames = 0
+    private var historyBytes = 0
+    private static let historyFlushBytes = 32 * 1024
+
     private var connectCont: CheckedContinuation<Void, Error>?
     private var writeCont: CheckedContinuation<Void, Error>?
     private var connectTimeout: DispatchWorkItem?
@@ -143,6 +153,9 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             lock.unlock()
             // fresh notification stream for this connection (a reconnect must not hand
             // back the previous, already-finished stream).
+            historyBuffer.removeAll(keepingCapacity: true)
+            historyFrames = 0
+            historyBytes = 0
             notifications = AsyncStream { self.notifyContinuation = $0 }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: work)
             dlog("ble", "connect(timeout: \(Int(timeout))s) — central.state=\(Self.name(of: central.state))")
@@ -406,8 +419,54 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             if let error { dlog("ble", "notify ERROR on \(characteristic.uuid): \(error)") }
             return
         }
+        if Self.isHistoryPayload(v) {
+            historyBuffer.append(v)
+            historyFrames += 1
+            historyBytes += v.count
+            if historyBuffer.count >= Self.historyFlushBytes {
+                flushHistoryPayload()
+            }
+            return
+        }
+
+        // A command response / 0x42 batch summary terminates the preceding history
+        // burst. Deliver buffered packets first to preserve byte order, then retain one
+        // compact diagnostic line instead of tens of thousands of raw payload lines.
+        flushHistoryPayload()
+        if historyFrames > 0 {
+            dlog("recv", "history payload omitted — \(historyFrames) BLE frames, \(historyBytes)B")
+            historyFrames = 0
+            historyBytes = 0
+        }
         dlog("recv", "\(v.count)B [\(characteristic.uuid.uuidString.suffix(4).lowercased())] \(v.hexString)")
         notifyContinuation?.yield(v)
+    }
+
+    /// Extended history data is `0x2f … 0x43`; legacy history packets use event
+    /// tags >= 0x41. Walk every length-prefixed packet because one BLE notification
+    /// can contain several packets. If even one is a summary/control packet, deliver
+    /// the notification immediately so a trailing terminator can never sit buffered.
+    private static func isHistoryPayload(_ data: Data) -> Bool {
+        var offset = 0
+        while offset < data.count {
+            guard offset + 2 <= data.count else { return false }
+            let tag = data[offset]
+            let length = Int(data[offset + 1])
+            let end = offset + 2 + length
+            guard end <= data.count else { return false }
+            let isHistory = tag >= 0x41
+                || (tag == 0x2f && length >= 1 && data[offset + 2] == 0x43)
+            guard isHistory else { return false }
+            offset = end
+        }
+        return offset > 0
+    }
+
+    private func flushHistoryPayload() {
+        guard !historyBuffer.isEmpty else { return }
+        let payload = historyBuffer
+        historyBuffer.removeAll(keepingCapacity: true)
+        notifyContinuation?.yield(payload)
     }
 
     /// GATT write-with-response acknowledgement (or error) for the in-flight `write`.

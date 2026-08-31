@@ -20,22 +20,35 @@ enum CvaModel {
         else { return (nil, "cardiovascular model file missing from the app bundle") }
 
         var db: OpaquePointer?
-        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return (nil, "couldn't open the database for CVA") }
+        // Read-only + busy timeout: a partial PPG read during a sync must fail
+        // loudly, never feed the model a truncated waveform.
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            let msg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
+            sqlite3_close(db)
+            return (nil, "couldn't open the database for CVA: \(msg)")
+        }
         defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 5000)
 
         // raw PPG bodies in time order (tag 129)
         var tss: [Int64] = [], bodies: [[UInt8]] = []
         var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT ring_timestamp, body FROM events WHERE tag=129 AND body IS NOT NULL ORDER BY ring_timestamp", -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let ts = sqlite3_column_int64(stmt, 0)
-                let n = Int(sqlite3_column_bytes(stmt, 1))
-                guard n > 0, let p = sqlite3_column_blob(stmt, 1) else { continue }
-                tss.append(ts)
-                bodies.append([UInt8](UnsafeBufferPointer(start: p.assumingMemoryBound(to: UInt8.self), count: n)))
-            }
+        guard sqlite3_prepare_v2(db, "SELECT ring_timestamp, body FROM events WHERE tag=129 AND body IS NOT NULL ORDER BY ring_timestamp", -1, &stmt, nil) == SQLITE_OK else {
+            return (nil, "couldn't read the database for CVA: \(String(cString: sqlite3_errmsg(db)))")
+        }
+        var stepRc = sqlite3_step(stmt)
+        while stepRc == SQLITE_ROW {
+            defer { stepRc = sqlite3_step(stmt) }  // runs on continue too
+            let ts = sqlite3_column_int64(stmt, 0)
+            let n = Int(sqlite3_column_bytes(stmt, 1))
+            guard n > 0, let p = sqlite3_column_blob(stmt, 1) else { continue }
+            tss.append(ts)
+            bodies.append([UInt8](UnsafeBufferPointer(start: p.assumingMemoryBound(to: UInt8.self), count: n)))
         }
         sqlite3_finalize(stmt)
+        guard stepRc == SQLITE_DONE else {
+            return (nil, "database read for CVA was interrupted: \(String(cString: sqlite3_errmsg(db)))")
+        }
         guard !bodies.isEmpty else { return (nil, nil) }  // no PPG captured — benign
 
         // split into contiguous measurement runs, decode + chunk into 1500-sample segments
@@ -53,6 +66,14 @@ enum CvaModel {
         }
         flush(run)
         guard nSegs > 0 else { return (nil, nil) }  // PPG present but no full segment — benign
+        // A long PPG archive can be tens of thousands of 1500-sample windows.
+        // Keep the most recent 4000 (~enough for the daily CVA estimate) so a
+        // hiking-heavy history does not feed a 60 MB tensor into LibTorch.
+        let maxSegs = 4000
+        if nSegs > maxSegs {
+            segments = Array(segments.suffix(maxSegs * SEG_LEN))
+            nSegs = maxSegs
+        }
 
         let sexVal: Float = sex.uppercased() == "F" ? -1 : (sex.uppercased() == "O" ? 0 : 1)
         var demo: [Float] = [sexVal, Float(heightM), Float(age), Float(ringSize), Float(weightKg)]

@@ -152,26 +152,34 @@ impl ModelRunner for PythonRunner {
             tz.to_string(),
             "--json".into(),
         ];
+        let illness_args = vec![
+            db.display().to_string(),
+            tz.to_string(),
+            "--json".into(),
+        ];
 
-        let (sleep_batch, cva, activity) = match (root.as_deref(), py.as_deref()) {
+        let (sleep_batch, cva, activity, illness) = match (root.as_deref(), py.as_deref()) {
             (Some(r), Some(p)) => std::thread::scope(|s| {
                 let sh = s.spawn(|| {
                     run_py_json_stdin(r, p, "tools/run_sleep_model.py", &sleep_args, &sleep_stdin)
                 });
                 let ch = s.spawn(|| run_py_json(r, p, "tools/run_cva_model.py", &cva_args));
                 let ah = s.spawn(|| run_py_json(r, p, "tools/run_activity_model.py", &act_args));
+                let ih = s.spawn(|| run_py_json(r, p, "tools/run_illness_model.py", &illness_args));
                 (
                     sh.join().ok().flatten(),
                     ch.join().ok().flatten(),
                     ah.join().ok().flatten(),
+                    ih.join().ok().flatten(),
                 )
             }),
-            _ => (None, None, None),
+            _ => (None, None, None, None),
         };
         ModelOutputs {
             sleep_batch,
             cva,
             activity,
+            illness,
         }
     }
 }

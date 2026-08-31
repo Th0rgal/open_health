@@ -11,4 +11,4 @@ repository.workspace = true
 crate-type = ["staticlib", "lib"]
 
 [dependencies]
-oura-analysis = { git = "https://github.com/Th0rgal/open_oura", branch = "split-open-health" }
+oura-analysis = { git = "https://github.com/Th0rgal/open_oura", rev = "b1b52a0da36a592d5fe8967b0024dcc40d5c746f" }

@@ -4,24 +4,22 @@ A native iOS client to the same local Rust core as the web dashboard. Same data,
 same numbers — a **calm, instrument-grade** reading of your ring, with a quiet
 data-science aesthetic. Everything on-device; nothing leaves the phone.
 
-## Design language — "Observatory"
+## Design language — thomas.md Quiet Ink
 
-Inspired by Flywheel: deep-black canvas, thin vector traces, dashed concentric
-arcs, ringed nodes, sparse monospace micro-labels, lots of negative space. The
-night and its baselines read like an **orbital plot**, not a dashboard of cards.
+Same paper and ink as [thomas.md](https://thomas.md). A personal health readout
+on warm paper, not a teal glass dashboard.
 
-- **Canvas** pure black `#000` → near-black `#0A0A0B`. No panels, no boxes — data
-  floats on the void; hierarchy comes from space and weight, not borders.
-- **Ink** `#EDEDED` primary · `#8A8A8E` secondary · `#46464A` structural traces.
-- **Accent, rare** signal-teal `#4FD0C5` (in-range / good) · signal-yellow
-  `#E6C04D` (the one threshold to notice). One accent per screen, max.
-- **Type** SF Pro for prose, **SF Mono** for every number, axis and tag. Titles
-  set small, lowercase, a touch of italic ("scheduled muon" voice).
-- **Structure = polar.** Baselines are dashed reference rings; a metric's night is
-  a trace growing outward; events are small ringed nodes on the arc.
-- **Motion** slow draw-on of traces (the graph *grows*), spring physics, 120 fps
-  ProMotion. No bounce, no chrome. Light haptic on sync + threshold crossings.
-- Auto light/dark, but dark is the hero. Respects Reduce Motion / Dynamic Type.
+- **Paper** `#fbfaf6` light · `#131110` dark. Hierarchy from hairlines and weight,
+  not glass or aurora.
+- **Ink** headings `#26231e` / `#efebe2` · body `#57534b` / `#cfc9bf` · muted
+  `#6e695f` / `#a8a195` · links `#2e2b26` / `#e3ddd2` · rules `#e7e3da` / `#2c2925`.
+- **Color is semantic.** Charts and numbers sit in warm ink/gray. Green only
+  when something is genuinely good, orange/red only when there is a problem.
+  Sleep stages are the exception: deep / light / REM / wake keep distinct hues.
+- **Type** New York (system serif) for titles, SF Pro for UI, **SF Mono** for
+  every number, axis and tag.
+- **Surfaces** paper + 1px rules, 10pt radius. No ultraThinMaterial, no teal.
+- Auto light/dark from the system. Respects Reduce Motion / Dynamic Type.
 
 ### Signature element — "Night Orbit"
 One reusable radial view: concentric **dashed baseline rings**, a **growing trace**
@@ -66,7 +64,7 @@ running fully on-device on a real ring's data, sharing the Rust core so a web
 change in `build_summary()` flows to iOS with no re-implementation.
 
 ## Non-goals (v1)
-Cloud sync · accounts · Apple Health export · Android · live realtime (`viz`/
+Cloud sync · accounts · Android · live realtime (`viz`/
 `game`) — all later. v1 is the offline dashboard, done beautifully.
 
 ## Status (foundation built & verified on the iOS 26.4 simulator)

@@ -5,13 +5,13 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>open_oura</string>
+	<string>Open Oura</string>
 	<key>CFBundleExecutable</key>
 	<string>OuraApp</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleName</key>
-	<string>open_oura</string>
+	<string>Open Oura</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -29,18 +29,21 @@
 		<string>bluetooth-central</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>open_oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
+	<string>Open Oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>open_oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
+	<string>Open Oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
 	<key>NSHealthShareUsageDescription</key>
-	<string>open_oura can read selected Apple Health data to compare it with your ring metrics on-device.</string>
+	<string>Open Oura can read selected Apple Health data to compare it with your ring metrics on-device.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>open_oura can write selected ring-derived metrics to Apple Health if you enable Health export.</string>
+	<string>Open Oura uses write access only when you choose to export ring-derived sleep, activity, and heart measurements to Apple Health.</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
 </dict>
 </plist>

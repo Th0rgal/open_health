@@ -440,17 +440,17 @@ fn parse_markers(text: &str, warnings: &mut Vec<String>) -> Vec<ParsedMarker> {
             continue;
         }
         match parse_cells(&cells, *def) {
-            Some((value, unit, low, high, ref_text)) => {
+            Some(parsed) => {
                 out.insert(
                     def.key.to_string(),
                     ParsedMarker {
                         key: def.key.to_string(),
                         raw_name,
-                        value,
-                        unit,
-                        low,
-                        high,
-                        ref_text,
+                        value: parsed.value,
+                        unit: parsed.unit,
+                        low: parsed.low,
+                        high: parsed.high,
+                        ref_text: parsed.ref_text,
                     },
                 );
             }
@@ -616,10 +616,15 @@ fn match_def<'a>(name: &str, defs: &'a [MarkerDef]) -> Option<&'a MarkerDef> {
         .find(|d| d.aliases.iter().any(|a| n.contains(a)))
 }
 
-fn parse_cells(
-    cells: &[String],
-    def: MarkerDef,
-) -> Option<(f64, String, Option<f64>, Option<f64>, Option<String>)> {
+struct ParsedCells {
+    value: f64,
+    unit: String,
+    low: Option<f64>,
+    high: Option<f64>,
+    ref_text: Option<String>,
+}
+
+fn parse_cells(cells: &[String], def: MarkerDef) -> Option<ParsedCells> {
     let first = cells.first()?.trim();
     if normalize(first).contains("em curso") {
         return None;
@@ -648,7 +653,13 @@ fn parse_cells(
         high = def.high;
         ref_text = def.ref_text.map(str::to_string);
     }
-    Some((value, unit.trim().to_string(), low, high, ref_text))
+    Some(ParsedCells {
+        value,
+        unit: unit.trim().to_string(),
+        low,
+        high,
+        ref_text,
+    })
 }
 
 fn parse_value_unit(s: &str) -> Option<(f64, String, usize)> {

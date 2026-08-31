@@ -33,9 +33,10 @@ struct TodayCard: View {
                         }
                         Text("\(n.start ?? "—") → \(n.end ?? "—")")
                             .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-                        if n.hasHypnogram { Hypnogram(stages: n.stages!, height: 26) }
+                        if n.hasHypnogram { Hypnogram(stages: n.stages!, height: 28) }
                         else if let e = n.efficiency {
-                            Text("efficiency \(Int(e))%").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                            Text("efficiency \(Int(e))%").font(Obs.mono(12))
+                                .foregroundStyle(e >= 85 ? Obs.good : (e < 75 ? Obs.bad : Obs.ink2))
                         }
                     }
                     .contentShape(Rectangle())
@@ -53,7 +54,7 @@ struct TodayCard: View {
                         Spacer()
                         if let st = s.activity_daily[day] {
                             Text("\(Int(st.steps ?? 0)) steps").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                            Text("· \(Int(st.active_kcal ?? 0)) kcal").font(Obs.mono(11)).foregroundStyle(Obs.teal)
+                            Text("· \(Int(st.active_kcal ?? 0)) kcal").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
                         }
                         Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
                     }
@@ -107,9 +108,7 @@ struct AllDaysView: View {
             }
             .navigationTitle("all days")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-            .toolbarColorScheme(.dark, for: .navigationBar)
         }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -117,18 +116,20 @@ struct AllDaysView: View {
 // over BLE, drain history into the writable DB. BLE only works on a physical device.
 struct SyncView: View {
     @ObservedObject var ring: RingSync
-    let onSynced: () -> Void
+    let onSynced: (SyncReport) -> Void
+    let onReset: () -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var key = Keychain.loadKey() ?? ""
     @ObservedObject private var diag = RingDiag.shared
+    @ObservedObject private var store = DiagStore.shared
     @State private var copied = false
     var body: some View {
         NavigationStack {
             ZStack {
                 Obs.canvas.ignoresSafeArea()
                 VStack(alignment: .leading, spacing: 18) {
-                    Text("Pair your ring").font(Obs.prose(20, .semibold)).foregroundStyle(Obs.ink)
+                    Text("Pair your ring").font(Obs.serif(24)).foregroundStyle(Obs.ink)
                     // the ring advertises reliably only ON its charger, and its single
                     // BLE link is usually held by any phone running the official app.
                     Text("Put the ring on its charger next to this iPhone, turn off Bluetooth on any phone with the official Oura app, then paste the auth key you exported on your computer. The first sync pulls the ring's full history and can take a while — keep the app open; if the connection drops it reconnects and resumes automatically.")
@@ -140,22 +141,21 @@ struct SyncView: View {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Obs.trace, lineWidth: 0.8))
                     Button {
                         Task {
-                            await ring.run(keyHex: key)
-                            if ring.lastReport != nil { onSynced() }
+                            if let report = await ring.run(keyHex: key) { onSynced(report) }
                         }
                     } label: {
                         HStack(spacing: 8) {
-                            if ring.busy { ProgressView().tint(Obs.black) }
+                            if ring.busy { ProgressView().tint(Obs.paper) }
                             Text(ring.busy ? "syncing…" : "Connect & Sync").font(Obs.mono(13, .medium))
                         }
                         .frame(maxWidth: .infinity).padding(.vertical, 12)
-                        .background(Obs.teal).foregroundStyle(Obs.black)
+                        .background(Obs.ink).foregroundStyle(Obs.paper)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                     .disabled(ring.busy)
                     Button(role: .destructive) {
                         ring.resetLocalDatabase()
-                        onSynced()
+                        onReset()
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: "trash")
@@ -167,46 +167,90 @@ struct SyncView: View {
                     .disabled(ring.busy)
                     if !ring.status.isEmpty {
                         Text(ring.status).font(Obs.mono(12))
-                            .foregroundStyle(ring.lastReport != nil ? Obs.teal : Obs.ink2)
+                            .foregroundStyle(ring.lastReport != nil ? Obs.good : Obs.ink2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    // live connect/auth/sync transcript — "copy logs" puts the FULL
-                    // transcript (RingDiag.dump) on the pasteboard for a bug report.
-                    if diag.totalLines > 0 {
+                    // live transcript + leftover logs from previous crashes / kills.
+                    VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("diagnostics · \(diag.totalLines) lines")
+                            Text("diagnostics")
                                 .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
                             Spacer()
-                            Button(copied ? "copied ✓" : "copy logs") {
-                                UIPasteboard.general.string = RingDiag.shared.dump()
+                            Button(copied ? "copied ✓" : "copy all") {
+                                UIPasteboard.general.string = DiagStore.shared.exportAll()
                                 copied = true
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
                             }
-                            .font(Obs.mono(11, .medium)).foregroundStyle(Obs.teal)
+                            .font(Obs.mono(11, .medium)).foregroundStyle(Obs.ink)
                         }
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 2) {
-                                ForEach(Array(diag.tail.enumerated()), id: \.offset) { _, line in
-                                    Text(line).font(Obs.mono(9)).foregroundStyle(Obs.ink2)
-                                        .lineLimit(3)
+                        if !store.incidents.isEmpty {
+                            Text("previous crashes · \(store.incidents.count)")
+                                .font(Obs.mono(10, .medium)).foregroundStyle(Obs.bad)
+                            ForEach(store.incidents.prefix(8)) { item in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.title).font(Obs.mono(10, .medium)).foregroundStyle(Obs.ink)
+                                    Text(item.preview).font(Obs.mono(9)).foregroundStyle(Obs.ink2)
+                                        .lineLimit(5)
                                         .frame(maxWidth: .infinity, alignment: .leading)
+                                    Button("copy this") {
+                                        UIPasteboard.general.string = item.body
+                                    }
+                                    .font(Obs.mono(10, .medium)).foregroundStyle(Obs.ink)
+                                }
+                                .padding(8)
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Obs.trace, lineWidth: 0.8))
+                            }
+                        } else {
+                            Text("No leftover crash logs. If the app dies mid-sync or mid-analysis, the next launch will keep that session here.")
+                                .font(Obs.mono(10)).foregroundStyle(Obs.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if !store.sessions.isEmpty {
+                            Text("older sessions · \(store.sessions.count)")
+                                .font(Obs.mono(10, .medium)).foregroundStyle(Obs.ink2)
+                            ForEach(store.sessions.prefix(4)) { item in
+                                HStack {
+                                    Text(item.title).font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                                    Spacer()
+                                    Button("copy") { UIPasteboard.general.string = item.body }
+                                        .font(Obs.mono(10, .medium)).foregroundStyle(Obs.ink)
                                 }
                             }
-                            .padding(8)
                         }
-                        .defaultScrollAnchor(.bottom)
-                        .frame(maxHeight: 220)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Obs.trace, lineWidth: 0.8))
+                        if diag.totalLines > 0 {
+                            Text("this launch · \(diag.totalLines) lines")
+                                .font(Obs.mono(10, .medium)).foregroundStyle(Obs.ink2)
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    ForEach(Array(diag.tail.enumerated()), id: \.offset) { _, line in
+                                        Text(line).font(Obs.mono(9)).foregroundStyle(Obs.ink2)
+                                            .lineLimit(3)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                }
+                                .padding(8)
+                            }
+                            .defaultScrollAnchor(.bottom)
+                            .frame(maxHeight: 220)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Obs.trace, lineWidth: 0.8))
+                        }
                     }
                     Spacer()
                 }
                 .padding(24)
             }
             .navigationTitle("sync").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-            .toolbarColorScheme(.dark, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .disabled(ring.busy)
+                }
+            }
         }
-        .preferredColorScheme(.dark)
+        // The sync belongs to RingSync, not to this presentation. Let the panel be
+        // tucked away while BLE keeps running; the top-bar indicator remains live
+        // and can reopen these diagnostics at any time.
+        .presentationDragIndicator(.visible)
         .onAppear {
             if ring.busy { IdleTimerLock.acquire("pair-screen") }
         }
@@ -223,19 +267,67 @@ struct SyncView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, ring.busy {
                 IdleTimerLock.refreshIfHeld("ring-sync")
-                IdleTimerLock.acquire("pair-screen")
+                IdleTimerLock.refreshIfHeld("pair-screen")
             }
+        }
+    }
+}
+
+/// The top-bar sync affordance doubles as a live status light and the entry point
+/// to diagnostics. Motion stays quiet: one slow continuous turn only while BLE is
+/// active.
+private struct SyncIndicatorButton: View {
+    @ObservedObject var ring: RingSync
+    let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var rotation = 0.0
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .stroke(Obs.rule, lineWidth: 0.8)
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(ring.busy ? Obs.ink : (ring.wasRecentlySynced ? Obs.good : Obs.ink2))
+                    .rotationEffect(.degrees(rotation))
+            }
+            .frame(width: 31, height: 31)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(ring.busy ? "Ring sync in progress" : "Ring sync and diagnostics")
+        .accessibilityHint("Opens sync status, logs, and manual controls")
+        .onAppear(perform: updateAnimation)
+        .onChange(of: ring.busy) { _, _ in updateAnimation() }
+        .onChange(of: reduceMotion) { _, _ in updateAnimation() }
+    }
+
+    private func updateAnimation() {
+        if ring.busy && !reduceMotion {
+            rotation = 0
+            withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) {
+                rotation = 360
+            }
+        } else {
+            withAnimation(.easeOut(duration: 0.2)) { rotation = 0 }
         }
     }
 }
 
 // ── root ─────────────────────────────────────────────────────────────────────
 struct RootView: View {
-    @State private var s: Summary?
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var s: Summary? = SummaryCache.load()
     @State private var report: ReportSel?
     @State private var showAllDays = false
     @State private var showSync = false
+    @State private var showProfile = false
+    @State private var showSleepDebt = false
+    @State private var vital: VitalKind?
+    @State private var loadGeneration = 0
+    @State private var isRefreshingSummary = false
     @StateObject private var ring = RingSync()
+    @StateObject private var modelProgress = ModelProgress()
     private func f(_ v: Double?, _ fallback: String = "—") -> String {
         v.map { "\(Int($0))" } ?? fallback
     }
@@ -245,6 +337,21 @@ struct RootView: View {
         if diff > 0.05 { return "\(a) yr older" }
         return "in line"
     }
+    private func localDay(_ date: Date = Date()) -> String {
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+    private func displayedDayLabel(_ day: String, now: Date = Date()) -> String {
+        if day == localDay(now) { return "today" }
+        if let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: now),
+           day == localDay(yesterday) { return "yesterday" }
+        return day
+    }
+    private func latestLabel(date: String?, time: String? = nil) -> String {
+        let day = date.map { String($0.suffix(5)) }
+        let stamp = [day, time].compactMap { $0 }.joined(separator: " · ")
+        return stamp.isEmpty ? "latest sync" : "latest · \(stamp)"
+    }
     var body: some View {
         ZStack {
             Obs.canvas.ignoresSafeArea()
@@ -252,58 +359,150 @@ struct RootView: View {
                 content(s)
             } else {
                 VStack(spacing: 14) {
-                    ProgressView().tint(Obs.teal)
+                    ProgressView().tint(Obs.ink)
                     Text("reading your ring…").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
                 }
             }
         }
-        .preferredColorScheme(.dark)
         .fullScreenCover(item: $report) { sel in if let s { DayReportView(s: s, day: sel.day, tab: sel.sleep ? .sleep : .activity) } }
         .sheet(isPresented: $showAllDays) { if let s { AllDaysView(s: s) } }
-        .sheet(isPresented: $showSync) { SyncView(ring: ring, onSynced: reload) }
-        .onAppear(perform: load)
+        .sheet(isPresented: $showSync) {
+            SyncView(ring: ring, onSynced: refreshAfterSync, onReset: resetAndReload)
+        }
+        .sheet(isPresented: $showProfile) { ProfileSettingsView(profile: s?.profile, onSaved: refreshDerivedData) }
+        .sheet(isPresented: $showSleepDebt) { if let debt = s?.sleepDebt { SleepDebtDetail(debt: debt) } }
+        .sheet(item: $vital) { kind in if let s { VitalTrendView(s: s, kind: kind) } }
+        .onAppear {
+            // A cached summary makes launch immediate; this forced load replaces it
+            // with SQLite + model output without blanking the existing Today card.
+            load(force: true, clearCurrent: false)
+            requestAutomaticSync()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                IdleTimerLock.refreshIfHeld("models")
+                requestAutomaticSync()
+            }
+        }
     }
 
     // re-read the DB after a sync brought in new events
     private func reload() {
-        s = nil
-        load()
+        load(force: true, clearCurrent: true)
+    }
+
+    private func resetAndReload() {
+        SummaryCache.clear()
+        #if TORCH
+        ModelCacheStore.clearAll()
+        #endif
+        reload()
+    }
+
+    /// Profile changes affect CVA and activity inference, but do not invalidate the
+    /// summary already on screen. Keep the last complete result visible until every
+    /// derived model has finished, avoiding a transient sleep-debt regression.
+    private func refreshDerivedData() {
+        load(force: true, clearCurrent: false)
+    }
+
+    /// New ring events invalidate every derived view. In particular this reruns AAD
+    /// after the database transaction has completed, so newly accumulated movement
+    /// cannot leave yesterday's activity sessions cached on screen.
+    private func refreshAfterSync(_ report: SyncReport) {
+        guard report.inserted > 0 else { return }
+        load(force: true, clearCurrent: false)
+    }
+
+    private func requestAutomaticSync() {
+        Task {
+            if let report = await ring.syncAutomaticallyIfNeeded() {
+                refreshAfterSync(report)
+            }
+        }
     }
 
     // The heavy on-device models run off the main thread (load): show the fast
     // model-free summary first, then fold in the hypnogram / CVA / activity results.
-    private func load() {
-        guard s == nil else { return }
+    // Keep the screen awake for the whole pass so auto-lock cannot kill a long
+    // analysis (same IdleTimerLock the BLE sync already uses).
+    private func load(force: Bool = false, clearCurrent: Bool = false) {
+        guard force || s == nil else { return }
+        isRefreshingSummary = true
+        loadGeneration += 1
+        let generation = loadGeneration
+        IdleTimerLock.acquire("models")
+        #if TORCH
+        let publishBase = s == nil || clearCurrent
+        #else
+        let publishBase = true
+        #endif
+        // Captured before the background hop: the last published summary is the
+        // fallback if a model read fails mid-sync (withModels never replaces real
+        // results with emptiness).
+        let previous = s
+        if clearCurrent { s = nil }
+        modelProgress.begin(generation)
+        let progress = modelProgress.sink(generation)
         DispatchQueue.global(qos: .userInitiated).async {
             let base = Core.base()
-            DispatchQueue.main.async { if s == nil { s = base } }
+            if publishBase {
+                DispatchQueue.main.async {
+                    guard generation == loadGeneration else { return }
+                    s = base
+                    SummaryCache.save(base)
+                    HealthExport.shared.push(base)
+                }
+            }
             #if TORCH
             if base.error == nil {
-                let full = Core.withModels(base)
-                DispatchQueue.main.async { s = full }
+                let full = Core.withModels(base, previous: previous, progress: progress)
+                DispatchQueue.main.async { finishLoad(generation, summary: full) }
+            } else {
+                DispatchQueue.main.async { finishLoad(generation, summary: nil) }
             }
+            #else
+            DispatchQueue.main.async { finishLoad(generation, summary: nil) }
             #endif
         }
     }
 
+    private func finishLoad(_ generation: Int, summary: Summary?) {
+        if generation == loadGeneration {
+            if let summary {
+                s = summary
+                SummaryCache.save(summary)
+                HealthExport.shared.push(summary)
+            }
+            isRefreshingSummary = false
+            modelProgress.report(generation, nil)
+        }
+        IdleTimerLock.release("models")
+    }
+
     @ViewBuilder private func content(_ s: Summary) -> some View {
-        let latest = s.nights.first
+        let latestTemp = s.nights.first { $0.skin_temp != nil }
+        let latestOxygen = s.nights.first { $0.spo2_mean != nil }
+        let recentTemperatures = Array(s.nights.compactMap(\.skin_temp).prefix(14).reversed())
+        let recentOxygen = Array(s.nights.compactMap(\.spo2_mean).prefix(14).reversed())
+        let latestHR = s.vitals.hr
         ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
                     HStack {
-                        Text("open_oura").font(Obs.prose(20, .semibold)).foregroundStyle(Obs.ink)
+                        Text("Open Oura").font(Obs.serif(24)).foregroundStyle(Obs.ink)
                         Text("BETA").font(Obs.mono(9, .bold)).tracking(1).foregroundStyle(Obs.ink2)
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .overlay(RoundedRectangle(cornerRadius: 5).stroke(Obs.trace, lineWidth: 0.8))
                         Spacer()
-                        Button { showSync = true } label: {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 16)).foregroundStyle(Obs.teal)
+                        Button { showProfile = true } label: {
+                            Image(systemName: "person.crop.circle")
+                                .font(.system(size: 17)).foregroundStyle(Obs.ink2)
                         }
+                        SyncIndicatorButton(ring: ring) { showSync = true }
                     }
 
                     if let err = s.error {
-                        ObsTag("no data"); Text(err).font(Obs.mono(13)).foregroundStyle(Obs.yellow)
+                        ObsTag("no data"); Text(err).font(Obs.mono(13)).foregroundStyle(Obs.bad)
                     } else {
                         // digest headline
                         if let d = s.digest {
@@ -314,52 +513,80 @@ struct RootView: View {
                         // today — last night's sleep + that day's activity as one unit, the
                         // hero of the home; tap the sleep or the activity region for its report.
                         if let day = s.days.first {
-                            ObsTag("today", icon: "sun.max.fill")
+                            HStack(spacing: 9) {
+                                ObsTag(displayedDayLabel(day), icon: "sun.max.fill")
+                                if ring.busy || isRefreshingSummary {
+                                    ProgressView().controlSize(.mini).scaleEffect(0.68).tint(Obs.ink)
+                                    Text(modelProgress.label ?? "updating").font(Obs.mono(9, .medium))
+                                        .tracking(0.8).foregroundStyle(Obs.ink2)
+                                }
+                            }
+                            .animation(.easeInOut(duration: 0.2), value: ring.busy || isRefreshingSummary)
                             TodayCard(s: s, day: day,
                                       onSleep: { report = ReportSel(day: day, sleep: true) },
                                       onActivity: { report = ReportSel(day: day, sleep: false) })
                         }
 
                         // vitals
-                        ObsTag("vitals · last night", icon: "waveform.path.ecg")
+                        ObsTag("vitals", icon: "waveform.path.ecg")
                         HStack(alignment: .top, spacing: 24) {
-                            VitalCell(tag: "hrv", value: f(s.vitals.hrv.latest), unit: "ms",
-                                      delta: s.vitals.hrv.delta_pct, series: s.vitals.hrv.series)
-                            VitalCell(tag: "resting hr", value: f(s.vitals.rhr.latest), unit: "bpm",
-                                      delta: s.vitals.rhr.delta_pct, series: s.vitals.rhr.series,
-                                      deltaGoodWhenPositive: false)
+                            VitalCell(tag: "nightly hrv", value: f(s.vitals.hrv.latest), unit: "ms",
+                                      delta: s.vitals.hrv.delta_pct, series: s.vitals.hrv.series,
+                                      baseline: s.vitals.hrv.baseline,
+                                      action: { vital = .hrv })
+                            VitalCell(tag: "heart rate",
+                                      value: f(latestHR?.latest ?? s.vitals.rhr.latest), unit: "bpm",
+                                      series: s.vitals.rhr.series,
+                                      baseline: s.vitals.rhr.baseline,
+                                      deltaGoodWhenPositive: false,
+                                      detail: latestHR.map { latestLabel(date: $0.date, time: $0.hm) }
+                                          ?? "nightly minimum",
+                                      action: { vital = .heartRate })
                         }
                         HStack(alignment: .top, spacing: 24) {
                             VitalCell(tag: "skin temp",
-                                      value: latest?.skin_temp.map { String(format: "%.1f", $0) } ?? "—",
-                                      unit: "°c")
-                            VitalCell(tag: "blood o₂", value: f(latest?.spo2_mean), unit: "%")
+                                      value: latestTemp?.skin_temp.map { String(format: "%.1f", $0) } ?? "—",
+                                      unit: "°c",
+                                      series: recentTemperatures,
+                                      detail: latestTemp.map { latestLabel(date: s.wakeYmd($0)) },
+                                      action: { vital = .temp })
+                            VitalCell(tag: "blood o₂", value: f(latestOxygen?.spo2_mean), unit: "%",
+                                      series: recentOxygen,
+                                      detail: latestOxygen.map { latestLabel(date: s.wakeYmd($0)) },
+                                      action: { vital = .oxygen })
                         }
 
-                        // cardiovascular age (on-device CVA model, from raw PPG)
-                        if let cv = s.cardio, let va = cv.vascular_age {
+                        if let debt = s.sleepDebt {
+                            SleepDebtCard(debt: debt) { showSleepDebt = true }
+                        }
+
+                        if let illness = s.illness {
+                            IllnessCard(illness: illness)
+                        }
+
+                        // Cardiovascular estimates belong together: vascular age/PWV
+                        // from raw PPG plus the demographic VO₂max estimate.
+                        if s.cardio?.vascular_age != nil || s.fitness?.vo2max != nil {
                             ObsTag("cardiovascular", icon: "heart.fill")
                             VStack(spacing: 12) {
-                                ObsStat(label: "vascular age", value: String(format: "%.1f yr", va), accent: Obs.teal)
-                                if let ca = cv.chronological_age { ObsStat(label: "vs your age", value: relAge(va - ca)) }
-                                if let pwv = cv.pwv_ms { ObsStat(label: "pulse-wave velocity", value: String(format: "%.2f m/s", pwv)) }
-                                if let seg = cv.segments { ObsStat(label: "segments analysed", value: "\(seg)") }
+                                if let cv = s.cardio, let va = cv.vascular_age {
+                                    ObsStat(label: "vascular age", value: String(format: "%.1f yr", va))
+                                    if let ca = cv.chronological_age { ObsStat(label: "vs your age", value: relAge(va - ca)) }
+                                    if let pwv = cv.pwv_ms { ObsStat(label: "pulse-wave velocity", value: String(format: "%.2f m/s", pwv)) }
+                                    if let seg = cv.segments { ObsStat(label: "segments analysed", value: "\(seg)") }
+                                }
+                                if let vo = s.fitness?.vo2max {
+                                    ObsStat(label: "vo₂max estimate", value: String(format: "%.1f ml/kg/min", vo))
+                                }
                             }
                             .obsCard()
-                        }
-
-                        // fitness — anthropometric VO₂max estimate (model-free, from demographics)
-                        if let vo = s.fitness?.vo2max {
-                            ObsTag("fitness", icon: "bolt.heart.fill")
-                            ObsStat(label: "vo₂max estimate", value: String(format: "%.1f ml/kg/min", vo), accent: Obs.teal)
-                                .obsCard()
                         }
 
                         // browse every day → per-day detail (sleep + activity)
                         if !s.days.isEmpty {
                             Button { showAllDays = true } label: {
                                 HStack {
-                                    Text("show all \(s.days.count) days").font(Obs.mono(12, .medium)).foregroundStyle(Obs.teal)
+                                    Text("show all \(s.days.count) days").font(Obs.mono(12, .medium)).foregroundStyle(Obs.ink)
                                     Spacer()
                                     Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
                                 }.contentShape(Rectangle())
@@ -372,7 +599,7 @@ struct RootView: View {
                             ObsTag("on-device models", icon: "exclamationmark.triangle")
                             VStack(alignment: .leading, spacing: 6) {
                                 ForEach(s.modelErrors, id: \.self) { e in
-                                    Text("• \(e)").font(Obs.mono(11)).foregroundStyle(Obs.yellow)
+                                    Text("• \(e)").font(Obs.mono(11)).foregroundStyle(Obs.bad)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
                             }
@@ -385,7 +612,7 @@ struct RootView: View {
                             ObsStat(label: "firmware", value: s.device?.firmware ?? "—")
                             ObsStat(label: "battery",
                                     value: s.device?.battery_pct.map { "\($0)%" } ?? "—",
-                                    accent: Obs.teal)
+                                    accent: (s.device?.battery_pct ?? 100) < 20 ? Obs.bad : Obs.ink)
                             ObsStat(label: "synced",
                                     value: s.device.flatMap { d in d.synced.map { "\($0) \(d.synced_hm ?? "")" } } ?? "—")
                             ObsStat(label: "days of data",
@@ -402,5 +629,6 @@ struct RootView: View {
 
 @main
 struct OuraApp: App {
+    init() { DiagStore.shared.bootstrap() }
     var body: some Scene { WindowGroup { RootView() } }
 }

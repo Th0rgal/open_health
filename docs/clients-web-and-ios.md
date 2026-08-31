@@ -40,7 +40,8 @@ metric there once and both clients receive it in the JSON.
 | Digest headline | `load()` digest | `RootView` digest | `digest` | — |
 | Vitals (HRV/RHR/temp/SpO₂) | `renderTiles` / `VitalCell`-like | `VitalCell` | `vitals`, `nights[]` | — |
 | **Unified day (night + activity)** | `renderDay`, `dayCard` | `TodayCard` | `nights[]`, `activity*` | — |
-| **Full-page sleep report** (polysomnograph + clinical metrics + interpretation) | `openDayPage`→`sleepReport`, `polysomnograph`, `hypnoSvg` | `DayReportView`→`SleepReport`, `Polysomnograph` (Reports.swift) | `nights[].{stages_full,series,metrics}`, `sleep_debt` | SleepNet |
+| **Full-page sleep report** (polysomnograph + clinical metrics + interpretation) | `openDayPage`→`sleepReport`, `polysomnograph`, `hypnoSvg` | `DayReportView`→`SleepReport`, `Polysomnograph` (Reports.swift) | `nights[].{stages_full,series,metrics}` | SleepNet |
+| **Sleep debt** (14-day card + cumulative debt / total sleep detail) | `renderSleepDebt`→`openSleepDebt` | `SleepDebtCard`→`SleepDebtDetail` | `sleep_debt`, grouped by wake date including naps | SleepNet |
 | **Full-page activity report** (24h MET profile + intensity metrics) | `openDayPage`→`activityReport`, `metProfileSvg` | `DayReportView`→`ActivityReport`, `MetProfile` (Reports.swift) | `activity_profile`, `activity_daily`, `activity` | AAD |
 | Stage breakdown | `stageBar` | `StageBreakdown` | `nights[].{deep,light,rem,wake}_pct` | SleepNet |
 | **Autonomic recovery by stage** (mean HR/HRV in deep/light/REM) | `sleepReport` autonomic grid | `SleepReport` `autonomicGrid` | `nights[].autonomic` | SleepNet (needs hypnogram) |
@@ -69,22 +70,34 @@ a nap doesn't shadow the real sleep.
 
 ## Where the two clients diverge
 
-- **Home layout**: same day-unit model on both, but the iOS "Observatory" theme floats data on
-  a black canvas (no panels) while the web uses bordered cards/dialogs. Match *data/features*,
+- **Home layout**: same day-unit model on both, but iOS uses thomas.md Quiet Ink (warm paper,
+  hairlines, serif titles) while the web still uses its own teal/card theme. Match *data/features*,
   not pixel-for-pixel layout. iOS opens details as sheets; the web as stacked `<dialog>`s.
 - **BLE sync**: iOS syncs **natively** — `RingSync.swift` (CoreBluetooth `BLETransport`)
   drives the Rust `RingSession` FFI (`oura-core`) to authenticate + drain into a writable
   DB. The web dashboard has **no** BLE; it reads a DB produced by the desktop `oura sync`.
   Both ultimately run the SAME `oura-link` `OuraClient<T: Transport>` over a different
-  transport (btleplug on desktop, CoreBluetooth-over-FFI on iOS).
+  transport (btleplug on desktop, CoreBluetooth-over-FFI on iOS). Ring 5 history payloads
+  are coalesced into 32 KB chunks before crossing UniFFI; control/summary frames stay
+  immediate, and diagnostics log only the aggregate frame/byte count rather than raw
+  sensor payloads. This mirrors Android's `ExtGetEvent` raw-buffer accumulation without
+  sacrificing the Rust client's 4,096-event cursor checkpoints.
 
 ## Sleep metrics: two code paths, one algorithm — keep them in sync
 
 The clinical sleep metrics (onset/REM latency, WASO, awakenings, cycles, fragmentation) and
 sleep debt are computed **twice** and must stay identical: once in Rust (`oura-summary`
-`sleep_metrics` / `smooth_stages` / `count_bouts` / `count_periods`, and the `sleep_debt`
-port) for the web, and once in Swift (`Reports.swift` `Sleep.metrics` / `Sleep.smooth` +
-`Summary.sleepDebt`) for iOS. The web reads them from the FFI JSON; iOS recomputes from the
+`sleep_metrics` / `smooth_stages` / `count_bouts` / `count_periods` + `sleep_debt_summary`)
+for the web, and once in Swift (`Reports.swift` `Sleep.metrics` / `Sleep.smooth` +
+`Summary.stagedSleepDebt`) for iOS. Sleep debt groups every sleep session by wake-date,
+including naps in that day's total, then evaluates 14 calendar days with at least five
+valid days; this matches the decompiled Android input and UI. The nightly **sleep need**
+is personalized like Oura's (`SleepDebtInput.longTermSleepTimeAvgSeconds` ← the long-term
+`sleepTimeAvg` baseline): each day's need is the mean of that user's daily totals over the
+previous 90 days, IQR-outlier-filtered, clamped to 7–9 h, rounded to 15 min, causal (a
+night never sets its own need), with an 8 h fallback below 14 valid history days — see
+Rust `sleep_need_s` and its Swift mirror `needS(on:)` in `stagedSleepDebt`. The web reads it from the
+summary JSON; iOS recomputes from the
 **on-device** SleepNet hypnogram (`NightRow.stages`), because iOS runs `build_summary` with
 `NoModelRunner` (no server-side staging), so the FFI `stages_full`/`metrics` are empty there.
 The raw signal series (`nights[].series`) DO come from the FFI on both. If you change the
@@ -102,8 +115,11 @@ which is why Oura's own app has no per-night HRV trend either.
 
 ## Known gaps (web-only, not yet on iOS)
 
-- **Advanced & debugging**: on-ring feature toggles (`/api/feature`), the per-type event
-  stream, profile editing.
+- **Advanced & debugging**: on-ring feature toggles (`/api/feature`) and the per-type
+  event stream. Profile editing is now native on iOS, including optional Apple Health
+  import for date of birth, biological sex, height, and weight, plus optional export
+  of workouts (add/remove as detections change), sleep stages, heart rate, HRV,
+  resting HR, steps, calories, and distance.
 - **Polysomnograph crosshair**: web has a hover crosshair; iOS uses a touch scrubber
   (drag across the lanes) — same idea, adapted to the input.
 - **DNA explorer** (`/dna`): reads genome `*.vcf.gz` files and scores single-SNP **traits**
@@ -161,11 +177,12 @@ When you close one of these gaps, update this section.
 every time the ring reboots (battery drain, firmware reset). Naively anchoring every ds
 to one global `max_ds`/`captured_unix` scatters older boots to wildly wrong dates (a boot
 can land months in the past). The fix segments events into boot **epochs** — walk in real
-sync order `(captured_unix, then ds)`, split on any large backward jump in ds, anchor each
-epoch's newest ds to that event's capture time — and maps ds→wall-clock per epoch. This
+sync order `(captured_unix, then insertion id)`, split on any large backward jump in ds, then use
+the epoch's on-ring `time_sync` (`ring_timestamp` ↔ UTC) records as authoritative anchors.
+`captured_unix` is only an epoch-selection hint and a fallback for legacy data. This
 lives in **three places that must stay in sync**:
 
-- `crates/oura-summary/src/lib.rs` — the shared brain (`unix_s`); fixes night/activity/
+- `crates/oura-summary/src/ring_time.rs` — the shared `RingClock`; fixes night/activity/
   movement **dates for both clients** at once.
 - `tools/epoch_time.py` (helper) used by `tools/run_activity_model.py` and
   `tools/run_sleep_model.py` — the **web** on-model session/hypnogram times.
@@ -173,8 +190,64 @@ lives in **three places that must stay in sync**:
   `ActivityModel.swift` and `SleepStaging.swift` — the **iOS** on-device model times.
   iOS must be rebuilt to pick this up.
 
-Operational gap (not yet fixed): `oura sync` keys incremental pulls off the PC-side cursor
-(`sync_state.next_cursor`, deciseconds). After a reboot the ring's ds restarts low, so a
-cursor left at the old (high) value matches nothing and sync silently returns 0 events
-until the cursor is reset. A robust sync should detect "0 events but a from-0 probe has
-data below the cursor" and rebase the cursor.
+## Premature sleep ends → evidence-based model windows
+
+The ring can close a raw `bedtime_period` during a brief awakening even though sleep
+continues. `oura-summary::normalize_bed_periods` repairs the model boundary in two stages:
+
+- explicit sleep-only ACM, temperature, and SpO₂ packets can extend a raw end by up to
+  three hours;
+- when a long sleep already has at least 30 minutes of that explicit premature-end
+  evidence, continuous accepted HR/IBI bursts may carry the candidate window farther.
+
+Pulse evidence is deliberately gated: each burst needs multiple firmware-accepted heart
+rate estimates, consecutive bursts can be at most 15 minutes apart, and naps or clean
+bedtime ends never use daytime pulse sampling. The resulting canonical `start_ds/end_ds`
+is passed unchanged to the Python SleepNet runner and iOS `SleepStaging`, so both clients
+score the same recovered window. Regression tests include isolated daytime HR, long gaps,
+periodic post-nap sampling, and the extracted Ring 5 brief-wake vector.
+
+The polysomnograph's skin-temperature lane uses only `sleep_temp_event`. Generic
+`temp_event` contains multiple device/ambient channels and must never be flattened into
+the nocturnal skin-temperature series. `nights[].series.temp_span` records the actual
+coverage inside an extended sleep window, so iOS and web leave a visible gap after the
+last trustworthy sample instead of stretching or inventing a temperature collapse.
+
+## Ring 5 extended history sync
+
+Ring 5's `ExtGetEvent` batches are self-completing. Do not send the legacy `GetEvent`
+ACK (`0x10`) afterward: the ring answers that ACK with another history burst, whose late
+notifications race with the next data flush and are discarded. Extended summary result
+code `0xff` is a rejected cursor, not a successful empty batch. `oura-link` now rejects
+that result explicitly, and `oura-core` checkpoints zero and performs one deduplicated
+recovery drain when an existing iOS database contains such a stale cursor.
+
+A from-zero recovery may replay an older boot after the newer boot is already stored.
+If that makes the selected epoch project an event more than six hours beyond its phone
+capture time, all three implementations fall back to the newest globally plausible
+`time_sync` projection. This prevents replay fragments from fabricating future days.
+
+Incremental pulls key off `sync_state.next_cursor` (deciseconds). After a reboot the
+ring's ds restarts low, so an empty incremental fetch verifies that the event immediately
+before the saved cursor still exists. If that marker is absent, the native iOS core
+checkpoints cursor 0 and drains the new boot epoch automatically. This also recovers
+cursors poisoned by the pre-`d409f9e` extended-envelope timestamp decoder.
+The link layer also rejects any single-batch cursor jump beyond 180 days. A physical
+Ring 5 validation exposed malformed tail envelopes with near-`u32::MAX` timestamps;
+discarding those impossible records prevents a new poisoned cursor while preserving
+the surrounding valid events and terminal summary.
+
+## Android parity notes
+
+The decompiled Android client uses SweetBlue's reference-counted
+`PARTIAL_WAKE_LOCK` during BLE work. iOS has no equivalent unrestricted CPU wake
+lock, so `IdleTimerLock` keeps the foreground app awake with the same reference-count
+ownership semantics and reasserts the idle-timer flag after lifecycle transitions.
+
+Android's legacy NSSA path passes the ring's `BedtimePeriodValue` directly to the
+sleep-stage handler. Its newer feature-gated stateless bedtime detector instead skips
+ring bedtime events and derives periods from feature-session, state-change, motion,
+temperature, time-sync, and alert events at one-minute resolution. That detector's
+dynamically delivered model is not embedded in the APK. The shared summary therefore
+keeps the raw ring bounds alongside locally adjusted bounds, and only adjusts an end
+when adjacent bedtime segments or sleep-only sensor evidence support it.

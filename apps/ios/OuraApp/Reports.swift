@@ -139,29 +139,79 @@ enum Sleep {
 }
 
 extension Summary {
-    /// Sleep debt (minutes) vs an 8 h nightly need, newest-first linear-decay weighting —
-    /// the same ecore-ported shape as the ring. Needs the on-device hypnograms.
-    var sleepDebt: (debtMin: Double, shortfallMin: Double, valid: Bool)? {
-        let needS = 8.0 * 3600.0
-        // newest-first asleep seconds for nights that have a hypnogram
-        let ordered = nights
-            .filter { ($0.stages?.count ?? 0) > 1 }
-            .sorted { ($0.start_ds ?? 0) > ($1.start_ds ?? 0) }
-        let actual: [Double] = ordered.map { n in
-            let inBed = (n.in_bed_h ?? 0) * 3600
-            return Double(Sleep.asleepS(Sleep.smooth(n.stages ?? [], 5), inBedS: inBed))
+    /// iOS stages sleep on-device after the shared JSON is built. Rebuild the same
+    /// Android-compatible 14-day result after staging, grouping main sleep + naps by
+    /// wake date. The web receives this exact shape directly from `oura-summary`.
+    func stagedSleepDebt() -> SleepDebtSummary? {
+        let defaultNeedS = 8.0 * 3600.0
+        var byDay: [String: Double] = [:]
+        for n in nights where (n.stages?.count ?? 0) > 1 {
+            guard let day = wakeYmd(n) else { continue }
+            let actual = Double(Sleep.asleepS(Sleep.smooth(n.stages ?? [], 5),
+                                              inBedS: (n.in_bed_h ?? 0) * 3600))
+            if actual > 0 { byDay[day, default: 0] += actual }
         }
-        guard !actual.isEmpty else { return nil }
-        let n = actual.count
-        let decay = n == 1 ? 0.0 : 0.75 / Double(n - 1)
-        var debt = 0.0, valid = 0
-        for d in 0..<n {
-            let sf = needS - actual[d]
-            if actual[d] > 0 { valid += 1; debt += (1.0 - decay * Double(d)) * sf }
+        guard let anchor = byDay.keys.max() else { return nil }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let fmt = DateFormatter()
+        fmt.calendar = cal; fmt.timeZone = cal.timeZone; fmt.dateFormat = "yyyy-MM-dd"
+        guard let anchorDate = fmt.date(from: anchor) else { return nil }
+
+        func date(_ offset: Int, from base: Date) -> String {
+            fmt.string(from: cal.date(byAdding: .day, value: offset, to: base)!)
         }
-        debt = min(max(debt, 0), 36_000)
-        let shortfall = needS - actual[0]
-        return (debtMin: (debt / 60).rounded(), shortfallMin: (shortfall / 60).rounded(), valid: valid >= 5)
+        // Personalized daily need — the mirror of oura-summary's `sleep_need_s`
+        // (typical sleep over the last 90 days, IQR-filtered, clamped to 7–9 h,
+        // causal so a night never sets its own need). Keep the two in sync.
+        func needS(on day: Date) -> Double {
+            var vals: [Double] = (1...90).compactMap { byDay[date(-$0, from: day)] }.filter { $0 > 0 }
+            guard vals.count >= 14 else { return defaultNeedS }
+            vals.sort()
+            func quantile(_ p: Double) -> Double {
+                let idx = p * Double(vals.count - 1)
+                let lo = Int(idx.rounded(.down)), hi = Int(idx.rounded(.up))
+                return vals[lo] + (vals[hi] - vals[lo]) * (idx - Double(lo))
+            }
+            let q1 = quantile(0.25), q3 = quantile(0.75), fence = 1.5 * (q3 - q1)
+            let kept = vals.filter { $0 >= q1 - fence && $0 <= q3 + fence }
+            let mean = kept.reduce(0, +) / Double(kept.count)
+            return (min(max(mean, 7 * 3600), 9 * 3600) / 900).rounded() * 900
+        }
+        func score(ending end: Date) -> (debt: Double, recent: Double, valid: Bool, count: Int) {
+            let actual = (0..<14).map { byDay[date(-$0, from: end)] ?? 0 }
+            let needs = (0..<14).map { needS(on: cal.date(byAdding: .day, value: -$0, to: end)!) }
+            let count = actual.filter { $0 > 0 }.count
+            guard actual[0] > 0 else { return (0, 0, false, count) }
+            let decay = 0.75 / 13.0
+            var debt = 0.0
+            for i in actual.indices where actual[i] > 0 {
+                debt += (1.0 - decay * Double(i)) * (needs[i] - actual[i])
+            }
+            debt = min(max(debt, 0), 36_000)
+            debt = (debt / 2700).rounded() * 2700
+            return (debt, needs[0] - actual[0], count >= 5, count)
+        }
+        let days: [SleepDebtDay] = (-13...0).map { offset in
+            let d = cal.date(byAdding: .day, value: offset, to: anchorDate)!
+            let key = fmt.string(from: d), total = byDay[key]
+            let need = needS(on: d)
+            let result = score(ending: d)
+            return SleepDebtDay(date: key, total_sleep_min: total.map { ($0 / 60).rounded() },
+                                sleep_need_min: (need / 60).rounded(),
+                                shortfall_min: total.map { ((need - $0) / 60).rounded() },
+                                cumulative_debt_min: result.valid ? (result.debt / 60).rounded() : nil,
+                                valid_days: result.count)
+        }
+        let current = score(ending: anchorDate)
+        let minutes = current.valid ? (current.debt / 60).rounded() : 0
+        let state = minutes >= 540 ? "high" : minutes >= 360 ? "moderate" : minutes >= 180 ? "low" : "none"
+        return SleepDebtSummary(debt_min: minutes,
+                                recent_shortfall_min: current.valid ? (current.recent / 60).rounded() : 0,
+                                valid: current.valid,
+                                need_h: (needS(on: anchorDate) / 36).rounded() / 100,
+                                valid_days: current.count,
+                                window_days: 14, state: state, days: days)
     }
 }
 
@@ -202,21 +252,25 @@ struct Polysomnograph: View {
     private let axisH: CGFloat = 18
 
     private struct Lane { let label: String; let unit: String; let signal: SignalLane?; let stages: [Int]? }
-    private struct SignalLane { let v: [Double]; let color: Color; let dp: Int }
+    private struct SignalLane { let v: [Double]; let color: Color; let dp: Int; let span: [Double] }
 
     private var lanes: [Lane] {
         var out: [Lane] = []
         if let st = night.stages, st.count > 1 { out.append(Lane(label: "Hypnogram", unit: "", signal: nil, stages: Sleep.smooth(st, 5))) }
-        func sig(_ label: String, _ unit: String, _ v: [Double]?, _ color: Color, _ dp: Int = 0) {
+        func sig(_ label: String, _ unit: String, _ v: [Double]?, _ color: Color,
+                 _ dp: Int = 0, span: [Double]? = nil) {
             guard let v, v.count > 1 else { return }
-            out.append(Lane(label: label, unit: unit, signal: SignalLane(v: v, color: color, dp: dp), stages: nil))
+            let coverage = span.flatMap { $0.count == 2 ? $0 : nil } ?? [0, 1]
+            out.append(Lane(label: label, unit: unit,
+                            signal: SignalLane(v: v, color: color, dp: dp,
+                                               span: coverage), stages: nil))
         }
         let s = night.series
-        sig("Heart rate", "bpm", s?.hr, Obs.yellow)
-        sig("HRV", "ms", s?.hrv, Obs.teal)
-        sig("Blood O₂", "%", s?.spo2, Obs.rem)
-        sig("Skin temp", "°C", s?.temp, Obs.light, 1)
-        sig("Motion", "s", s?.motion, Obs.ink2)
+        sig("Heart rate", "bpm", s?.hr, Obs.chart)
+        sig("HRV", "ms", s?.hrv, Obs.chart)
+        sig("Blood O₂", "%", s?.spo2, Obs.chart)
+        sig("Skin temp", "°C", s?.temp, Obs.chart, 1, span: s?.temp_span)
+        sig("Motion", "s", s?.motion, Obs.chart)
         return out
     }
 
@@ -237,12 +291,12 @@ struct Polysomnograph: View {
                     axisRow(win, plotW: plotW)
                 }
                 if let f = cursorF {
-                    Rectangle().fill(Obs.teal.opacity(0.85)).frame(width: 1, height: totalH - axisH)
+                    Rectangle().fill(Obs.ink.opacity(0.85)).frame(width: 1, height: totalH - axisH)
                         .offset(x: gutterW + CGFloat(f) * plotW)
                         .allowsHitTesting(false)
-                    Text(clockAt(win, f)).font(Obs.mono(10, .medium)).foregroundStyle(Obs.black)
+                    Text(clockAt(win, f)).font(Obs.mono(10, .medium)).foregroundStyle(Obs.paper)
                         .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(Obs.teal, in: RoundedRectangle(cornerRadius: 4))
+                        .background(Obs.ink, in: RoundedRectangle(cornerRadius: 4))
                         .offset(x: gutterW + CGFloat(f) * plotW - 18, y: -2)
                         .allowsHitTesting(false)
                 }
@@ -265,7 +319,7 @@ struct Polysomnograph: View {
             .frame(width: gutterW, alignment: .leading)
             Group {
                 if let st = lane.stages { HypnoCanvas(stages: st) }
-                else if let s = lane.signal { SignalCanvas(v: s.v, color: s.color) }
+                else if let s = lane.signal { SignalCanvas(v: s.v, color: s.color, span: s.span) }
             }
             .frame(width: plotW, height: h)
         }
@@ -281,7 +335,9 @@ struct Polysomnograph: View {
         guard let s = lane.signal else { return "" }
         let fmt = { (x: Double) in s.dp > 0 ? String(format: "%.\(s.dp)f", x) : String(Int(x.rounded())) }
         if let f = cursorF {
-            let v = s.v[min(s.v.count - 1, max(0, Int(f * Double(s.v.count - 1))))]
+            guard f >= s.span[0], f <= s.span[1] else { return "—" }
+            let local = (f - s.span[0]) / max(1e-9, s.span[1] - s.span[0])
+            let v = s.v[min(s.v.count - 1, max(0, Int(local * Double(s.v.count - 1))))]
             return "\(fmt(v)) \(lane.unit)"
         }
         let mean = s.v.reduce(0, +) / Double(s.v.count)
@@ -340,21 +396,23 @@ private struct HypnoCanvas: View {
 private struct SignalCanvas: View {
     let v: [Double]
     let color: Color
+    let span: [Double]
     var body: some View {
         Canvas { ctx, size in
             guard v.count > 1 else { return }
             let lo = v.min()!, hi = v.max()!, rng = max(hi - lo, 1e-6)
             let pad: CGFloat = 5
             func pt(_ i: Int) -> CGPoint {
-                CGPoint(x: size.width * CGFloat(i) / CGFloat(v.count - 1),
+                CGPoint(x: size.width * CGFloat(span[0] + (span[1] - span[0]) * Double(i) / Double(v.count - 1)),
                         y: pad + (1 - CGFloat((v[i] - lo) / rng)) * (size.height - 2 * pad))
             }
             var line = Path(); line.move(to: pt(0)); for i in 1..<v.count { line.addLine(to: pt(i)) }
-            var area = line; area.addLine(to: CGPoint(x: size.width, y: size.height)); area.addLine(to: CGPoint(x: 0, y: size.height)); area.closeSubpath()
+            let x0 = size.width * CGFloat(span[0]), x1 = size.width * CGFloat(span[1])
+            var area = line; area.addLine(to: CGPoint(x: x1, y: size.height)); area.addLine(to: CGPoint(x: x0, y: size.height)); area.closeSubpath()
             ctx.fill(area, with: .color(color.opacity(0.10)))
             let mean = v.reduce(0, +) / Double(v.count)
             let my = pad + (1 - CGFloat((mean - lo) / rng)) * (size.height - 2 * pad)
-            ctx.stroke(Path { $0.move(to: CGPoint(x: 0, y: my)); $0.addLine(to: CGPoint(x: size.width, y: my)) },
+            ctx.stroke(Path { $0.move(to: CGPoint(x: x0, y: my)); $0.addLine(to: CGPoint(x: x1, y: my)) },
                        with: .color(color.opacity(0.4)), style: StrokeStyle(lineWidth: 0.6, dash: [3, 3]))
             ctx.stroke(line, with: .color(color), lineWidth: 1.3)
         }
@@ -394,6 +452,289 @@ private func hourTicks(_ win: (a: Int, b: Int, span: Int)) -> [Int] {
 }
 private func stageName(_ c: Int) -> String { switch c { case 1: return "Deep"; case 2: return "Light"; case 3: return "REM"; default: return "Awake" } }
 
+private func debtDuration(_ minutes: Double) -> String {
+    let m = max(0, Int(minutes.rounded()))
+    return m >= 60 ? "\(m / 60)h \(m % 60)m" : "\(m)m"
+}
+
+private func debtStateCopy(_ state: String) -> String {
+    switch state {
+    case "high": return "Your sleep debt is high right now. Prioritize several consistent nights with enough sleep."
+    case "moderate": return "You’ve built up a moderate amount of sleep debt. A few longer nights can help you recover."
+    case "low": return "You’re mostly meeting your sleep need, with a small amount left to recover."
+    default: return "You’ve met your sleep need consistently over the past two weeks."
+    }
+}
+
+struct SleepDebtCard: View {
+    let debt: SleepDebtSummary
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    ObsTag("sleep debt", icon: "moon.zzz.fill")
+                    Spacer()
+                    Text("past \(debt.window_days) days").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                    Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
+                }
+                if debt.valid {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(debtDuration(debt.debt_min)).font(Obs.mono(26, .medium)).foregroundStyle(Obs.debt(debt.state))
+                        Text(debt.state).font(Obs.mono(11, .medium)).foregroundStyle(Obs.debt(debt.state)).textCase(.uppercase)
+                    }
+                    Text(debtStateCopy(debt.state)).font(Obs.prose(14)).foregroundStyle(Obs.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("\(debt.valid_days) of 5 days available").font(Obs.mono(18, .medium)).foregroundStyle(Obs.ink)
+                    Text("5 days of sleep data are needed within the past 2 weeks.")
+                        .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).obsCard()
+    }
+}
+
+// Symptom Radar — on-device illness detection. A radar blip for the traffic-light
+// status, then each biomarker plotted against its personal baseline band so you see
+// at a glance how far breathing / lowest HR / HRV / temperature sit from normal.
+struct IllnessCard: View {
+    let illness: IllnessResult
+    static var coral: Color { Obs.alert }
+    private static let copy = [
+        "NO_SIGNS": "No signs of illness. Your biometrics are sitting within your normal range.",
+        "MINOR_SIGNS": "Minor signs — a few biometrics have drifted outside your usual range. Worth an easy day.",
+        "MAJOR_SIGNS": "Major signs — several biometrics are elevated. Your body may be fighting something.",
+    ]
+    private static let label = ["NO_SIGNS": "No signs", "MINOR_SIGNS": "Minor signs", "MAJOR_SIGNS": "Major signs"]
+    private static let bmName = [
+        "AverageBreath": "Breathing", "LowestHeartRate": "Lowest HR",
+        "AverageHrv": "HRV", "TemperatureDeviation": "Body temp",
+    ]
+    private static let bmUnit = [
+        "AverageBreath": "br", "LowestHeartRate": "bpm", "AverageHrv": "ms", "TemperatureDeviation": "°C",
+    ]
+    // display order matching Oura's card (breath, lowest HR, HRV, temperature)
+    private static let order = ["AverageBreath", "LowestHeartRate", "AverageHrv", "TemperatureDeviation"]
+
+    private var tint: Color {
+        switch illness.trafficLight {
+        case "MINOR_SIGNS": return Obs.bad
+        case "MAJOR_SIGNS": return Self.coral
+        default: return Obs.good
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                ObsTag("symptom radar")
+                Spacer()
+                if illness.available {
+                    Text("\(illness.daysWithData)/30d").font(Obs.mono(10)).foregroundStyle(Obs.trace)
+                }
+            }
+            if !illness.available {
+                Text(illness.status == "MISSING_LAST_NIGHT_SLEEP"
+                     ? "Wear the ring overnight and sync — last night's data is missing."
+                     : "Needs more recent nights (at least 7 of the last 14).")
+                    .font(Obs.prose(14)).foregroundStyle(Obs.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 14)
+            } else {
+                // status: radar blip + word
+                HStack(spacing: 13) {
+                    RadarBlip(tint: tint)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(Self.label[illness.trafficLight] ?? "—")
+                            .font(Obs.prose(20, .semibold)).foregroundStyle(Obs.ink)
+                        Text("illness signals").font(Obs.mono(9)).tracking(1.5)
+                            .foregroundStyle(tint)
+                    }
+                }
+                .padding(.top, 16)
+
+                Text(Self.copy[illness.status] ?? "").font(Obs.prose(13.5)).foregroundStyle(Obs.ink2)
+                    .lineSpacing(2).fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 12)
+
+                Rectangle().fill(Obs.trace.opacity(0.28)).frame(height: 0.5)
+                    .padding(.top, 16)
+
+                let byType = Dictionary(uniqueKeysWithValues: illness.biomarkers.map { ($0.type, $0) })
+                VStack(spacing: 13) {
+                    ForEach(Self.order, id: \.self) { type in
+                        if let b = byType[type] {
+                            BiomarkerRow(name: Self.bmName[type] ?? type,
+                                         unit: Self.bmUnit[type] ?? "",
+                                         b: b, tint: tint)
+                        }
+                    }
+                }
+                .padding(.top, 16)
+
+                Text("on-device illness model · \(illness.date)")
+                    .font(Obs.mono(9)).foregroundStyle(Obs.trace)
+                    .padding(.top, 16)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .obsCard()
+    }
+}
+
+// concentric radar echo with a centre blip — the "Symptom Radar" motif.
+private struct RadarBlip: View {
+    let tint: Color
+    var body: some View {
+        ZStack {
+            Circle().strokeBorder(tint.opacity(0.18), lineWidth: 1).frame(width: 34, height: 34)
+            Circle().strokeBorder(tint.opacity(0.34), lineWidth: 1).frame(width: 22, height: 22)
+            Circle().fill(tint).frame(width: 9, height: 9)
+        }
+        .frame(width: 34, height: 34)
+    }
+}
+
+// one biomarker: name, a value dot placed on its personal baseline band, and the value.
+private struct BiomarkerRow: View {
+    let name: String
+    let unit: String
+    let b: IllnessBiomarker
+    let tint: Color
+    private var dotColor: Color {
+        guard b.indicatesSymptoms else { return Obs.ink }
+        return b.reason == "ELEVATED" ? IllnessCard.coral : Obs.bad
+    }
+    private func fmt(_ v: Double) -> String {
+        abs(v) < 10 && v != v.rounded() ? String(format: "%.1f", v) : String(Int(v.rounded()))
+    }
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(name).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                .frame(width: 74, alignment: .leading)
+            RangeTrack(value: b.value, lower: b.lower, upper: b.upper,
+                       dot: dotColor, flagged: b.indicatesSymptoms)
+                .frame(height: 14)
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(fmt(b.value)).font(Obs.mono(13, .medium))
+                    .foregroundStyle(b.indicatesSymptoms ? dotColor : Obs.ink).monospacedDigit()
+                Text(unit).font(Obs.mono(9)).foregroundStyle(Obs.trace)
+            }
+            .frame(width: 56, alignment: .trailing)
+        }
+    }
+}
+
+// a thin track with the normal [lower, upper] band highlighted and today's value as a
+// dot — the axis auto-frames to include both the band and the value.
+private struct RangeTrack: View {
+    let value, lower, upper: Double
+    let dot: Color
+    let flagged: Bool
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width, midY = geo.size.height / 2
+            let pad = max((upper - lower) * 0.7, 1e-6)
+            let lo = min(lower, value) - pad, hi = max(upper, value) + pad
+            let span = max(hi - lo, 1e-6)
+            let x = { (v: Double) in CGFloat((v - lo) / span) * w }
+            ZStack(alignment: .leading) {
+                Capsule().fill(Obs.trace.opacity(0.22)).frame(height: 3).position(x: w / 2, y: midY)
+                Capsule().fill(Obs.chart.opacity(0.35))
+                    .frame(width: max(0, x(upper) - x(lower)), height: 3)
+                    .position(x: (x(lower) + x(upper)) / 2, y: midY)
+                Circle().fill(dot).frame(width: 9, height: 9)
+                    .overlay(Circle().stroke(Obs.base.opacity(0.9), lineWidth: 1.5))
+                    .shadow(color: flagged ? dot.opacity(0.6) : .clear, radius: 3)
+                    .position(x: min(max(x(value), 4.5), w - 4.5), y: midY)
+            }
+        }
+    }
+}
+
+private enum DebtGraph: String, CaseIterable { case debt = "Cumulative debt", sleep = "Total sleep" }
+
+private struct SleepDebtChart: View {
+    let debt: SleepDebtSummary
+    let mode: DebtGraph
+    var body: some View {
+        VStack(spacing: 8) {
+            Canvas { context, size in
+                let values: [Double?] = debt.days.map {
+                    mode == .debt ? $0.cumulative_debt_min : $0.total_sleep_min
+                }
+                let maxValue = mode == .debt ? 600.0 : max(720, values.compactMap { $0 }.max() ?? 0)
+                let x = { (i: Int) in CGFloat(i) / CGFloat(max(1, values.count - 1)) * size.width }
+                let y = { (v: Double) in size.height - CGFloat(min(max(v / maxValue, 0), 1)) * size.height }
+                for fraction in [0.25, 0.5, 0.75] {
+                    var grid = Path(); let yy = size.height * CGFloat(1 - fraction)
+                    grid.move(to: CGPoint(x: 0, y: yy)); grid.addLine(to: CGPoint(x: size.width, y: yy))
+                    context.stroke(grid, with: .color(Obs.trace.opacity(0.35)), lineWidth: 0.5)
+                }
+                if mode == .sleep {
+                    var need = Path(); let yy = y(debt.need_h * 60)
+                    need.move(to: CGPoint(x: 0, y: yy)); need.addLine(to: CGPoint(x: size.width, y: yy))
+                    context.stroke(need, with: .color(Obs.ink.opacity(0.45)), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                }
+                var line = Path(), started = false
+                for (i, value) in values.enumerated() {
+                    guard let value else { started = false; continue }
+                    let point = CGPoint(x: x(i), y: y(value))
+                    if started { line.addLine(to: point) } else { line.move(to: point); started = true }
+                }
+                context.stroke(line, with: .color(Obs.chart), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+            }
+            .frame(height: 180)
+            HStack {
+                Text(debt.days.first.map { String($0.date.suffix(5)) } ?? "").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                Spacer()
+                if mode == .sleep {
+                    HStack(spacing: 5) { Rectangle().fill(Obs.ink.opacity(0.45)).frame(width: 16, height: 1); Text("sleep need").font(Obs.mono(10)).foregroundStyle(Obs.ink2) }
+                }
+                Spacer()
+                Text(debt.days.last.map { String($0.date.suffix(5)) } ?? "").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+            }
+        }
+    }
+}
+
+struct SleepDebtDetail: View {
+    let debt: SleepDebtSummary
+    @Environment(\.dismiss) private var dismiss
+    @State private var graph = DebtGraph.debt
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Obs.canvas.ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        if debt.valid {
+                            Text(debtDuration(debt.debt_min)).font(Obs.mono(34, .medium)).foregroundStyle(Obs.debt(debt.state))
+                            Text(debtStateCopy(debt.state)).font(Obs.prose(16)).foregroundStyle(Obs.ink2)
+                        } else {
+                            Text("Not enough data yet").font(Obs.prose(22, .semibold)).foregroundStyle(Obs.ink)
+                            Text("\(debt.valid_days) of 5 sleep days available within the past 2 weeks.")
+                                .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                        }
+                        Picker("Graph", selection: $graph) {
+                            ForEach(DebtGraph.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        }.pickerStyle(.segmented)
+                        SleepDebtChart(debt: debt, mode: graph)
+                        Rule("how it works")
+                        Text("Sleep debt estimates missed sleep over the past 14 days. Total sleep combines main sleep and naps, recent days carry more weight, and your sleep need (\(debtDuration(debt.need_h * 60))) is personalized from your typical sleep over the past 3 months, ignoring unusually short or long days.")
+                            .font(Obs.prose(14)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
+                    }.padding(24)
+                }
+            }
+            .navigationTitle("sleep debt").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+
 // ── the full-page report (sleep ⇄ activity) ──────────────────────────────────
 struct DayReportView: View {
     let s: Summary
@@ -432,7 +773,6 @@ struct DayReportView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -541,10 +881,9 @@ struct SleepReport: View {
                 Text(t).font(Obs.prose(14)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
             }
             if let d = s.sleepDebt, d.valid {
-                let h = Int(d.debtMin) / 60, mm = Int(d.debtMin) % 60
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text("\(h)h \(mm)m").font(Obs.mono(20, .medium)).foregroundStyle(Obs.teal)
-                    Text("accumulated sleep debt vs an 8 h nightly need" + (d.shortfallMin > 0 ? " · last night \(Int(d.shortfallMin)) min short" : ""))
+                    Text(debtDuration(d.debt_min)).font(Obs.mono(20, .medium)).foregroundStyle(Obs.debt(d.state))
+                    Text("accumulated sleep debt vs your \(debtDuration(d.need_h * 60)) nightly need" + (d.recent_shortfall_min > 0 ? " · last sleep day \(Int(d.recent_shortfall_min)) min short" : ""))
                         .font(Obs.mono(11)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.top, 6)
@@ -579,16 +918,17 @@ struct ActivityReport: View {
     var body: some View {
         let st = s.activity_daily[day]
         let prof = s.activity_profile[day] ?? []
+        let steps = compactSteps(st?.steps)
 
         HStack(alignment: .top, spacing: 0) {
-            Readout(value: st.map { "\(Int($0.steps ?? 0))" } ?? "—", caption: "steps")
+            Readout(value: steps.value, caption: steps.unit)
             Readout(value: st.map { "\(Int($0.active_kcal ?? 0))" } ?? "—", caption: "active kcal")
             Readout(value: st.map { "\(Int($0.total_kcal ?? 0))" } ?? "—", caption: "total kcal")
-            if let d = st?.distance_m { Readout(value: String(format: "%.1f km", d / 1000), caption: "distance") }
+            if let d = st?.distance_m { Readout(value: String(format: "%.1f", d / 1000), caption: "distance · km") }
         }
 
         Rule("movement across the day")
-        MetProfile(prof: prof)
+        MetProfile(timeline: s.wakingActivityTimeline(for: day))
 
         let bucketMin = prof.isEmpty ? 15.0 : 24.0 * 60.0 / Double(prof.count)
         let activeMin = Double(prof.filter { $0 >= 3 }.count) * bucketMin
@@ -613,33 +953,72 @@ struct ActivityReport: View {
     }
 }
 
-// 24h MET-above-rest area with hour axis (0..24)
+private func compactSteps(_ steps: Double?) -> (value: String, unit: String) {
+    guard let steps else { return ("—", "steps") }
+    guard steps >= 1_000 else { return ("\(Int(steps.rounded()))", "steps") }
+    return (String(format: "%.1f", steps / 1_000), "k steps")
+}
+
+// MET-above-rest across the human waking day, rather than a calendar-day 00–24
+// window. The timeline can cross midnight and says when its bedtime is estimated.
 private struct MetProfile: View {
-    let prof: [Double]
+    let timeline: WakingActivityTimeline
+
+    private var ticks: [Double] {
+        var result = [timeline.startHour]
+        var hour = ceil(timeline.startHour / 6) * 6
+        while hour < timeline.endHour {
+            if hour - timeline.startHour > 1 { result.append(hour) }
+            hour += 6
+        }
+        if timeline.endHour - (result.last ?? timeline.startHour) > 1 { result.append(timeline.endHour) }
+        return result
+    }
+
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 7) {
+            HStack {
+                Text(timeline.startCaption)
+                Spacer()
+                Text(timeline.endCaption)
+            }
+            .font(Obs.mono(9, .medium))
+            .foregroundStyle(Obs.ink2)
+
             Canvas { ctx, size in
-                guard prof.count > 1 else { return }
-                let peak = max(1, prof.max() ?? 1)
-                for h in stride(from: 0, through: 24, by: 6) {
-                    let x = size.width * CGFloat(h) / 24
+                let span = max(1, timeline.endHour - timeline.startHour)
+                let x = { (hour: Double) in
+                    size.width * CGFloat((hour - timeline.startHour) / span)
+                }
+                for hour in ticks {
+                    let x = x(hour)
                     ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) },
                                with: .color(Obs.trace.opacity(0.2)), lineWidth: 0.5)
                 }
-                func pt(_ i: Int) -> CGPoint {
-                    CGPoint(x: size.width * CGFloat(i) / CGFloat(prof.count - 1),
-                            y: 6 + (1 - CGFloat(min(1, prof[i] / peak))) * (size.height - 12))
+                guard timeline.points.count > 1 else { return }
+                let peak = max(1, timeline.points.map(\.met).max() ?? 1)
+                func pt(_ point: TimedActivityPoint) -> CGPoint {
+                    CGPoint(x: x(point.hour),
+                            y: 6 + (1 - CGFloat(min(1, point.met / peak))) * (size.height - 12))
                 }
-                var line = Path(); line.move(to: pt(0)); for i in 1..<prof.count { line.addLine(to: pt(i)) }
-                var area = line; area.addLine(to: CGPoint(x: size.width, y: size.height)); area.addLine(to: CGPoint(x: 0, y: size.height)); area.closeSubpath()
-                ctx.fill(area, with: .color(Obs.teal.opacity(0.14)))
-                ctx.stroke(line, with: .color(Obs.teal), lineWidth: 1.3)
+                var line = Path(); line.move(to: pt(timeline.points[0]))
+                for point in timeline.points.dropFirst() { line.addLine(to: pt(point)) }
+                var area = line
+                area.addLine(to: CGPoint(x: x(timeline.points.last!.hour), y: size.height))
+                area.addLine(to: CGPoint(x: x(timeline.points[0].hour), y: size.height))
+                area.closeSubpath()
+                ctx.fill(area, with: .color(Obs.chart.opacity(0.14)))
+                ctx.stroke(line, with: .color(Obs.chart), lineWidth: 1.3)
             }
             .frame(height: 120)
             GeometryReader { g in
-                ForEach([0, 6, 12, 18, 24], id: \.self) { h in
-                    Text(String(format: "%02d", h)).font(Obs.mono(9)).foregroundStyle(Obs.ink2)
-                        .position(x: g.size.width * CGFloat(h) / 24, y: 6)
+                let span = max(1, timeline.endHour - timeline.startHour)
+                ForEach(ticks, id: \.self) { hour in
+                    let rawX = g.size.width * CGFloat((hour - timeline.startHour) / span)
+                    Text(String(format: "%02d", Int(hour) % 24))
+                        .font(Obs.mono(9)).foregroundStyle(Obs.ink2)
+                        .frame(width: 24)
+                        .position(x: min(max(12, rawX), g.size.width - 12), y: 6)
                 }
             }.frame(height: 12)
         }
