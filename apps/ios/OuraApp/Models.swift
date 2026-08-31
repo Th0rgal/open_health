@@ -166,6 +166,79 @@ extension Summary {
     func workoutsOn(_ day: String) -> [WorkoutSession] {
         workouts.filter { $0.isWorkout >= 0.5 && $0.dayLabel == day }
     }
+
+    /// One value per wake-date (longest night wins), oldest first — feeds vital trend charts.
+    func nightlySeries(_ pick: (NightRow) -> Double?) -> [DatedVital] {
+        var byDay: [String: (dur: Double, value: Double)] = [:]
+        for night in nights {
+            guard let value = pick(night), value.isFinite else { continue }
+            guard let day = wakeYmd(night) ?? night.ymd else { continue }
+            let dur = night.in_bed_h ?? 0
+            if byDay[day] == nil || dur > byDay[day]!.dur {
+                byDay[day] = (dur, value)
+            }
+        }
+        return byDay.keys.sorted().map { DatedVital(date: $0, value: byDay[$0]!.value) }
+    }
+}
+
+struct DatedVital: Identifiable {
+    let date: String
+    let value: Double
+    var id: String { date }
+}
+
+enum VitalKind: String, Identifiable, CaseIterable {
+    case hrv, heartRate, temp, oxygen
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .hrv: return "nightly hrv"
+        case .heartRate: return "heart rate"
+        case .temp: return "skin temp"
+        case .oxygen: return "blood o₂"
+        }
+    }
+    var unit: String {
+        switch self {
+        case .hrv: return "ms"
+        case .heartRate: return "bpm"
+        case .temp: return "°c"
+        case .oxygen: return "%"
+        }
+    }
+    var caption: String {
+        switch self {
+        case .hrv: return "RMSSD from the longest sleep of each morning"
+        case .heartRate: return "Nightly minimum resting heart rate"
+        case .temp: return "Nightly skin temperature"
+        case .oxygen: return "Nightly average blood oxygen"
+        }
+    }
+    var decimals: Int {
+        switch self { case .temp: return 1; default: return 0 }
+    }
+    func series(in s: Summary) -> [DatedVital] {
+        switch self {
+        case .hrv: return s.nightlySeries(\.hrv_ms)
+        case .heartRate: return s.nightlySeries(\.rhr)
+        case .temp: return s.nightlySeries(\.skin_temp)
+        case .oxygen: return s.nightlySeries(\.spo2_mean)
+        }
+    }
+    func baseline(in s: Summary) -> Double? {
+        switch self {
+        case .hrv: return s.vitals.hrv.baseline
+        case .heartRate: return s.vitals.rhr.baseline
+        default: return nil
+        }
+    }
+    var goodWhenPositive: Bool {
+        switch self {
+        case .hrv, .oxygen: return true
+        case .heartRate, .temp: return false
+        }
+    }
 }
 
 // selects which day + which tab the full-page report opens on.

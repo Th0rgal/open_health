@@ -266,11 +266,11 @@ struct Polysomnograph: View {
                                                span: coverage), stages: nil))
         }
         let s = night.series
-        sig("Heart rate", "bpm", s?.hr, Obs.yellow)
-        sig("HRV", "ms", s?.hrv, Obs.teal)
-        sig("Blood O₂", "%", s?.spo2, Obs.rem)
-        sig("Skin temp", "°C", s?.temp, Obs.light, 1, span: s?.temp_span)
-        sig("Motion", "s", s?.motion, Obs.ink2)
+        sig("Heart rate", "bpm", s?.hr, Obs.chart)
+        sig("HRV", "ms", s?.hrv, Obs.chart)
+        sig("Blood O₂", "%", s?.spo2, Obs.chart)
+        sig("Skin temp", "°C", s?.temp, Obs.chart, 1, span: s?.temp_span)
+        sig("Motion", "s", s?.motion, Obs.chart)
         return out
     }
 
@@ -291,12 +291,12 @@ struct Polysomnograph: View {
                     axisRow(win, plotW: plotW)
                 }
                 if let f = cursorF {
-                    Rectangle().fill(Obs.teal.opacity(0.85)).frame(width: 1, height: totalH - axisH)
+                    Rectangle().fill(Obs.ink.opacity(0.85)).frame(width: 1, height: totalH - axisH)
                         .offset(x: gutterW + CGFloat(f) * plotW)
                         .allowsHitTesting(false)
-                    Text(clockAt(win, f)).font(Obs.mono(10, .medium)).foregroundStyle(Obs.black)
+                    Text(clockAt(win, f)).font(Obs.mono(10, .medium)).foregroundStyle(Obs.paper)
                         .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(Obs.teal, in: RoundedRectangle(cornerRadius: 4))
+                        .background(Obs.ink, in: RoundedRectangle(cornerRadius: 4))
                         .offset(x: gutterW + CGFloat(f) * plotW - 18, y: -2)
                         .allowsHitTesting(false)
                 }
@@ -480,8 +480,8 @@ struct SleepDebtCard: View {
                 }
                 if debt.valid {
                     HStack(alignment: .firstTextBaseline) {
-                        Text(debtDuration(debt.debt_min)).font(Obs.mono(26, .medium)).foregroundStyle(Obs.teal)
-                        Text(debt.state).font(Obs.mono(11, .medium)).foregroundStyle(Obs.ink2).textCase(.uppercase)
+                        Text(debtDuration(debt.debt_min)).font(Obs.mono(26, .medium)).foregroundStyle(Obs.debt(debt.state))
+                        Text(debt.state).font(Obs.mono(11, .medium)).foregroundStyle(Obs.debt(debt.state)).textCase(.uppercase)
                     }
                     Text(debtStateCopy(debt.state)).font(Obs.prose(14)).foregroundStyle(Obs.ink2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -502,7 +502,7 @@ struct SleepDebtCard: View {
 // at a glance how far breathing / lowest HR / HRV / temperature sit from normal.
 struct IllnessCard: View {
     let illness: IllnessResult
-    static let coral = Color(red: 0.87, green: 0.36, blue: 0.34)
+    static var coral: Color { Obs.alert }
     private static let copy = [
         "NO_SIGNS": "No signs of illness. Your biometrics are sitting within your normal range.",
         "MINOR_SIGNS": "Minor signs — a few biometrics have drifted outside your usual range. Worth an easy day.",
@@ -521,9 +521,9 @@ struct IllnessCard: View {
 
     private var tint: Color {
         switch illness.trafficLight {
-        case "MINOR_SIGNS": return Obs.yellow
+        case "MINOR_SIGNS": return Obs.bad
         case "MAJOR_SIGNS": return Self.coral
-        default: return Obs.teal
+        default: return Obs.good
         }
     }
 
@@ -593,7 +593,6 @@ private struct RadarBlip: View {
             Circle().strokeBorder(tint.opacity(0.18), lineWidth: 1).frame(width: 34, height: 34)
             Circle().strokeBorder(tint.opacity(0.34), lineWidth: 1).frame(width: 22, height: 22)
             Circle().fill(tint).frame(width: 9, height: 9)
-                .shadow(color: tint.opacity(0.7), radius: 5)
         }
         .frame(width: 34, height: 34)
     }
@@ -607,7 +606,7 @@ private struct BiomarkerRow: View {
     let tint: Color
     private var dotColor: Color {
         guard b.indicatesSymptoms else { return Obs.ink }
-        return b.reason == "ELEVATED" ? IllnessCard.coral : Obs.yellow
+        return b.reason == "ELEVATED" ? IllnessCard.coral : Obs.bad
     }
     private func fmt(_ v: Double) -> String {
         abs(v) < 10 && v != v.rounded() ? String(format: "%.1f", v) : String(Int(v.rounded()))
@@ -644,7 +643,7 @@ private struct RangeTrack: View {
             let x = { (v: Double) in CGFloat((v - lo) / span) * w }
             ZStack(alignment: .leading) {
                 Capsule().fill(Obs.trace.opacity(0.22)).frame(height: 3).position(x: w / 2, y: midY)
-                Capsule().fill(Obs.teal.opacity(0.30))
+                Capsule().fill(Obs.chart.opacity(0.35))
                     .frame(width: max(0, x(upper) - x(lower)), height: 3)
                     .position(x: (x(lower) + x(upper)) / 2, y: midY)
                 Circle().fill(dot).frame(width: 9, height: 9)
@@ -678,7 +677,7 @@ private struct SleepDebtChart: View {
                 if mode == .sleep {
                     var need = Path(); let yy = y(debt.need_h * 60)
                     need.move(to: CGPoint(x: 0, y: yy)); need.addLine(to: CGPoint(x: size.width, y: yy))
-                    context.stroke(need, with: .color(Obs.yellow.opacity(0.7)), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    context.stroke(need, with: .color(Obs.ink.opacity(0.45)), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
                 }
                 var line = Path(), started = false
                 for (i, value) in values.enumerated() {
@@ -686,14 +685,14 @@ private struct SleepDebtChart: View {
                     let point = CGPoint(x: x(i), y: y(value))
                     if started { line.addLine(to: point) } else { line.move(to: point); started = true }
                 }
-                context.stroke(line, with: .color(Obs.teal), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                context.stroke(line, with: .color(Obs.chart), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
             }
             .frame(height: 180)
             HStack {
                 Text(debt.days.first.map { String($0.date.suffix(5)) } ?? "").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
                 Spacer()
                 if mode == .sleep {
-                    HStack(spacing: 5) { Rectangle().fill(Obs.yellow).frame(width: 16, height: 1); Text("sleep need").font(Obs.mono(10)).foregroundStyle(Obs.ink2) }
+                    HStack(spacing: 5) { Rectangle().fill(Obs.ink.opacity(0.45)).frame(width: 16, height: 1); Text("sleep need").font(Obs.mono(10)).foregroundStyle(Obs.ink2) }
                 }
                 Spacer()
                 Text(debt.days.last.map { String($0.date.suffix(5)) } ?? "").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
@@ -713,7 +712,7 @@ struct SleepDebtDetail: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
                         if debt.valid {
-                            Text(debtDuration(debt.debt_min)).font(Obs.mono(34, .medium)).foregroundStyle(Obs.teal)
+                            Text(debtDuration(debt.debt_min)).font(Obs.mono(34, .medium)).foregroundStyle(Obs.debt(debt.state))
                             Text(debtStateCopy(debt.state)).font(Obs.prose(16)).foregroundStyle(Obs.ink2)
                         } else {
                             Text("Not enough data yet").font(Obs.prose(22, .semibold)).foregroundStyle(Obs.ink)
@@ -883,7 +882,7 @@ struct SleepReport: View {
             }
             if let d = s.sleepDebt, d.valid {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(debtDuration(d.debt_min)).font(Obs.mono(20, .medium)).foregroundStyle(Obs.teal)
+                    Text(debtDuration(d.debt_min)).font(Obs.mono(20, .medium)).foregroundStyle(Obs.debt(d.state))
                     Text("accumulated sleep debt vs your \(debtDuration(d.need_h * 60)) nightly need" + (d.recent_shortfall_min > 0 ? " · last sleep day \(Int(d.recent_shortfall_min)) min short" : ""))
                         .font(Obs.mono(11)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
                 }
@@ -1008,8 +1007,8 @@ private struct MetProfile: View {
                 area.addLine(to: CGPoint(x: x(timeline.points.last!.hour), y: size.height))
                 area.addLine(to: CGPoint(x: x(timeline.points[0].hour), y: size.height))
                 area.closeSubpath()
-                ctx.fill(area, with: .color(Obs.teal.opacity(0.14)))
-                ctx.stroke(line, with: .color(Obs.teal), lineWidth: 1.3)
+                ctx.fill(area, with: .color(Obs.chart.opacity(0.14)))
+                ctx.stroke(line, with: .color(Obs.chart), lineWidth: 1.3)
             }
             .frame(height: 120)
             GeometryReader { g in

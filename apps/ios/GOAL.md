@@ -13,6 +13,9 @@ on warm paper, not a teal glass dashboard.
   not glass or aurora.
 - **Ink** headings `#26231e` / `#efebe2` · body `#57534b` / `#cfc9bf` · muted
   `#6e695f` / `#a8a195` · links `#2e2b26` / `#e3ddd2` · rules `#e7e3da` / `#2c2925`.
+- **Color is semantic.** Charts and numbers sit in warm ink/gray. Green only
+  when something is genuinely good, orange/red only when there is a problem.
+  Sleep stages are the exception: deep / light / REM / wake keep distinct hues.
 - **Type** New York (system serif) for titles, SF Pro for UI, **SF Mono** for
   every number, axis and tag.
 - **Surfaces** paper + 1px rules, 10pt radius. No ultraThinMaterial, no teal.
@@ -61,7 +64,7 @@ running fully on-device on a real ring's data, sharing the Rust core so a web
 change in `build_summary()` flows to iOS with no re-implementation.
 
 ## Non-goals (v1)
-Cloud sync · accounts · Apple Health export · Android · live realtime (`viz`/
+Cloud sync · accounts · Android · live realtime (`viz`/
 `game`) — all later. v1 is the offline dashboard, done beautifully.
 
 ## Status (foundation built & verified on the iOS 26.4 simulator)

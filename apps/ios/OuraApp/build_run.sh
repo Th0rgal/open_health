@@ -19,13 +19,15 @@ cp "$REPO/target/aarch64-apple-ios-sim/release/liboura_core.a" "$XCF/liboura_cor
 
 echo "==> compile SwiftUI app + UniFFI bindings, link core"
 rm -rf "$BUILD"; mkdir -p "$APP"
+xcrun -sdk iphonesimulator clang -std=c11 -O1 -target "$TRIPLE" \
+    -c "$APPDIR/CrashCatch.c" -o "$BUILD/CrashCatch.o"
 xcrun -sdk iphonesimulator swiftc \
     -target "$TRIPLE" -parse-as-library \
     -I "$GEN/headers" \
     "$GEN/oura_core.swift" "$APPDIR/Theme.swift" "$APPDIR/OuraApp.swift" \
     "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" "$APPDIR/Reports.swift" \
     "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" "$APPDIR/ProfileSettings.swift" \
-    "$APPDIR/ModelProgress.swift" \
+    "$APPDIR/ModelProgress.swift" "$APPDIR/Diagnostics.swift" "$APPDIR/HealthExport.swift" "$BUILD/CrashCatch.o" \
     -L "$XCF" -loura_core \
     -o "$APP/OuraApp"
 # Xcode expands $(PRODUCT_BUNDLE_IDENTIFIER) at build time; the raw-swiftc path doesn't,

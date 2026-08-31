@@ -22,13 +22,15 @@ echo "==> refresh xcframework staticlib (release, iOS sim)"
 cargo build -p oura-core --release --target aarch64-apple-ios-sim >/dev/null
 cp "$REPO/target/aarch64-apple-ios-sim/release/liboura_core.a" "$XCF/liboura_core.a"
 
-echo "==> compile TorchBridge.mm (lite interpreter)"
+echo "==> compile TorchBridge.mm (lite interpreter) + CrashCatch.c"
 rm -rf "$BUILD"; mkdir -p "$APP"
 # -isystem (not -I): libtorch headers are third-party and trip warnings we
 # can't fix; system headers are exempt, keeping the build output clean.
 xcrun -sdk iphonesimulator clang++ -std=c++17 -fobjc-arc -O1 -target "$TRIPLE" \
     -isystem "$LT/include" -isystem "$LT/include/torch/csrc/api/include" \
     -c "$APPDIR/TorchBridge.mm" -o "$BUILD/TorchBridge.o"
+xcrun -sdk iphonesimulator clang -std=c11 -O1 -target "$TRIPLE" \
+    -c "$APPDIR/CrashCatch.c" -o "$BUILD/CrashCatch.o"
 
 echo "==> compile SwiftUI app (TORCH) + UniFFI bindings, link core + torch"
 xcrun -sdk iphonesimulator swiftc \
@@ -39,7 +41,8 @@ xcrun -sdk iphonesimulator swiftc \
     "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" "$APPDIR/Reports.swift" \
     "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" "$APPDIR/ProfileSettings.swift" \
     "$APPDIR/EventStore.swift" "$APPDIR/ModelCache.swift" "$APPDIR/ModelProgress.swift" \
-    "$APPDIR/SleepStaging.swift" "$APPDIR/CvaModel.swift" "$APPDIR/ActivityModel.swift" "$APPDIR/IllnessModel.swift" "$BUILD/TorchBridge.o" \
+    "$APPDIR/SleepStaging.swift" "$APPDIR/CvaModel.swift" "$APPDIR/ActivityModel.swift" "$APPDIR/IllnessModel.swift" \
+    "$APPDIR/Diagnostics.swift" "$APPDIR/HealthExport.swift" "$BUILD/TorchBridge.o" "$BUILD/CrashCatch.o" \
     -L "$XCF" -loura_core \
     -lc++ -lsqlite3 \
     -L "$LT/lib" -ltorch -ltorch_cpu -lc10 \

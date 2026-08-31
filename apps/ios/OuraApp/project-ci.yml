@@ -15,7 +15,7 @@ options:
 settings:
   base:
     MARKETING_VERSION: "0.1.1"
-    CURRENT_PROJECT_VERSION: "17"
+    CURRENT_PROJECT_VERSION: "22"
     PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openoura
     TARGETED_DEVICE_FAMILY: "1"   # iPhone only (no iPad multitasking orientation reqs)
     CODE_SIGN_STYLE: Automatic
@@ -49,6 +49,10 @@ targets:
       - path: RingSync.swift
       - path: ProfileSettings.swift
       - path: ModelProgress.swift
+      - path: CrashCatch.c
+      - path: CrashCatch.h
+      - path: Diagnostics.swift
+      - path: HealthExport.swift
       - path: ../generated/oura_core.swift
       - path: Assets.xcassets
     dependencies:

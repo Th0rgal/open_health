@@ -117,7 +117,9 @@ which is why Oura's own app has no per-night HRV trend either.
 
 - **Advanced & debugging**: on-ring feature toggles (`/api/feature`) and the per-type
   event stream. Profile editing is now native on iOS, including optional Apple Health
-  import for date of birth, biological sex, height, and weight.
+  import for date of birth, biological sex, height, and weight, plus optional export
+  of workouts (add/remove as detections change), sleep stages, heart rate, HRV,
+  resting HR, steps, calories, and distance.
 - **Polysomnograph crosshair**: web has a hover crosshair; iOS uses a touch scrubber
   (drag across the lanes) — same idea, adapted to the input.
 - **DNA explorer** (`/dna`): reads genome `*.vcf.gz` files and scores single-SNP **traits**

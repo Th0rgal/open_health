@@ -16,10 +16,20 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
 
+schemes:
+  OuraApp:
+    build:
+      targets:
+        OuraApp: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
 settings:
   base:
     MARKETING_VERSION: "0.1.1"
-    CURRENT_PROJECT_VERSION: "17"
+    CURRENT_PROJECT_VERSION: "22"
     PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openoura
     TARGETED_DEVICE_FAMILY: "1"   # iPhone only (no iPad multitasking orientation reqs)
     CODE_SIGN_STYLE: Automatic
@@ -77,6 +87,10 @@ targets:
       - path: IllnessModel.swift
       - path: TorchBridge.mm
       - path: TorchBridge.h
+      - path: CrashCatch.c
+      - path: CrashCatch.h
+      - path: Diagnostics.swift
+      - path: HealthExport.swift
       - path: ../generated/oura_core.swift
       - path: Assets.xcassets
       # bundled models + data (gitignored local files). oura.db is temporary until the

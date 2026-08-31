@@ -53,6 +53,7 @@ final class RingDiag: ObservableObject, @unchecked Sendable {
         let alreadyQueued = uiUpdateQueued
         uiUpdateQueued = true
         lock.unlock()
+        DiagStore.shared.append(line)
         if !alreadyQueued {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 guard let self else { return }
@@ -76,7 +77,7 @@ final class RingDiag: ObservableObject, @unchecked Sendable {
         let os = ProcessInfo.processInfo.operatingSystemVersionString
         let v = Bundle.main.infoDictionary
         let app = "\(v?["CFBundleShortVersionString"] ?? "?") (\(v?["CFBundleVersion"] ?? "?"))"
-        return "open_oura \(app) — iOS \(os) — \(Date())\(droppedNote)\n\(body)"
+        return "Open Oura \(app) — iOS \(os) — \(Date())\(droppedNote)\n\(body)"
     }
 
     func clear() {

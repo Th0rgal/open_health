@@ -97,6 +97,7 @@ struct ProfileSettingsView: View {
     @State private var profile: EditableProfile
     @State private var importing = false
     @State private var message: String?
+    @ObservedObject private var health = HealthExport.shared
     let onSaved: () -> Void
 
     init(profile: Profile?, onSaved: @escaping () -> Void) {
@@ -151,6 +152,26 @@ struct ProfileSettingsView: View {
                     }
                     .disabled(importing)
                     if let message { Text(message).font(.footnote).foregroundStyle(Obs.ink2) }
+                }
+
+                Section {
+                    Toggle("Write ring data to Apple Health", isOn: Binding(
+                        get: { health.enabled },
+                        set: { health.setEnabled($0, summary: SummaryCache.load()) }
+                    ))
+                    if !health.status.isEmpty {
+                        Text(health.status).font(.footnote).foregroundStyle(Obs.ink2)
+                    }
+                    if health.enabled {
+                        Button("Remove Open Oura samples from Health") {
+                            health.removeExportedSamples()
+                        }
+                        .foregroundStyle(Obs.bad)
+                    }
+                } header: {
+                    Text("Apple Health")
+                } footer: {
+                    Text("Exports workouts (and removes ones the ring no longer detects), sleep stages, heart rate, HRV, resting HR, steps, active calories, and distance. Data stays on this iPhone.")
                 }
             }
             .scrollContentBackground(.hidden)
