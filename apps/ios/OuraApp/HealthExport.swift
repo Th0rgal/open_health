@@ -127,9 +127,10 @@ final class HealthExport: ObservableObject {
             return
         }
 
-        let wanted = buildSamples(summary)
-        dlog("health", "export \(wanted.count) samples")
-        if wanted.isEmpty {
+        let samples = buildSamples(summary)
+        let workouts = plannedWorkouts(summary.workouts)
+        dlog("health", "export \(samples.count) samples, \(workouts.count) workouts")
+        if samples.isEmpty, workouts.isEmpty {
             DispatchQueue.main.async { self.status = "Nothing to export. Check Apple Health permissions for Open Oura." }
             return
         }
@@ -139,9 +140,9 @@ final class HealthExport: ObservableObject {
         var queryError: Error?
         for type in types {
             collect.enter()
-            allOurs(type) { samples, error in
+            allOurs(type) { found, error in
                 if let error { queryError = error }
-                ours.append(contentsOf: samples)
+                ours.append(contentsOf: found)
                 collect.leave()
             }
         }
@@ -151,16 +152,17 @@ final class HealthExport: ObservableObject {
             return
         }
 
-        let wantedIDs = Set(wanted.compactMap { $0.metadata?[HKMetadataKeySyncIdentifier] as? String })
+        let wantedIDs = Set(samples.compactMap(Self.syncID) + workouts.map(\.syncID))
         let stale = ours.filter { sample in
-            let id = sample.metadata?[HKMetadataKeySyncIdentifier] as? String
-            return id == nil || !wantedIDs.contains(id!)
+            guard let id = Self.syncID(sample) else { return true }
+            return !wantedIDs.contains(id)
         }
-        let existingIDs = Set(ours.compactMap { $0.metadata?[HKMetadataKeySyncIdentifier] as? String })
-        let fresh = wanted.filter {
-            guard let id = $0.metadata?[HKMetadataKeySyncIdentifier] as? String else { return true }
+        let existingIDs = Set(ours.compactMap(Self.syncID))
+        let freshSamples = samples.filter {
+            guard let id = Self.syncID($0) else { return true }
             return !existingIDs.contains(id)
         }
+        let freshWorkouts = workouts.filter { !existingIDs.contains($0.syncID) }
 
         let write = DispatchGroup()
         var writeError: Error?
@@ -172,21 +174,30 @@ final class HealthExport: ObservableObject {
             }
             write.wait()
         }
-        if writeError == nil, !fresh.isEmpty {
+        if writeError == nil, !freshSamples.isEmpty {
             write.enter()
-            store.save(fresh) { _, error in
+            store.save(freshSamples) { _, error in
                 if let error { writeError = error }
                 write.leave()
             }
             write.wait()
         }
+        if writeError == nil {
+            for workout in freshWorkouts {
+                if let error = saveWorkout(workout) {
+                    writeError = error
+                    break
+                }
+            }
+        }
+        let added = freshSamples.count + freshWorkouts.count
         DispatchQueue.main.async {
             if let writeError {
                 self.status = writeError.localizedDescription
                 dlog("health", "export failed: \(writeError)")
             } else {
                 UserDefaults.standard.set(fp, forKey: Self.fingerprintKey)
-                self.status = "Exported \(fresh.count) new, removed \(stale.count) stale."
+                self.status = "Exported \(added) new, removed \(stale.count) stale."
                 dlog("health", self.status)
             }
         }
@@ -217,7 +228,6 @@ final class HealthExport: ObservableObject {
 
     private func buildSamples(_ s: Summary) -> [HKObject] {
         var out: [HKObject] = []
-        out.append(contentsOf: workoutSamples(s.workouts))
         for night in s.nights { out.append(contentsOf: sleepSamples(night)) }
         for night in s.nights { out.append(contentsOf: heartSamples(night)) }
         out.append(contentsOf: dailySamples(s.activity_daily))
@@ -229,18 +239,57 @@ final class HealthExport: ObservableObject {
          HKMetadataKeySyncVersion: 1]
     }
 
-    private func workoutSamples(_ workouts: [WorkoutSession]) -> [HKObject] {
+    private static func syncID(_ sample: HKObject) -> String? {
+        sample.metadata?[HKMetadataKeySyncIdentifier] as? String
+    }
+
+    private struct PlannedWorkout {
+        let id: String
+        let type: HKWorkoutActivityType
+        let start: Date
+        let end: Date
+        var syncID: String { HealthExport.syncPrefix + "workout.\(id)" }
+    }
+
+    private func plannedWorkouts(_ workouts: [WorkoutSession]) -> [PlannedWorkout] {
         guard canShare(HKObjectType.workoutType()) else { return [] }
-        var out: [HKObject] = []
+        var out: [PlannedWorkout] = []
         for w in workouts where w.isWorkout >= 0.5 {
             guard let (start, end) = Self.workoutDates(w) else { continue }
-            let workout = HKWorkout(activityType: Self.activityType(w.label),
-                                    start: start, end: end,
-                                    workoutEvents: nil, totalEnergyBurned: nil,
-                                    totalDistance: nil, metadata: meta("workout.\(w.id)"))
-            out.append(workout)
+            out.append(PlannedWorkout(id: w.id, type: Self.activityType(w.label), start: start, end: end))
         }
         return out
+    }
+
+    /// Historical workouts must go through `HKWorkoutBuilder`; the old
+    /// `HKWorkout(activityType:start:end:…)` initializers are deprecated.
+    private func saveWorkout(_ plan: PlannedWorkout) -> Error? {
+        let config = HKWorkoutConfiguration()
+        config.activityType = plan.type
+        let builder = HKWorkoutBuilder(healthStore: store, configuration: config, device: .local())
+        let group = DispatchGroup()
+        var result: Error?
+        func fail(_ error: Error?, fallback: String) {
+            result = error ?? NSError(domain: "open_oura", code: 2,
+                                      userInfo: [NSLocalizedDescriptionKey: fallback])
+            group.leave()
+        }
+        group.enter()
+        builder.beginCollection(withStart: plan.start) { success, error in
+            guard success else { fail(error, fallback: "Could not start workout collection."); return }
+            builder.addMetadata(self.meta("workout.\(plan.id)")) { success, error in
+                guard success else { fail(error, fallback: "Could not tag workout."); return }
+                builder.endCollection(withEnd: plan.end) { success, error in
+                    guard success else { fail(error, fallback: "Could not end workout collection."); return }
+                    builder.finishWorkout { _, error in
+                        result = error
+                        group.leave()
+                    }
+                }
+            }
+        }
+        group.wait()
+        return result
     }
 
     private func sleepSamples(_ night: NightRow) -> [HKObject] {
