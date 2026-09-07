@@ -85,8 +85,9 @@ longest in-bed night for a morning so a nap doesn't shadow the real sleep.
   substitutes the platform serif and monospace families for New York and SF Mono, which do not
   exist there.
 - **BLE sync**: both native clients sync **natively** — `RingSync.swift` (CoreBluetooth
-  `BLETransport`) and `ble/RingSync.kt` (`BluetoothGatt` `BleTransport`) drive the Rust
-  `RingSession` FFI (`oura-core`) to authenticate + drain into a writable DB. The web
+  `BLETransport`) and `ble/SyncEngine.kt` (`BluetoothGatt` `BleTransport`, wrapped by a
+  WorkManager `RingSyncWorker`) drive the Rust `RingSession` FFI (`oura-core`) to
+  authenticate + drain into a writable DB. The web
   dashboard has **no** BLE; it reads a DB produced by the desktop `oura sync`. All of them
   ultimately run the SAME `oura-link` `OuraClient<T: Transport>` over a different transport
   (btleplug on desktop, CoreBluetooth-over-FFI on iOS, BluetoothGatt-over-FFI on Android).
@@ -184,12 +185,17 @@ upstream clang lacks, while a distro clang ships no compiler-rt or libunwind for
 
 ### Where Android does better than iOS
 
-- **Background sync**: iOS has no unrestricted background CPU, so `IdleTimerLock` merely keeps
-  the foreground app awake and reasserts itself across lifecycle transitions. Android holds a
-  real reference-counted `PARTIAL_WAKE_LOCK` (`ble/WakeLockOwner.kt`, same `"ring-sync"` /
-  `"pair-screen"` / `"models"` owner keys) plus a `connectedDevice` foreground service, so a
-  long history drain survives the app going to the background — which is what the official
-  Android client does too.
+- **Background sync**: iOS has no unrestricted background CPU and no scheduled sync — it only
+  syncs on `.onAppear` / `scenePhase == .active`, with `IdleTimerLock` keeping the foreground
+  app awake mid-drain. Android runs an **autonomous scheduled sync**: a WorkManager
+  `PeriodicWorkRequest` fires `RingSyncWorker` every **6 hours** (`ble/SyncScheduler.kt`), on a
+  `connectedDevice` foreground service showing an ongoing notification, holding the real
+  reference-counted `PARTIAL_WAKE_LOCK` (`ble/WakeLockOwner.kt`, same `"ring-sync"` /
+  `"pair-screen"` / `"models"` owner keys). The scheduled run retries an unreachable ring with
+  exponential backoff (5 s → 40 s, capped at 1 min, 5 attempts). App-start and the manual Sync
+  button enqueue the **same** worker (`ble/SyncEngine.kt` is the shared headless engine); a
+  process-wide lock plus WorkManager `KEEP` means only one sync runs at a time. The UI observes
+  `WorkInfo` rather than in-process state.
 - **Crash forensics**: iOS infers a low-memory kill from a leftover session log and subscribes
   to MetricKit. Android reads `ActivityManager.getHistoricalProcessExitReasons`, which reports
   the reason (LOW_MEMORY / ANR / native crash) directly.

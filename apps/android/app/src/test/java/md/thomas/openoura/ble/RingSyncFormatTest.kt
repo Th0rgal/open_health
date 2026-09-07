@@ -11,10 +11,10 @@ class RingSyncFormatTest {
     @Test
     fun `auth rejections are recognised so they are not retried`() {
         // Retrying a deterministic rejection just re-fails and burns the ring's battery.
-        assertTrue(RingSync.isAuthenticationFailure("protocol error: authentication failed"))
-        assertTrue(RingSync.isAuthenticationFailure("Ring rejected auth key"))
-        assertFalse(RingSync.isAuthenticationFailure("BLE link lost mid-batch"))
-        assertFalse(RingSync.isAuthenticationFailure("extended history request failed with result code 0xff"))
+        assertTrue(SyncEngine.isAuthenticationFailure("protocol error: authentication failed"))
+        assertTrue(SyncEngine.isAuthenticationFailure("Ring rejected auth key"))
+        assertFalse(SyncEngine.isAuthenticationFailure("BLE link lost mid-batch"))
+        assertFalse(SyncEngine.isAuthenticationFailure("extended history request failed with result code 0xff"))
     }
 
     @Test
@@ -30,16 +30,16 @@ class RingSyncFormatTest {
 
     @Test
     fun `byte counts read as KB below a megabyte and MB above`() {
-        assertEquals("512 KB", RingSync.fmtBytes(524_288uL))
-        assertEquals("1.0 MB", RingSync.fmtBytes(1_048_576uL))
-        assertEquals("2.5 MB", RingSync.fmtBytes(2_621_440uL))
+        assertEquals("512 KB", SyncEngine.fmtBytes(524_288uL))
+        assertEquals("1.0 MB", SyncEngine.fmtBytes(1_048_576uL))
+        assertEquals("2.5 MB", SyncEngine.fmtBytes(2_621_440uL))
     }
 
     @Test
     fun `durations read in seconds, minutes then hours`() {
-        assertEquals("1s", RingSync.fmtDuration(0.0))   // never "0s"
-        assertEquals("45s", RingSync.fmtDuration(45.0))
-        assertEquals("2 min", RingSync.fmtDuration(120.0))
-        assertEquals("1.5 h", RingSync.fmtDuration(5400.0))
+        assertEquals("1s", SyncEngine.fmtDuration(0.0))   // never "0s"
+        assertEquals("45s", SyncEngine.fmtDuration(45.0))
+        assertEquals("2 min", SyncEngine.fmtDuration(120.0))
+        assertEquals("1.5 h", SyncEngine.fmtDuration(5400.0))
     }
 }

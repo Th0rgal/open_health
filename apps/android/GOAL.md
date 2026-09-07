@@ -42,10 +42,15 @@ verbatim, so a palette change belongs in both).
 
 ### Where Android does better than iOS
 
-iOS has no unrestricted background CPU, so `IdleTimerLock` only *emulates* the
-reference-counted `PARTIAL_WAKE_LOCK` the official Android client uses. Here we hold
-the real thing, plus a `connectedDevice` foreground service, so a long history drain
-survives the app going to the background.
+iOS has no unrestricted background CPU and no scheduled sync — it only syncs while the
+app is in front. Android runs a true **autonomous background sync**: a WorkManager
+`PeriodicWorkRequest` fires `RingSyncWorker` every 6 hours (`ble/SyncScheduler.kt`),
+on a `connectedDevice` foreground service with an ongoing notification, holding the
+real reference-counted `PARTIAL_WAKE_LOCK` the official Android client uses. The
+scheduled run retries an unreachable ring with exponential backoff (5 s → 40 s, capped
+at 1 min, 5 attempts). App start and the manual Sync button enqueue the same worker
+over the shared headless `ble/SyncEngine.kt`, so a long history drain survives the app
+going to the background and there is exactly one sync path.
 
 ## Building
 

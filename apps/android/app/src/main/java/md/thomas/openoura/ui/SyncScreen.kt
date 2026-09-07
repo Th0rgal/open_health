@@ -1,10 +1,14 @@
 package md.thomas.openoura.ui
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -54,16 +58,20 @@ fun SyncScreen(ring: RingSync, onBack: () -> Unit, onSynced: () -> Unit) {
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { granted ->
-        permissionNote = if (granted.values.all { it }) null else BlePermissions.rationale()
-        if (granted.values.all { it } && isValidRingKey(key)) {
-            ring.syncInBackground(key)
+    ) { _ ->
+        // Only the Bluetooth grants gate the sync; a denied POST_NOTIFICATIONS just hides the
+        // ongoing notification, so check the live grant state rather than the returned map.
+        if (BlePermissions.granted(context)) {
+            permissionNote = null
+            if (isValidRingKey(key)) ring.sync()
+        } else {
+            permissionNote = BlePermissions.rationale()
         }
     }
 
     // A completed sync should refresh what is on screen behind this sheet.
-    LaunchedEffect(ring.lastReport) {
-        if (ring.lastReport != null) onSynced()
+    LaunchedEffect(ring.lastSummary) {
+        if (ring.lastSummary != null) onSynced()
     }
 
     Sheet("Sync", onBack) {
@@ -110,11 +118,14 @@ fun SyncScreen(ring: RingSync, onBack: () -> Unit, onSynced: () -> Unit) {
 
             ActionRow(if (ring.busy) "Syncing…" else "Connect & Sync") {
                 if (ring.busy) return@ActionRow
-                val missing = BlePermissions.missing(context)
-                if (missing.isNotEmpty()) {
-                    permissionLauncher.launch(missing.toTypedArray())
+                // Ask for any missing Bluetooth grants and — on API 33+ — notification
+                // permission so the ongoing sync notification is visible. The sync starts
+                // from the launcher callback once Bluetooth is granted.
+                val toRequest = syncPermissionsToRequest(context)
+                if (toRequest.isNotEmpty()) {
+                    permissionLauncher.launch(toRequest)
                 } else {
-                    ring.syncInBackground(key)
+                    ring.sync()
                 }
             }
             permissionNote?.let {
@@ -123,7 +134,7 @@ fun SyncScreen(ring: RingSync, onBack: () -> Unit, onSynced: () -> Unit) {
             if (ring.status.isNotEmpty()) {
                 Text(ring.status, fontFamily = Obs.mono, fontSize = 12.sp, color = colors.ink2)
             }
-            ring.lastReport?.let { report ->
+            ring.lastSummary?.let { report ->
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     ObsStat("serial", report.serial)
                     ObsStat("events synced", "${report.eventsSynced}")
@@ -192,6 +203,21 @@ private fun ActionRowInline(label: String, onClick: () -> Unit) {
         fontSize = 12.sp,
         color = colors.ink,
     )
+}
+
+/**
+ * The permissions to ask for before a manual sync: any missing Bluetooth grants, plus
+ * POST_NOTIFICATIONS on API 33+ so the ongoing sync notification can show. The notification
+ * grant is best-effort — a denial doesn't stop the sync, only hides its notification.
+ */
+private fun syncPermissionsToRequest(context: Context): Array<String> {
+    val ble = BlePermissions.missing(context)
+    val notif = if (
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+        PackageManager.PERMISSION_GRANTED
+    ) listOf(Manifest.permission.POST_NOTIFICATIONS) else emptyList()
+    return (ble + notif).toTypedArray()
 }
 
 private fun copyDiagnostics(context: Context) {

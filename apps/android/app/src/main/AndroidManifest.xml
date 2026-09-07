@@ -63,9 +63,12 @@
             </intent-filter>
         </activity-alias>
 
+        <!-- WorkManager runs RingSyncWorker on its own foreground service; give that
+             service the connectedDevice type (the sync only runs while the ring's BLE
+             device is reachable), which the platform requires declared on API 34+. -->
         <service
-            android:name=".ble.RingSyncService"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="connectedDevice"
+            tools:node="merge" />
     </application>
 </manifest>

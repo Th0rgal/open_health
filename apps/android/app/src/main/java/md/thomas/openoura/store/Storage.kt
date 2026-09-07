@@ -173,6 +173,9 @@ object Prefs {
 
     const val LAST_SUCCESSFUL_SYNC_AT = "ring.last-successful-sync-at"
     const val SYNC_INCOMPLETE = "ring.sync-incomplete"
+    // The 60 s failed-attempt debounce lives in prefs, not memory, because each background
+    // worker run is a fresh SyncEngine instance with no in-process history to consult.
+    const val LAST_AUTOMATIC_ATTEMPT_AT = "ring.last-automatic-attempt-at"
     const val HEALTH_EXPORT_ENABLED = "health.export.enabled"
     const val HEALTH_EXPORT_FP = "health.export.fp"
 

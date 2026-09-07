@@ -12,7 +12,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -20,8 +19,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.DisposableEffect
-import kotlinx.coroutines.launch
 import md.thomas.openoura.ble.RingSync
+import md.thomas.openoura.ble.RingSyncWorker
+import md.thomas.openoura.ble.SyncScheduler
 import md.thomas.openoura.data.VitalKind
 import md.thomas.openoura.health.HealthExport
 import md.thomas.openoura.store.ProfileStore
@@ -52,16 +52,15 @@ fun AppNav(vm: SummaryViewModel, ring: RingSync, modifier: Modifier = Modifier) 
     BackHandler(enabled = route != Route.Home) { route = Route.Home }
 
     // Opportunistic refresh on launch and when returning to the app — the same policy as
-    // iOS's scenePhase hook: never prompts for a key, honours the cooldown, and resumes
-    // eagerly when a previous drain was interrupted mid-transfer.
+    // iOS's scenePhase hook, now routed through the same WorkManager worker as every other
+    // sync. The worker applies the cooldown / eager-resume decision, and the KEEP policy
+    // plus the engine's process lock make it a no-op when a background sync is already
+    // running.
     val lifecycleOwner = LocalLifecycleOwner.current
-    val scope = rememberCoroutineScope()
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_START) {
-                scope.launch {
-                    if (ring.syncAutomaticallyIfNeeded() != null) vm.reload()
-                }
+                SyncScheduler.syncNow(context, RingSyncWorker.SOURCE_AUTOMATIC)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -69,8 +68,8 @@ fun AppNav(vm: SummaryViewModel, ring: RingSync, modifier: Modifier = Modifier) 
     }
 
     // A sync that lands while a screen is open should refresh the rendered summary.
-    LaunchedEffect(ring.lastReport) {
-        if (ring.lastReport != null) vm.reload()
+    LaunchedEffect(ring.lastSummary) {
+        if (ring.lastSummary != null) vm.reload()
     }
 
     val s = vm.summary
