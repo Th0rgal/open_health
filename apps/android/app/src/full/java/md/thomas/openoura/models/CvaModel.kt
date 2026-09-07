@@ -18,7 +18,11 @@ object CvaModel {
 
     private const val SEG_LEN = 1500
     private const val GAP_DS = 20L    // >2 s splits two PPG measurements
-    private const val MODEL = "cva_2_1_0"
+    // The iOS app references cva_2_1_0, but the Oura Android app now ships cva_2_1_5 — a
+    // pure version bump: identical forward(x, demographics) -> 5-tuple signature, so it is
+    // a drop-in. We read tuple elements [0] (vascular age) and [3] (PWV) as before. If a
+    // future model changes that shape, this is where it surfaces. See docs/clients.md.
+    private const val MODEL = "cva_2_1_5"
 
     /**
      * A long PPG archive can be tens of thousands of 1500-sample windows. Keep the most
@@ -117,7 +121,18 @@ object CvaModel {
         )
 
         val out = TorchBridge.cva(modelPath, flat, nSegs, demo)
-            ?: return Outcome(null, "cardiovascular model failed on $nSegs PPG segments")
+            // A null return means the model raised its own validation error (e.g. code
+            // 112 — PPG quality/coverage insufficient), not that it failed to run. That
+            // needs `cva_ppg` enabled on the ring plus a proper PPG-bearing measurement,
+            // exactly as on iOS (docs/cva-cardiovascular-age.md). Word it as a data gate,
+            // not a crash, so it does not read as a broken build.
+            ?: return Outcome(
+                null,
+                if (nSegs < 8) "not enough clean PPG for cardiovascular age yet " +
+                    "($nSegs segment${if (nSegs == 1) "" else "s"}) — enable cva_ppg and measure"
+                else "cardiovascular model rejected the PPG ($nSegs segments) — " +
+                    "quality too low for an estimate",
+            )
 
         return Outcome(
             Result(

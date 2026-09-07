@@ -41,3 +41,5 @@ apps/android/app/src/main/assets/*.ptl
 apps/android/libtorch-android/
 apps/android/local.properties
 apps/android/.ndk-shim/
+apps/android/clang-resource/
+tools/frida/*.compiled.js

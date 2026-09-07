@@ -18,7 +18,12 @@ val ndkShim = file("../.ndk-shim")
 android {
     namespace = "md.thomas.openoura"
     compileSdk = 36
-    if (ndkShim.isDirectory) ndkPath = ndkShim.absolutePath
+    if (ndkShim.isDirectory) {
+        ndkPath = ndkShim.absolutePath
+        // AGP cross-checks ndkVersion against the NDK the path reports; the shim mirrors
+        // this exact NDK, so pin it to match.
+        ndkVersion = "28.2.13676358"
+    }
 
     defaultConfig {
         applicationId = "md.thomas.openoura"
@@ -44,6 +49,10 @@ android {
         }
         create("full") {
             dimension = "models"
+            // LibTorch is built for arm64-v8a only (spike/build_libtorch_android.sh), and
+            // that is the ABI real phones use, so the model build targets it alone. An
+            // x86_64 `full` build (emulator) would need an x86_64 LibTorch slice too.
+            ndk { abiFilters.clear(); abiFilters += "arm64-v8a" }
             // Only the `full` flavor compiles the JNI torch bridge, so `lite` stays
             // buildable (and CI-able) with no LibTorch and no .ptl models present —
             // the same split as build_run.sh vs build_run_torch.sh on iOS.
@@ -53,6 +62,9 @@ android {
                         cppFlags += listOf("-fexceptions", "-frtti", "-O2")
                         // Only this flavor defines native targets; see cpp/CMakeLists.txt.
                         arguments += listOf("-DANDROID_STL=c++_static", "-DOURA_BUILD_TORCH=ON")
+                        // CMake ABIs are a separate list from ndk.abiFilters (which only
+                        // unions), and LibTorch exists for arm64-v8a alone, so pin it here.
+                        abiFilters.clear(); abiFilters += "arm64-v8a"
                     }
                 }
             }

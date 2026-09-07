@@ -84,7 +84,13 @@ fun SyncScreen(ring: RingSync, onBack: () -> Unit, onSynced: () -> Unit) {
             Rule("ring auth key")
             BasicTextField(
                 value = key,
-                onValueChange = { key = it.trim() },
+                onValueChange = {
+                    key = it.trim()
+                    // Persist as soon as it is a valid key, not only after a successful
+                    // sync — so a typed key survives an app restart even if the first
+                    // sync attempt fails or is interrupted. Stored Keystore-encrypted.
+                    if (isValidRingKey(key)) RingKeyStore.save(context, key)
+                },
                 singleLine = true,
                 textStyle = TextStyle(fontFamily = Obs.mono, fontSize = 14.sp, color = colors.ink),
                 cursorBrush = SolidColor(colors.ink),

@@ -48,5 +48,30 @@ scope for a cloud-free client):
 1. Fetch the model key from the client-config endpoint with an authenticated session.
 2. Extract the locally-saved key from a logged-in device's app storage, then GCM-
    decrypt with the recipe above.
+
+## Update — route 2 implemented (`tools/frida/`)
+
+Route 2 is now scripted for a **rooted device with the logged-in app**. The key never
+appears in the APK and the app's `androidx.security` classes are obfuscated, so the key is
+captured live from the app's own decryption rather than reconstructed:
+
+- `tools/frida/capture_model_key.py` + `capture_model_key.js` attach Frida and hook
+  `javax.crypto.Cipher`, correlating `init` → `doFinal` by the cipher's stable Java identity
+  and reporting the AES-256 key **only** when that cipher's output is a TorchScript zip — so
+  the plaintext proves the key, never a guess. The models decrypt lazily on fresh inference
+  (results are persisted), so the reliable trigger is a live sync or the periodic
+  daytime-stress model; a cold spawn plus normal navigation also works.
+- `tools/frida/decrypt_all_models.py` then decrypts every `assets/*.pt.enc` offline with the
+  captured key (the GCM tag verifies each), writing `notes/models/<name>.pt`.
+- `tools/export_mobile.py` converts those to the `.ptl` the on-device clients load.
+
+One caveat this surfaced: the key is a single AES-256-GCM key shared across all current
+models (not per-model), and `sleepstaging_2_6_0` still cannot be lite-exported — it needs the
+custom `oura_ops::oura_create_windows` op absent from the mobile runtime — so `sleepnet_
+moonstone` remains the stager used on-device. The app has also moved `cva` from `2_1_0` to
+`2_1_5` (same signature, a drop-in).
+
+This unblocks the on-device hypnogram for a client that has a rooted phone with the official
+app; it is still not reproducible from ring data alone.
 3. Train an independent staging model from the raw signals we *do* decode (HR/IBI,
    HRV, temperature, motion) - a from-scratch reimplementation, not a port.
