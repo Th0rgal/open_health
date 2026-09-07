@@ -1,0 +1,9 @@
+<resources>
+    <!-- Compose paints everything; this only sets the pre-Compose window background
+         so launch does not flash white in dark mode. -->
+    <style name="Theme.OpenOura" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/paper</item>
+        <item name="android:statusBarColor">@color/paper</item>
+        <item name="android:navigationBarColor">@color/paper</item>
+    </style>
+</resources>

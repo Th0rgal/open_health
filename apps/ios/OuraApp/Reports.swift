@@ -1,7 +1,7 @@
 import SwiftUI
 
 // Full-page, research-grade sleep & activity reports — the iOS counterpart to the web
-// dashboard's `sleepReport`/`activityReport` (see docs/clients-web-and-ios.md). The raw
+// dashboard's `sleepReport`/`activityReport` (see docs/clients.md). The raw
 // per-night signal series arrive from build_summary (NightRow.series); the hypnogram is
 // the on-device SleepNet output (NightRow.stages, TORCH build). Sleep metrics + debt are
 // computed here in Swift, mirroring crates/oura-summary so both clients agree.
@@ -22,7 +22,7 @@ struct SleepMetrics {
 // Mean HR/HRV per sleep stage — deep-sleep HRV is the recovery-relevant number. Mirror of
 // oura-summary `autonomic_by_stage` (which the iOS FFI leaves null under NoModelRunner).
 // iOS aligns the even-spread `series` to stages by index fraction rather than the server's
-// per-sample timestamps, so values can differ by a hair; see docs/clients-web-and-ios.md.
+// per-sample timestamps, so values can differ by a hair; see docs/clients.md.
 struct StageAutonomic {
     var hrvDeep: Double?; var hrvLight: Double?; var hrvRem: Double?
     var hrDeep: Double?; var hrLight: Double?; var hrRem: Double?

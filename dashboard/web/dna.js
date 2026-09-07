@@ -1,5 +1,5 @@
 // open_oura DNA explorer — fetches /api/dna/* (Rust parses the .vcf.gz + scores it)
-// and renders traits + polygenic scores. Web-only feature; see docs/clients-web-and-ios.md.
+// and renders traits + polygenic scores. Web-only feature; see docs/clients.md.
 "use strict";
 
 const $ = (id) => document.getElementById(id);

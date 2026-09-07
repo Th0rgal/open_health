@@ -10,7 +10,7 @@
 //!
 //! A new field added to the JSON here surfaces in BOTH clients — but each must still
 //! *render* it: web `dashboard/web/app.js`, iOS `apps/ios/OuraApp/OuraApp.swift`. See
-//! `docs/clients-web-and-ios.md`.
+//! `docs/clients.md`.
 
 mod ring_time;
 

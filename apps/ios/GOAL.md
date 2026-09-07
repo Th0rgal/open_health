@@ -64,8 +64,9 @@ running fully on-device on a real ring's data, sharing the Rust core so a web
 change in `build_summary()` flows to iOS with no re-implementation.
 
 ## Non-goals (v1)
-Cloud sync · accounts · Android · live realtime (`viz`/
-`game`) — all later. v1 is the offline dashboard, done beautifully.
+Cloud sync · accounts · live realtime (`viz`/`game`) — all later. v1 is the offline
+dashboard, done beautifully. (Android was a v1 non-goal; it now exists as a third client
+under `apps/android/` on the same Rust core — see `docs/clients.md`.)
 
 ## Status (foundation built & verified on the iOS 26.4 simulator)
 - ✅ **`oura-core` UniFFI `.xcframework`** — `crates/oura-core` exposes `summary_json`/

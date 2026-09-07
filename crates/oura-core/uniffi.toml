@@ -1,0 +1,8 @@
+# Kotlin bindings settings for the Android client (apps/android). The Swift bindings the
+# iOS app uses are unaffected — this section applies only to `--language kotlin`.
+[bindings.kotlin]
+# Use JNA's cleaner rather than java.lang.ref.Cleaner, which only exists on API 33+.
+# The generated code does guard the JDK cleaner behind a Class.forName check, so it is
+# safe either way, but that reflection is invisible to Android lint and trips NewApi on
+# our minSdk of 28. Selecting the JNA cleaner outright removes the API-33 path entirely.
+android_cleaner = true
