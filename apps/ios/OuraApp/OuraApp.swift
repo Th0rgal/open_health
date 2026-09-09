@@ -4,7 +4,7 @@ import SwiftUI
 // orchestration in Core.swift, the reusable charts/cells in Components.swift, and the
 // full-page sleep/activity reports in Reports.swift.
 // SIBLING CLIENT: the web dashboard (dashboard/web/app.js) renders the SAME summary
-// JSON — a user-facing change here usually belongs there too (docs/clients-web-and-ios.md).
+// JSON — a user-facing change here usually belongs there too (docs/clients.md).
 
 // The home's unified "today": last night's sleep and that day's activity as ONE unit,
 // each region tappable to open its own detail (sleep → SleepDetail, activity →

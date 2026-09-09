@@ -3,7 +3,7 @@ import Foundation
 // ── the shared build_summary() JSON, decoded (same contract as the web client) ──
 // SIBLING CLIENT: the web dashboard (dashboard/web/app.js) renders the SAME summary
 // JSON. A user-facing change here usually belongs there too — see the feature map in
-// docs/clients-web-and-ios.md. New computed fields go in crates/oura-summary; new
+// docs/clients.md. New computed fields go in crates/oura-summary; new
 // models get an on-device path (TorchBridge.mm + *Model.swift) AND a Python runner.
 
 struct Trend: Codable {

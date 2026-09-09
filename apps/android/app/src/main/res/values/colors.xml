@@ -1,0 +1,6 @@
+<resources>
+    <!-- thomas.md "Quiet Ink" paper; the dark value lives in values-night. -->
+    <color name="paper">#fbfaf6</color>
+    <!-- The launcher icon does not follow the system theme, so it keeps paper always. -->
+    <color name="icon_background">#fbfaf6</color>
+</resources>
