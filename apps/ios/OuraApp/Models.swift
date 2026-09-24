@@ -216,6 +216,25 @@ struct Summary: Codable {
         case symptoms
         case sleepDebt = "sleep_debt"
     }
+    init() {}
+    init(error: String) { self.error = error }
+    /// Every key is optional so the core's `{"error": "…"}` payload decodes into a
+    /// Summary that carries the message instead of a generic "decode failed".
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        digest = try c.decodeIfPresent(String.self, forKey: .digest)
+        device = try c.decodeIfPresent(Device.self, forKey: .device)
+        nights = try c.decodeIfPresent([NightRow].self, forKey: .nights) ?? []
+        vitals = try c.decodeIfPresent(Vitals.self, forKey: .vitals) ?? Vitals()
+        activity_profile = try c.decodeIfPresent([String: [Double]].self, forKey: .activity_profile) ?? [:]
+        activity_daily = try c.decodeIfPresent([String: DailyStat].self, forKey: .activity_daily) ?? [:]
+        profile = try c.decodeIfPresent(Profile.self, forKey: .profile)
+        cardio = try c.decodeIfPresent(Cardio.self, forKey: .cardio)
+        fitness = try c.decodeIfPresent(Fitness.self, forKey: .fitness)
+        sleepDebt = try c.decodeIfPresent(SleepDebtSummary.self, forKey: .sleepDebt)
+        symptoms = try c.decodeIfPresent(IllnessResult.self, forKey: .symptoms)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+    }
     /// recent days (newest first) that have a movement profile.
     var activeDays: [String] { activity_profile.keys.sorted(by: >) }
 }

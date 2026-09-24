@@ -27,7 +27,8 @@ xcrun -sdk iphonesimulator swiftc \
     "$GEN/oura_core.swift" "$APPDIR/Theme.swift" "$APPDIR/OuraApp.swift" \
     "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" "$APPDIR/Reports.swift" \
     "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" "$APPDIR/ProfileSettings.swift" \
-    "$APPDIR/ModelProgress.swift" "$APPDIR/Diagnostics.swift" "$APPDIR/HealthExport.swift" "$APPDIR/DayExport.swift" "$APPDIR/WorkCoordinator.swift" "$BUILD/CrashCatch.o" \
+    "$APPDIR/ModelProgress.swift" "$APPDIR/Diagnostics.swift" "$APPDIR/HealthExport.swift" "$APPDIR/DayExport.swift" "$APPDIR/WorkCoordinator.swift" \
+    "$APPDIR/HeartRate.swift" "$APPDIR/RawData.swift" "$BUILD/CrashCatch.o" \
     -L "$XCF" -loura_core -lsqlite3 \
     -o "$APP/OuraApp"
 # Xcode expands $(PRODUCT_BUNDLE_IDENTIFIER) at build time; the raw-swiftc path doesn't,
@@ -35,12 +36,19 @@ xcrun -sdk iphonesimulator swiftc \
 # and `simctl launch $BUNDLE_ID` fails with "returned nil" (FBSOpenApplication code 4).
 cp "$APPDIR/Info.plist" "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP/Info.plist"
+VER=$(sed -n 's/^ *MARKETING_VERSION: *"\(.*\)"/\1/p' "$APPDIR/project.yml")
+BUILDNO=$(sed -n 's/^ *CURRENT_PROJECT_VERSION: *"\(.*\)"/\1/p' "$APPDIR/project.yml")
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VER:-0}" "$APP/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILDNO:-0}" "$APP/Info.plist"
 
 echo "==> bundle oura.db (real synced data)"
 # the store runs in WAL mode; fold any -wal pages back in so the single-file copy
 # isn't missing the most recent rows
 sqlite3 "$REPO/oura.db" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
 cp "$REPO/oura.db" "$APP/oura.db"
+# the app bundle is read-only on device; a WAL-mode file there cannot be opened
+# (needs a -shm next to it), so the bundled seed must use the rollback journal
+sqlite3 "$APP/oura.db" "PRAGMA journal_mode=DELETE;" >/dev/null
 
 echo "==> boot + install + launch + screenshot"
 xcrun simctl boot "$DEV" 2>/dev/null || true

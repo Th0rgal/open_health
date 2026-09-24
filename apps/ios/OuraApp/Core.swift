@@ -62,10 +62,12 @@ enum Core {
         let secs = TimeZone.current.secondsFromGMT()
         let tzOffset = Int64((Double(secs) / 3600).rounded())
         let json = summaryJson(dbPath: path, tzOffset: tzOffset)
-        guard let data = json.data(using: .utf8),
-              let s = try? JSONDecoder().decode(Summary.self, from: data)
-        else { return Summary(error: "decode failed") }
-        return s
+        guard let data = json.data(using: .utf8) else { return Summary(error: "decode failed") }
+        do { return try JSONDecoder().decode(Summary.self, from: data) }
+        catch {
+            dlog("core", "summary decode failed: \(error) json=\(json.prefix(300))")
+            return Summary(error: "decode failed")
+        }
     }
 
     #if TORCH
@@ -176,7 +178,7 @@ enum Core {
 
         // One shared read: one failure point, one lock-contention window, and the
         // RingClock epoch recovery is paid once instead of once per model.
-        progress("Reading saved ring data…")
+        progress("Reading ring data")
         var events = EventStore.Events(path: DB.readPath())
         var readErr: String?
         do {
