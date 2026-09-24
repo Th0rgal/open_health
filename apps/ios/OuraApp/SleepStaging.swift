@@ -81,7 +81,7 @@ enum SleepStaging {
         }
         for (index, night) in pending.enumerated() {
             let key = night.key, fp = night.fp, inputs = night.inputs
-            progress("Analyzing sleep · night \(index + 1) of \(pending.count)")
+            progress(pending.count > 1 ? "Analyzing sleep \(index + 1)/\(pending.count)" : "Analyzing sleep")
             guard !AnalysisRun.cancelled else { return ([:], "analysis paused") }
             guard let stages = stageNight(inputs, modelPath: modelPath) else { return (result, "sleep inference failed") }
             // A manual refresh with insufficient data must not erase a useful

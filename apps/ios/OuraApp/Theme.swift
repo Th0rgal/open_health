@@ -100,6 +100,14 @@ struct ObsTag: View {
     }
 }
 
+/// Hairline between home sections — the thomas.md rule, with air on both sides.
+struct ObsRule: View {
+    var body: some View {
+        Rectangle().fill(Obs.rule).frame(height: 1)
+            .padding(.top, 6).padding(.bottom, 2)
+    }
+}
+
 struct ObsCard: ViewModifier {
     var padding: CGFloat = 18
     var radius: CGFloat = 10

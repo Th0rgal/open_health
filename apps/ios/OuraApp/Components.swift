@@ -118,7 +118,7 @@ struct Sparkline: View {
                          with: .color(accent.opacity(isLatest ? 0.90 : 0.52)))
             }
         }
-        .frame(height: 30)
+        .frame(height: 22)
         .accessibilityHidden(true)
     }
 }

@@ -223,7 +223,7 @@ enum ActivityModel {
                 if recomputed > 0 { ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: cache) }
                 return ([], "analysis interrupted")
             }
-            progress(onlyDay == nil ? "Analyzing activity · day \(index + 1) of \(pending.count)" : "Refreshing activity analysis…")
+            progress(onlyDay != nil ? "Refreshing activity" : pending.count > 1 ? "Analyzing activity \(index + 1)/\(pending.count)" : "Analyzing activity")
             var daySessions: [WorkoutSession] = []
             var failed = false
             if isDegenerate(day.inputs) {

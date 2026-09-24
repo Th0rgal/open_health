@@ -486,14 +486,14 @@ struct SleepDebtCard: View {
                     Text(debtStateCopy(debt.state)).font(Obs.prose(14)).foregroundStyle(Obs.ink2)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Text("\(debt.valid_days) of 5 days available").font(Obs.mono(18, .medium)).foregroundStyle(Obs.ink)
-                    Text("5 days of sleep data are needed within the past 2 weeks.")
-                        .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                    Text("\(debt.valid_days) of 5 nights").font(Obs.mono(14, .medium)).foregroundStyle(Obs.ink2)
+                    Text("Needs 5 nights of sleep in the past 2 weeks.")
+                        .font(Obs.mono(11)).foregroundStyle(Obs.muted)
                 }
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain).obsCard()
+        .buttonStyle(.plain)
     }
 }
 
@@ -611,16 +611,16 @@ struct IllnessCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Symptom radar").font(.headline).foregroundStyle(Obs.ink)
+                ObsTag("symptom radar", icon: "waveform.path.ecg")
                 Spacer(minLength: 12)
-                Text(illness.date).font(.caption).foregroundStyle(Obs.muted)
+                Text(illness.date).font(Obs.mono(10)).foregroundStyle(Obs.ink2)
             }
             VStack(alignment: .leading, spacing: 8) {
                 Label(illness.available ? status : "Getting to know you",
                       systemImage: illness.available ? (illness.trafficLight == "NO_SIGNS" ? "checkmark.circle" : "waveform.path.ecg") : "moon")
-                    .font(.title3.weight(.medium))
+                    .font(Obs.mono(18, .medium))
                     .foregroundStyle(illness.available ? tint : Obs.ink2)
-                Text(explanation).font(.subheadline).foregroundStyle(Obs.ink2)
+                Text(explanation).font(Obs.prose(14)).foregroundStyle(Obs.ink2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if illness.available {
@@ -635,9 +635,9 @@ struct IllnessCard: View {
                         Image(systemName: showDetails ? "chevron.up" : "chevron.down")
                             .font(.caption.weight(.semibold))
                     }
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Obs.ink2)
-                    .frame(minHeight: 44)
+                    .font(Obs.mono(12, .medium))
+                    .foregroundStyle(Obs.ink)
+                    .frame(minHeight: 32)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -668,7 +668,6 @@ struct IllnessCard: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .obsCard(padding: 20, radius: 16)
     }
 }
 
