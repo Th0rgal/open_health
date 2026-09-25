@@ -259,7 +259,11 @@ The ring can close a raw `bedtime_period` during a brief awakening even though s
 continues. `oura-summary::normalize_bed_periods` repairs the model boundary in two stages:
 
 - explicit sleep-only ACM, temperature, and SpO₂ packets can extend a raw end by up to
-  three hours;
+  three hours, but only while they keep coming: the extension walks them in time order
+  and stops at the first silence over 30 minutes (`MAX_SLEEP_SUPPORT_GAP_DS`). A Ring 4
+  reports no `sleep_state`, so without this a 20-minute still spell 2.5 hours after
+  waking — resting SpO₂/temperature packets — was joined onto the night (a 09:03 wake
+  shown as 11:51);
 - when a long sleep already has at least 30 minutes of that explicit premature-end
   evidence, continuous accepted HR/IBI bursts may carry the candidate window farther.
 
