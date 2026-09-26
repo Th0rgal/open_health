@@ -14,7 +14,7 @@ use std::time::SystemTime;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use oura_summary::{feature_modes_path, profile_path, ModelInputs, ModelOutputs, ModelRunner};
@@ -409,6 +409,7 @@ async fn handle(
         (method, path),
         ("POST", "/api/profile")
             | ("POST", "/api/sync")
+            | ("POST", "/api/live-hr")
             | ("POST", "/api/feature")
             | ("POST", "/api/ring-key")
             | ("GET", "/api/ring-key")
@@ -569,6 +570,21 @@ async fn handle(
                 Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
             }
         }
+        ("GET", "/api/hourly-hr") => {
+            // HR bars per `minutes` slot (default hourly, the iOS HeartRate screen's
+            // data); `days` = 0 → all of them, the day page picks out the day it shows
+            let days = query_param(query, "days").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let minutes = query_param(query, "minutes").and_then(|v| v.parse().ok()).unwrap_or(60);
+            let body = tokio::task::spawn_blocking(move || {
+                oura_summary::hourly_hr::hr_bins(&db, tz, days, minutes)
+            })
+            .await
+            .map_err(|e| anyhow!(e))?;
+            match body {
+                Ok(v) => json_resp(&mut sock, &v).await,
+                Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
+            }
+        }
         ("GET", "/api/profile") => json_resp(&mut sock, &read_profile(&db).to_json()).await,
         ("POST", "/api/profile") => {
             match serde_json::from_str::<Value>(body.trim_end_matches('\0')) {
@@ -604,6 +620,7 @@ async fn handle(
             };
             json_resp(&mut sock, &v).await
         }
+        ("POST", "/api/live-hr") => live_hr(&mut sock, &db, &name, key_file.as_deref()).await,
         ("POST", "/api/feature") => {
             let req =
                 serde_json::from_str::<Value>(body.trim_end_matches('\0')).unwrap_or(Value::Null);
@@ -673,6 +690,91 @@ fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
     Err(anyhow!("{last}"))
+}
+
+/// How long one dashboard live heart-rate session streams (the page can stop it early).
+const LIVE_HR_SECONDS: u64 = 60;
+
+/// Stream live heart rate as newline-delimited JSON while our own `live-hr`
+/// subcommand runs (BLE stays in the CLI, as for sync). Lines: `{"status":"live"}`
+/// once connected, `{"bpm":..,"ibi_ms":..}` per beat, then `{"done":true}` or
+/// `{"error":".."}`; the body ends with the connection. If the page stops early the
+/// child is killed, and the ring leaves live mode on its own within ~20 s.
+async fn live_hr(
+    sock: &mut TcpStream,
+    db: &Path,
+    name: &str,
+    key_file: Option<&Path>,
+) -> Result<()> {
+    sock.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+    )
+    .await?;
+    let (mut rd, mut wr) = sock.split();
+    let Some(key_file) = key_file else {
+        let msg = "live heart rate needs the ring's auth key: start the dashboard with --key-file";
+        return send_line(&mut wr, &json!({ "error": msg })).await;
+    };
+    let exe = std::env::current_exe().context("locating oura binary")?;
+    let mut child = tokio::process::Command::new(&exe)
+        .arg("--db")
+        .arg(db)
+        .arg("--name")
+        .arg(name)
+        .arg("--scan-timeout")
+        .arg("120") // a worn ring advertises only in sparse bursts
+        .arg("--key-file")
+        .arg(key_file)
+        .arg("live-hr")
+        .arg("--seconds")
+        .arg(LIVE_HR_SECONDS.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("running `oura live-hr`")?;
+    let mut lines = tokio::io::BufReader::new(child.stdout.take().context("child stdout")?).lines();
+    let mut probe = [0u8; 1];
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                let Some(line) = line? else { break };
+                let msg = if line.starts_with("Streaming live heart rate") {
+                    json!({ "status": "live" })
+                } else if let Some((bpm, ibi_ms)) = parse_beat_line(&line) {
+                    json!({ "bpm": bpm, "ibi_ms": ibi_ms })
+                } else {
+                    continue;
+                };
+                send_line(&mut wr, &msg).await?;
+            }
+            // the page stopped or went away: dropping `child` kills it
+            n = rd.read(&mut probe) => if matches!(n, Ok(0) | Err(_)) { return Ok(()) },
+        }
+    }
+    let ok = child.wait().await?.success();
+    let mut stderr = String::new();
+    if let Some(mut e) = child.stderr.take() {
+        let _ = e.read_to_string(&mut stderr).await;
+    }
+    let last = if ok {
+        json!({ "done": true })
+    } else {
+        let msg = stderr.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("live heart rate failed");
+        json!({ "error": msg.trim() })
+    };
+    send_line(&mut wr, &last).await
+}
+
+async fn send_line(wr: &mut (impl AsyncWriteExt + Unpin), v: &Value) -> Result<()> {
+    wr.write_all(format!("{v}\n").as_bytes()).await?;
+    Ok(())
+}
+
+/// Parse one `oura live-hr` beat line, e.g. `  81 bpm (IBI 733 ms)`.
+fn parse_beat_line(line: &str) -> Option<(u16, u16)> {
+    let (bpm, ibi) = line.trim().strip_suffix(" ms)")?.split_once(" bpm (IBI ")?;
+    Some((bpm.parse().ok()?, ibi.parse().ok()?))
 }
 
 /// Toggle an on-ring feature via our `feature-mode` subcommand (BLE, auth-gated).
@@ -758,4 +860,23 @@ fn run_feature(
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
     Err(anyhow!("{last}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_live_hr_beat_lines() {
+        // the exact lines `oura live-hr` prints (cmd_live_hr in main.rs)
+        assert_eq!(parse_beat_line("  81 bpm (IBI 733 ms)"), Some((81, 733)));
+        assert_eq!(
+            parse_beat_line("Streaming live heart rate for 60s (Ctrl-C to stop early)..."),
+            None
+        );
+        assert_eq!(
+            parse_beat_line("No beats captured. Make sure the ring is worn."),
+            None
+        );
+    }
 }
