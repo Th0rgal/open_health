@@ -583,6 +583,30 @@ body.page-open { overflow: hidden; }
 .sd-need { stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 6 6; vector-effect: non-scaling-stroke; }
 .sd-axis { display: flex; justify-content: space-between; font: 10px var(--mono); color: var(--faint); margin: 6px 0 24px; }
 
+/* device panel: the ring's battery level over the days it has readings for */
+.batt-chart { margin-top: var(--s5); }
+.batt-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s2); }
+.batt-chart .subhead { margin: 0 0 8px; }
+.batt-readout {
+  font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11px; color: var(--muted);
+}
+.batt-plot { position: relative; height: 40px; padding-right: 30px; touch-action: pan-y; }
+.batt-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.batt-max, .batt-min {
+  position: absolute; right: 0; font-style: normal;
+  font-family: var(--mono); font-size: 10px; color: var(--faint); font-variant-numeric: tabular-nums;
+}
+.batt-max { top: -5px; }
+.batt-min { bottom: -5px; }
+.batt-line { fill: none; stroke: var(--muted); stroke-width: 1.4; vector-effect: non-scaling-stroke; }
+.batt-line.up { stroke: var(--accent); stroke-width: 2; } /* charging */
+.batt-grid { stroke: var(--line-soft); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.batt-cursor { stroke: var(--accent); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.batt-foot {
+  display: flex; justify-content: space-between; margin-top: 6px;
+  font-family: var(--mono); font-size: 10px; color: var(--faint);
+}
+
 /* hour axis under the "Your day" heart-rate strip */
 .met-axis { position: relative; height: 16px; margin-top: 4px; }
 .met-axis span { position: absolute; transform: translateX(-50%); font-family: var(--mono); font-size: 10px; color: var(--faint); }

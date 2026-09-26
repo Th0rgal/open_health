@@ -418,6 +418,8 @@ const MIN_LONG_SLEEP_DS: i64 = 3 * 60 * 60 * 10;
 /// A run of nocturnal-only events shorter than this is not called a night on its own.
 const MIN_DERIVED_BED_DS: i64 = 60 * 60 * 10;
 const MIN_PREMATURE_END_EVIDENCE_DS: i64 = 30 * 60 * 10;
+/// How much battery history the summary carries (see `battery_history`).
+const BATTERY_HISTORY_DAYS: i64 = 14;
 /// Longest silence in the sleep streams that still carries a night past the ring's own
 /// bedtime end. A real Ring 4 night never paused them for more than 6.5 min; a still
 /// spell 2.5 h after waking (resting SpO2/temperature packets) must not join the night.
@@ -1192,6 +1194,20 @@ fn downsample_mean(v: &[f64], n: usize) -> Vec<f64> {
             slice.iter().sum::<f64>() / slice.len() as f64
         })
         .collect()
+}
+
+/// `[unix_s, percent]` battery readings, oldest first, limited to the `days` before the
+/// newest one so the payload can't grow without bound. The ring reports a level roughly
+/// every 10-60 min (`debug_data.battery_level_changed`), so a fortnight is a few hundred
+/// points. Charging shows as the percentage rising; no flag is needed to see it.
+fn battery_history(readings: &[(f64, i64)], days: i64) -> Vec<[f64; 2]> {
+    let mut out: Vec<[f64; 2]> = readings.iter().map(|&(at, pct)| [at, pct as f64]).collect();
+    out.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    if let Some(newest) = out.last().map(|p| p[0]) {
+        let cut = newest - (days * 86_400) as f64;
+        out.retain(|p| p[0] >= cut);
+    }
+    out
 }
 
 /// Time-true `[unix_s, value]` points for a night lane: the `(time_ds, value)` samples
@@ -2028,11 +2044,15 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         insight("Stress / resilience", false, "needs cloud scores"),
     ]);
     let mut battery: Option<(i64, i64)> = None;
-    for (_ds, tag, jstr, _) in &events {
+    let mut battery_readings: Vec<(f64, i64)> = Vec::new();
+    for (ds, tag, jstr, cu) in &events {
         if name_of(*tag) == "debug_data" && jstr.contains("battery_pct") {
             if let Ok(v) = serde_json::from_str::<Value>(jstr) {
                 if let Some(p) = v["battery_pct"].as_i64() {
                     battery = Some((p, v["voltage_mv"].as_i64().unwrap_or(0)));
+                    if (0..=100).contains(&p) && is_dated(*ds, *cu) {
+                        battery_readings.push((unix_s_at(*ds, *cu), p));
+                    }
                 }
             }
         }
@@ -2060,6 +2080,8 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         "nights": nights.len(),
         "battery_pct": battery.map(|b| b.0),
         "battery_v": battery.map(|b| (b.1 as f64 / 1000.0 * 100.0).round() / 100.0),
+        // [unix_s, percent] readings for the battery chart; see `battery_history`
+        "battery_history": battery_history(&battery_readings, BATTERY_HISTORY_DAYS),
         "measuring": measuring,
         "streams": streams,
         "event_counts": event_counts,
@@ -2116,6 +2138,18 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn battery_history_is_time_ordered_and_windowed() {
+        let day = 86_400.0;
+        // readings across three days, deliberately out of order
+        let mut raw = vec![(3.0 * day, 70), (1.0 * day, 90), (2.0 * day, 80), (3.0 * day + 60.0, 71)];
+        raw.reverse();
+        let got = battery_history(&raw, 2);
+        // windowed to the last 2 days from the newest reading, oldest first
+        assert_eq!(got, vec![[2.0 * day, 80.0], [3.0 * day, 70.0], [3.0 * day + 60.0, 71.0]]);
+        assert!(battery_history(&[], 14).is_empty());
+    }
 
     #[test]
     fn timed_series_keeps_real_times_and_gaps() {

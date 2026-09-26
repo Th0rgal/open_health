@@ -19,6 +19,7 @@ const cap = (s) => esc(s).replace(/^./, (c) => c.toUpperCase());
 const kfmt = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(Math.round(n)));
 
 let CURRENT_PROFILE = null;
+let CURRENT_TZ = 0; // whole hours from UTC, as the summary reports it
 let LAST_DEVICE_SERIAL = null;
 
 // ── local dashboard fetch helpers ──────────────────────────────────────────
@@ -1314,6 +1315,71 @@ async function doFeature(feature, name, currentOn, row) {
   row.classList.remove("busy");
 }
 
+// The ring's own battery readings (device.battery_history, [unix, percent]) over the
+// days they span. Stretches where the level rises are it charging, which the readings
+// show on their own — the event's two flag bytes aren't decoded, so nothing here
+// depends on guessing what they mean.
+function batteryChart(pts) {
+  if (pts.length < 2) return null;
+  const wrap = el("div", "batt-chart");
+  const head = el("div", "batt-head");
+  head.append(el("p", "subhead", "Battery"));
+  const readout = el("span", "batt-readout");
+  head.append(readout);
+  wrap.append(head);
+
+  const W = 100, H = 40, t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+  const span = Math.max(1, t1 - t0);
+  // A full battery is the top of the scale, but the bottom follows the data: a ring
+  // that has only been 80-100% draws as a flat line against a 0-100 axis. Both ends
+  // are labelled so a zoomed axis can't read as a bigger swing than it is.
+  const lo = Math.max(0, Math.floor(Math.min(...pts.map((p) => p[1])) / 10) * 10 - 5), hi = 100;
+  const x = (t) => ((t - t0) / span) * W, y = (p) => H - ((p - lo) / (hi - lo)) * H;
+  // one path per run of the same direction, so charging can be drawn differently
+  const segs = [];
+  for (let i = 1; i < pts.length; i++) {
+    const up = pts[i][1] > pts[i - 1][1];
+    if (!segs.length || segs[segs.length - 1].up !== up) segs.push({ up, pts: [pts[i - 1]] });
+    segs[segs.length - 1].pts.push(pts[i]);
+  }
+  const line = (s) => `<path class="batt-line${s.up ? " up" : ""}" d="${s.pts.map((p, i) => `${i ? "L" : "M"}${x(p[0]).toFixed(2)} ${y(p[1]).toFixed(2)}`).join(" ")}"/>`;
+  let grid = "";
+  for (let v = Math.ceil((lo + 1) / 10) * 10; v < hi; v += 10)
+    grid += `<line class="batt-grid" x1="0" x2="${W}" y1="${y(v).toFixed(2)}" y2="${y(v).toFixed(2)}"/>`;
+  const plot = el("div", "batt-plot",
+    `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${segs.map(line).join("")}` +
+    `<line class="batt-cursor" x1="0" x2="0" y1="0" y2="${H}" style="display:none"/></svg>` +
+    `<i class="batt-max">${hi}%</i><i class="batt-min">${lo}%</i>`);
+  wrap.append(plot);
+
+  const days = Math.max(1, Math.round((t1 - t0) / 86400));
+  const foot = el("div", "batt-foot");
+  foot.append(el("span", "", `${dayTitle(ymdOf(t0, d0TZ()))} → now`), el("span", "", `${days} day${days === 1 ? "" : "s"}`));
+  wrap.append(foot);
+
+  const cursor = plot.querySelector(".batt-cursor");
+  const at = (e) => {
+    const r = plot.getBoundingClientRect();
+    const t = t0 + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * span;
+    const p = pts.reduce((a, b) => (Math.abs(b[0] - t) < Math.abs(a[0] - t) ? b : a));
+    cursor.setAttribute("x1", x(p[0]).toFixed(2));
+    cursor.setAttribute("x2", x(p[0]).toFixed(2));
+    cursor.style.display = "";
+    readout.textContent = `${hhmmOf(p[0])} · ${Math.round(p[1])}%`;
+  };
+  plot.addEventListener("pointermove", at);
+  plot.addEventListener("pointerdown", at);
+  plot.addEventListener("pointerleave", () => { cursor.style.display = "none"; readout.textContent = ""; });
+  return wrap;
+}
+// local-clock helpers for the battery chart's labels (the summary's tz offset)
+const d0TZ = () => (CURRENT_TZ || 0);
+const ymdOf = (unix, tz) => new Date((unix + tz * 3600) * 1000).toISOString().slice(0, 10);
+const hhmmOf = (unix) => {
+  const s = new Date((unix + d0TZ() * 3600) * 1000).toISOString();
+  return `${s.slice(5, 10).replace("-", "/")} ${s.slice(11, 16)}`;
+};
+
 function renderDevice(d) {
   const box = $("device");
   const dev = d.device || {};
@@ -1330,6 +1396,8 @@ function renderDevice(d) {
   stats.append(stat("History", num(dev.days_of_data), " days"));
   stats.append(stat("Events", (dev.total_events || 0).toLocaleString()));
   box.append(stats);
+  const battery = batteryChart(dev.battery_history || []);
+  if (battery) box.append(battery);
 
   // left = data streams (what the ring is recording)
   const left = el("div");
@@ -1937,6 +2005,7 @@ async function load() {
     return;
   }
   CURRENT_PROFILE = d.profile || null;
+  CURRENT_TZ = d.tz || 0;
   LAST_DEVICE_SERIAL = d.device && d.device.serial;
   $("digest").classList.remove("skeleton", "skeleton-text");
   $("digest").classList.add("reveal");
