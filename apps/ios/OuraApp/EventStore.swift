@@ -136,6 +136,8 @@ enum EventStore {
         var captureMax: Int64
         var fallbackAnchorUnix: Int64
         var anchors: [(ds: Int64, unix: Int64)]
+        // `ring_start` ds values: where a stalled (brownout) counter lost its time.
+        var boots: [Int64] = []
     }
 
     /// Immutable clock mapping shared by the on-device models. Epoch construction and
@@ -188,6 +190,7 @@ enum EventStore {
                                        captureMin: event.cu, captureMax: event.cu,
                                        fallbackAnchorUnix: event.cu, anchors: anchors))
                 }
+                if event.tag == 0x41 { built[built.count - 1].boots.append(event.ds) }
             }
             for index in built.indices { built[index].anchors.sort { $0.ds < $1.ds } }
             epochs = built
@@ -255,6 +258,10 @@ enum EventStore {
                 case .stalled(let before, let after):
                     let late = Double(after.unix) - Double(after.ds - ds) / 10.0
                     let early = Double(before.unix) + Double(ds - before.ds) / 10.0
+                    // A ring_start between the anchors marks the stall exactly.
+                    if let boot = epoch.boots.filter({ $0 > before.ds && $0 <= after.ds }).max() {
+                        return (ds >= boot ? late : early, .anchor)
+                    }
                     let plausible = capturedUnix.map { late <= Double($0 + Self.futureSlackSeconds) } ?? true
                     return (plausible ? late : early, .anchor)
                 case .consistent:
