@@ -915,6 +915,14 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
         next_cursor
     );
 
+    // Same anchor the iOS sync writes (oura-core `phone_anchor_event`): without it a
+    // CLI-synced DB has no wall-clock point on the near side of a battery brownout.
+    if let Some(anchor) = phone_anchor_event(events_synced, next_cursor) {
+        if let Err(e) = store.insert_event(&serial, &anchor) {
+            eprintln!("  … phone anchor not saved: {e}");
+        }
+    }
+
     // While connected + authed, snapshot the real on-ring feature modes so the
     // dashboard can show actual on/off (not just "events seen recently"). Best-effort:
     // written next to the DB as feature_modes.json; a read failure never fails the sync.
@@ -941,6 +949,27 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
 
     let _ = client.transport().disconnect().await;
     Ok(())
+}
+
+/// A synthetic `time_sync` (0x42) row pairing the newest drained ring timestamp with
+/// the host clock; body and decoded shape match oura-core's phone anchor.
+fn phone_anchor_event(events_synced: u32, next_cursor: u32) -> Option<oura_protocol::events::RingEvent> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u32::try_from(d.as_secs()).ok())?;
+    if events_synced == 0 || next_cursor == 0 {
+        return None;
+    }
+    let mut body = now.to_le_bytes().to_vec();
+    body.extend_from_slice(b"phone");
+    Some(oura_protocol::events::RingEvent {
+        tag: 0x42,
+        name: oura_protocol::events::event_name(0x42),
+        timestamp: next_cursor - 1,
+        body,
+        decoded: Some(serde_json::json!({ "unix_time": now, "source": "phone" })),
+    })
 }
 
 async fn cmd_latest(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {
