@@ -1380,7 +1380,7 @@ async fn rdata_sweep(client: &OuraClient<BleTransport>) -> Result<()> {
     let (_, idle) = client.rdata_state().await?;
     println!("baseline idle status = {idle}\n");
     for (label, types, start, cur) in variants {
-        let (csub, cst) = client.rdata_configure(types, *start, *cur).await?;
+        let (csub, cst) = client.rdata_configure(*types, *start, *cur).await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
         let (ssub, sst) = client.rdata_state().await?;
         let engaged = sst != idle;
