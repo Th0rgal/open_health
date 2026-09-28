@@ -16,7 +16,7 @@ oura-link = { git = "https://github.com/Th0rgal/open_oura", rev = "bd2f1508fbd57
 oura-store = { git = "https://github.com/Th0rgal/open_oura", rev = "bd2f1508fbd571b7742b56c0bfd32d8f16e29585" }
 oura-summary = { path = "../oura-summary" }
 oura-dna = { path = "../oura-dna" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 hex = "0.4"
