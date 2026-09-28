@@ -333,6 +333,49 @@ final class StabilityTests: XCTestCase {
         XCTAssertNotEqual(reloaded["result"]?.fp, "day-2")   // a miss is a compare, not a discard
     }
 
+    func testModelCacheRestoresAnEarlierGlobalKey() {
+        // Travelling out of a timezone and back must not recompute the history twice.
+        let file = "test-gen-\(UUID().uuidString).json"
+        let cacheURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(file)
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+        func entry(_ fp: String) -> [String: FingerprintedEntry<CvaModel.Result>] {
+            ["result": FingerprintedEntry(fp: fp, value: CvaModel.Result(vascularAge: 30, pwv: 6, segments: 10))]
+        }
+        ModelCacheStore.save(file, globalKey: "home", entries: entry("home"), keepGenerations: true)
+        ModelCacheStore.save(file, globalKey: "away", entries: entry("away"), keepGenerations: true)
+        var loaded: [String: FingerprintedEntry<CvaModel.Result>] = ModelCacheStore.load(file, globalKey: "home")
+        XCTAssertEqual(loaded["result"]?.fp, "home")
+        loaded = ModelCacheStore.load(file, globalKey: "away")
+        XCTAssertEqual(loaded["result"]?.fp, "away")
+        // Only the most recent generations are kept.
+        for key in ["a", "b", "c"] {
+            ModelCacheStore.save(file, globalKey: key, entries: entry(key), keepGenerations: true)
+        }
+        loaded = ModelCacheStore.load(file, globalKey: "home")
+        XCTAssertTrue(loaded.isEmpty)
+        loaded = ModelCacheStore.load(file, globalKey: "a")
+        XCTAssertEqual(loaded["result"]?.fp, "a")
+        // Files saved without generations (timezone-free keys) keep only the current one.
+        ModelCacheStore.save(file, globalKey: "d", entries: entry("d"))
+        loaded = ModelCacheStore.load(file, globalKey: "c")
+        XCTAssertTrue(loaded.isEmpty)
+        XCTAssertNotEqual(ModelCacheStore.globalKey(profile: nil),
+                          ModelCacheStore.globalKey(profile: nil, timezone: false))
+    }
+
+    func testRawDataChartThinsLongSeriesButKeepsExtremes() {
+        let values: [Double] = (0..<10_000).map { Double($0 % 100) } + [500, -500]
+        let event = RawData.Event(name: "x", tag: 1, ringTimestamp: 0, capturedUnix: 0, unix: 1_000,
+                                  bodyLen: 0, decoded: ["v": values])
+        let points = RawData.points([event], field: "v")
+        XCTAssertLessThanOrEqual(points.count, 2_000)
+        XCTAssertEqual(points.map(\.v).max(), 500)
+        XCTAssertEqual(points.map(\.v).min(), -500)
+        XCTAssertEqual(points.map(\.t), points.map(\.t).sorted())
+        XCTAssertEqual(RawData.points([event], field: "v", maxPoints: 20_000).count, values.count)
+    }
+
     /// Parity harness: with `OURA_DUMP_DAY=YYYY-MM-DD` and `OURA_DUMP_PATH` set, writes the
     /// bundled seed DB's exact model inputs for that day so tools/ can diff them against
     /// the Python runner. Skipped otherwise.

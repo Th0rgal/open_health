@@ -139,10 +139,16 @@ fn raw_events(db_path: &str, name_filter: &str, limit: u32) -> Result<serde_json
         }
     }
 
+    // The type list alone needs no clock and no rows: skip the history scan below.
+    if limit == 0 {
+        return Ok(json!({ "counts": counts, "events": [] }));
+    }
+
     // The clock needs the WHOLE decoded history to find boot epochs and their
     // time_sync anchors — resolving against a filtered slice would misdate events.
-    let store = oura_store::storage::Store::open_read_only(db_path).map_err(|e| e.to_string())?;
-    let all = store.decoded_events().map_err(|e| e.to_string())?;
+    // Only the anchor tags' JSON is read; loading every decoded body made each
+    // screen of the raw-data browser parse the entire archive.
+    let all = clock_rows(&conn)?;
     let clock = oura_summary::ring_time::RingClock::from_events(&all);
 
     let filtered = !name_filter.trim().is_empty();
@@ -177,6 +183,31 @@ fn raw_events(db_path: &str, name_filter: &str, limit: u32) -> Result<serde_json
     }
 
     Ok(json!({ "counts": counts, "events": events }))
+}
+
+/// `Store::decoded_events` order and shape, with JSON only for the time anchors
+/// (`0x42` time_sync, `0x85` RTC beacon) — the only bodies `RingClock` parses.
+fn clock_rows(conn: &rusqlite::Connection) -> Result<Vec<(i64, u8, String, i64)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT ring_timestamp, tag, \
+                    CASE WHEN tag IN (66, 133) THEN decoded_json ELSE '' END, captured_unix \
+             FROM events WHERE decoded_json IS NOT NULL ORDER BY captured_unix, id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)? as u8,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
 }
 
 /// A lightweight, model-free summary (device + data-health only) — kept as a fast
@@ -995,6 +1026,55 @@ mod raw_event_tests {
         let out = events_json("/nonexistent/oura.db".into(), String::new(), 10);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("error").is_some(), "{out}");
+    }
+
+    #[test]
+    fn raw_events_clock_matches_the_full_history_clock() {
+        let dir = std::env::temp_dir().join(format!("oura-core-clock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("oura.db");
+        let _ = std::fs::remove_file(&db);
+        drop(oura_store::storage::Store::open(db.to_str().unwrap()).unwrap());
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        // Two boots: a time_sync anchor in the first, an RTC beacon in the second,
+        // and plain rows (with JSON the light query must not need) around them.
+        let rows: [(i64, i64, &str, &str, i64); 6] = [
+            (0x42, 20_000, "time_sync_ind", r#"{"unix_time":1782939604}"#, 1_783_000_000),
+            (0x60, 25_000, "ibi_event", r#"{"ibi_ms":[800,810]}"#, 1_783_000_000),
+            (0x46, 30_000, "temp_event", r#"{"temps_c":[34.5]}"#, 1_783_000_100),
+            (0x60, 1_000, "ibi_event", r#"{"ibi_ms":[790]}"#, 1_783_100_000),
+            (0x85, 2_000, "rtc_beacon", r#"{"unix_time":1783099000}"#, 1_783_100_000),
+            (0x46, 9_000, "temp_event", r#"{"temps_c":[35.0]}"#, 1_783_100_050),
+        ];
+        for (tag, ds, name, json, cu) in rows {
+            conn.execute(
+                "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix) \
+                 VALUES ('S1', ?1, ?2, ?3, X'00', ?4, ?5)",
+                rusqlite::params![tag, name, ds, json, cu],
+            )
+            .unwrap();
+        }
+        let full = oura_store::storage::Store::open_read_only(db.to_str().unwrap())
+            .unwrap()
+            .decoded_events()
+            .unwrap();
+        let light = clock_rows(&conn).unwrap();
+        assert_eq!(full.len(), light.len());
+        let a = oura_summary::ring_time::RingClock::from_events(&full);
+        let b = oura_summary::ring_time::RingClock::from_events(&light);
+        for (ds, _, _, cu) in &full {
+            assert_eq!(a.unix_s(*ds, *cu), b.unix_s(*ds, *cu), "ds={ds} cu={cu}");
+        }
+
+        // The type list alone (limit 0) returns counts without any rows.
+        let out = events_json(db.to_str().unwrap().into(), String::new(), 0);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["counts"].as_array().unwrap().len(), 4, "{out}");
+        assert_eq!(v["events"].as_array().unwrap().len(), 0, "{out}");
+        let out = events_json(db.to_str().unwrap().into(), "temp_event".into(), 10);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["events"].as_array().unwrap().len(), 2, "{out}");
+        let _ = std::fs::remove_file(&db);
     }
 
     #[test]

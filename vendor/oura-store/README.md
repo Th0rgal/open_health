@@ -8,7 +8,8 @@ revision or relying on a sibling directory.
 
 Changes: system SQLite on iOS, read-only opening, mandatory WAL configuration,
 full durability, transactional batch/checkpoint commits, extended SQLite errors,
-streaming-query indexes, integrity checks, and regression tests.
+streaming-query indexes (including the partial `idx_events_decoded_tag` behind the
+iOS store digest), integrity checks, and regression tests.
 
 After these changes are published upstream, replace the patch with the published
 revision in the existing dependency pins and remove this directory. The protocol
