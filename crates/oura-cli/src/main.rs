@@ -22,6 +22,22 @@ mod motion_server;
 mod pyrunner;
 mod viz;
 
+/// Query the machine's local timezone offset in hours from UTC.
+fn local_tz_offset_hours() -> i64 {
+    #[cfg(unix)]
+    unsafe {
+        let mut now: libc::time_t = 0;
+        libc::time(&mut now);
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&now, &mut tm);
+        (tm.tm_gmtoff / 3600) as i64
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
 /// Read sleep/HR/activity signals straight from an Oura ring (Ring 3/4/5).
 #[derive(Parser, Debug)]
 #[command(name = "oura", version, about)]
@@ -131,7 +147,7 @@ enum Command {
     /// needs the Python venv with torch). Not a heuristic.
     Sessions {
         /// Timezone offset (hours from UTC) for displayed times.
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = local_tz_offset_hours())]
         tz_offset: i64,
         /// is_workout probability at/above which a segment is marked a workout.
         #[arg(long, default_value_t = 0.5)]
@@ -146,7 +162,7 @@ enum Command {
     /// Runs via tools/score_sleep.py (needs the Python venv with torch).
     SleepScore {
         /// Timezone offset (hours from UTC) for the bedtime clock.
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = local_tz_offset_hours())]
         tz_offset: i64,
         /// Trends CSV for calibration (default: auto-find ~/Desktop/oura_*trends.csv).
         #[arg(long)]
@@ -161,7 +177,7 @@ enum Command {
     /// contributors are provisional until ~14 days of history accrue.
     ReadinessScore {
         /// Timezone offset (hours from UTC) for the bedtime clock.
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = local_tz_offset_hours())]
         tz_offset: i64,
         /// Emit machine-readable JSON instead of a table.
         #[arg(long)]
@@ -197,7 +213,7 @@ enum Command {
         #[arg(long, default_value_t = 8090)]
         port: u16,
         /// Timezone offset (hours from UTC) for displayed times.
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = local_tz_offset_hours())]
         tz_offset: i64,
         /// Sex for the cardiovascular-age model: M | F | O.
         #[arg(long, default_value = "M")]
