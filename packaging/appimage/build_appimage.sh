@@ -5,8 +5,8 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 REPO_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 cd "$REPO_ROOT"
 
-echo "==> Building release binary for oura-cli..."
-cargo build --release -p oura-cli
+echo "==> Building release binary for oura-cli with native embedded webview..."
+cargo build --release --features appimage -p oura-cli
 
 BUILD_DIR="$REPO_ROOT/target/appimage"
 APPDIR="$BUILD_DIR/OpenHealth.AppDir"

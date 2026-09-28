@@ -17,6 +17,8 @@ mod blood;
 mod dashboard;
 mod dna;
 mod game;
+#[cfg(feature = "appimage")]
+mod gui;
 mod motion_server;
 mod pyrunner;
 mod viz;
@@ -54,6 +56,16 @@ fn local_tz_offset_hours() -> f64 {
             .filter(|h| h.is_finite() && (-24.0..=24.0).contains(h))
             .unwrap_or(0.0)
     }
+}
+
+/// Find an available TCP port starting from `start`.
+fn find_available_port(start: u16) -> u16 {
+    for port in start..start.saturating_add(50) {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    start
 }
 
 /// Read sleep/HR/activity signals straight from an Oura ring (Ring 3/4/5).
@@ -256,6 +268,9 @@ enum Command {
         /// Local HTTP port.
         #[arg(long, default_value_t = 8090)]
         port: u16,
+        /// Open in native embedded desktop window (no browser required).
+        #[arg(long)]
+        gui: bool,
         /// Timezone offset (hours from UTC) for displayed times.
         #[arg(long, default_value_t = local_tz_offset_hours(), value_parser = parse_tz_offset, allow_hyphen_values = true)]
         tz_offset: f64,
@@ -280,6 +295,34 @@ enum Command {
         /// Directory to scan for local blood report PDFs named `blood *.pdf`.
         /// Defaults to `~/Documents/official/health` when present; also settable
         /// via `$OURA_BLOOD_FILES`.
+        #[arg(long, value_name = "DIR")]
+        blood_files: Option<PathBuf>,
+    },
+    /// Launch the native Open Health desktop application.
+    #[cfg(feature = "appimage")]
+    App {
+        /// Local HTTP port.
+        #[arg(long, default_value_t = 8090)]
+        port: u16,
+        /// Timezone offset (hours from UTC) for displayed times.
+        #[arg(long, default_value_t = local_tz_offset_hours())]
+        tz_offset: i64,
+        /// Sex for the cardiovascular-age model: M | F | O.
+        #[arg(long, default_value = "M")]
+        sex: String,
+        /// Age (years) for the CVA model.
+        #[arg(long, default_value_t = 30.0)]
+        age: f64,
+        /// Height (meters) for the CVA model.
+        #[arg(long, default_value_t = 1.78)]
+        height: f64,
+        /// Weight (kg) for the CVA model.
+        #[arg(long, default_value_t = 75.0)]
+        weight: f64,
+        /// Directory to read genome `*.vcf.gz` files from for the /dna explorer.
+        #[arg(long, value_name = "DIR")]
+        dna_files: Option<PathBuf>,
+        /// Directory to scan for local blood report PDFs named `blood *.pdf`.
         #[arg(long, value_name = "DIR")]
         blood_files: Option<PathBuf>,
     },
@@ -498,6 +541,7 @@ async fn main() -> Result<()> {
         Command::FeatureStatus => cmd_feature_status(&cli, &key).await,
         Command::Dashboard {
             port,
+            gui,
             tz_offset,
             sex,
             age,
@@ -517,15 +561,82 @@ async fn main() -> Result<()> {
             dna::set_genomes_dir(dna_files.clone());
             // where the /blood explorer reads and caches local lab PDFs
             blood::set_files_dir(blood_files.clone());
-            dashboard::serve(
-                *port,
+
+            let bind_port = if *gui {
+                find_available_port(*port)
+            } else {
+                *port
+            };
+
+            let server = dashboard::serve(
+                bind_port,
                 cli.db.clone(),
                 *tz_offset,
                 cli.name.clone(),
                 cli.key_file.clone(),
                 seed,
-            )
-            .await
+            );
+
+            #[cfg(feature = "appimage")]
+            if *gui {
+                tokio::spawn(server);
+                let url = format!("http://127.0.0.1:{bind_port}");
+                for _ in 0..50 {
+                    if ureq::get(&url).call().is_ok() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                return gui::run(&url, "Open Health");
+            }
+
+            #[cfg(not(feature = "appimage"))]
+            if *gui {
+                return Err(anyhow!("CLI was compiled without GUI support (missing --features appimage)"));
+            }
+
+            server.await
+        }
+        #[cfg(feature = "appimage")]
+        Command::App {
+            port,
+            tz_offset,
+            sex,
+            age,
+            height,
+            weight,
+            dna_files,
+            blood_files,
+        } => {
+            let seed = dashboard::Demographics {
+                sex: sex.chars().next().unwrap_or('M').to_ascii_uppercase(),
+                age: *age,
+                height_m: *height,
+                weight_kg: *weight,
+                ring_size: 10.0,
+            };
+            dna::set_genomes_dir(dna_files.clone());
+            blood::set_files_dir(blood_files.clone());
+
+            let bind_port = find_available_port(*port);
+            let server = dashboard::serve(
+                bind_port,
+                cli.db.clone(),
+                *tz_offset,
+                cli.name.clone(),
+                cli.key_file.clone(),
+                seed,
+            );
+
+            tokio::spawn(server);
+            let url = format!("http://127.0.0.1:{bind_port}");
+            for _ in 0..50 {
+                if ureq::get(&url).call().is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            gui::run(&url, "Open Health")
         }
     }
 }

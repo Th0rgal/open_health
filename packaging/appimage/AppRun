@@ -66,78 +66,19 @@ if [ -n "${OURA_KEY_FILE:-}" ]; then
     export OURA_KEY_FILE
 fi
 
-# Pick an available port starting at 8090
-PORT=8090
-SPAWN_SERVER=1
-
-while ss -tuln 2>/dev/null | grep -q ":$PORT "; do
-    # Check if our own open_health dashboard is already running on this port
-    HTTP_TITLE="$(curl -s --max-time 1 "http://127.0.0.1:$PORT/" 2>/dev/null || true)"
-    if echo "$HTTP_TITLE" | grep -iq "open_health\|open_oura"; then
-        SPAWN_SERVER=0
-        break
-    fi
-    PORT=$((PORT + 1))
-done
-
-SERVER_PID=""
-
-if [ "$SPAWN_SERVER" -eq 1 ]; then
-    CMD=("$APPDIR/usr/bin/oura" dashboard --name "" --port "$PORT")
-    if [ -n "${OURA_DB_FILE:-}" ]; then
-        CMD+=(--db "$OURA_DB_FILE")
-    fi
-    if [ -n "${OURA_KEY_FILE:-}" ]; then
-        CMD+=(--key-file "$OURA_KEY_FILE")
-    fi
-
-    "${CMD[@]}" &
-    SERVER_PID=$!
-
-    cleanup() {
-        if [ -n "$SERVER_PID" ]; then
-            kill "$SERVER_PID" 2>/dev/null || true
-            wait "$SERVER_PID" 2>/dev/null || true
-        fi
-    }
-    trap cleanup EXIT INT TERM HUP
-
-    # Wait for dashboard HTTP endpoint to be ready
-    MAX_ATTEMPTS=50
-    ATTEMPT=0
-    while ! curl -s -I "http://127.0.0.1:$PORT/" >/dev/null 2>&1; do
-        sleep 0.1
-        ATTEMPT=$((ATTEMPT + 1))
-        if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
-            echo "Failed to start Open Health dashboard on port $PORT" >&2
-            exit 1
-        fi
-    done
+# If arguments are passed:
+if [ "$#" -eq 0 ]; then
+    exec "$APPDIR/usr/bin/oura" app
 fi
 
-URL="http://127.0.0.1:$PORT"
-
-# Launch desktop app window
-if command -v chromium >/dev/null 2>&1; then
-    PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/open-health/chromium-profile"
-    mkdir -p "$PROFILE_DIR"
-    chromium \
-        --app="$URL" \
-        --class="OpenHealth" \
-        --name="Open Health" \
-        --user-data-dir="$PROFILE_DIR" \
-        --no-first-run \
-        --no-default-browser-check \
-        --disable-sync \
-        --app-id="open-health-dashboard"
-elif command -v zen-browser >/dev/null 2>&1; then
-    zen-browser --new-window "$URL"
-    if [ -n "$SERVER_PID" ]; then
-        wait "$SERVER_PID" 2>/dev/null || true
-    fi
-else
-    xdg-open "$URL"
-    if [ -n "$SERVER_PID" ]; then
-        wait "$SERVER_PID" 2>/dev/null || true
-    fi
-fi
+case "$1" in
+    -h|--help|-V|--version)
+        exec "$APPDIR/usr/bin/oura" "$@"
+        ;;
+    -*)
+        exec "$APPDIR/usr/bin/oura" app "$@"
+        ;;
+    *)
+        exec "$APPDIR/usr/bin/oura" "$@"
+        ;;
+esac
