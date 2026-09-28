@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Open Health
+GenericName=Health Dashboard
+Comment=Private, local health dashboard and sync for Oura Ring
+Exec=AppRun %U
+Icon=open-health
+Terminal=false
+Categories=Utility;Office;
+Keywords=oura;health;ring;sleep;fitness;cardio;
+StartupWMClass=OpenHealth

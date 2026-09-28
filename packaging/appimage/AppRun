@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Determine AppDir location
+if [ -z "${APPDIR:-}" ]; then
+    APPDIR="$(dirname "$(readlink -f "${0}")")"
+fi
+
+export PATH="$APPDIR/usr/bin:$PATH"
+
+# Ensure Bluetooth pairing agent is running on Linux if available
+if command -v bt-agent >/dev/null 2>&1; then
+    if ! pgrep -x bt-agent >/dev/null 2>&1; then
+        bt-agent -c NoInputNoOutput -d 2>/dev/null || true
+    fi
+fi
+
+# Detect database path if not explicitly provided
+if [ -z "${OURA_DB_FILE:-}" ]; then
+    if [ -f "$HOME/.bashrc" ]; then
+        VAL=$(grep -E '^\s*export\s+OURA_DB_FILE=' "$HOME/.bashrc" | tail -n 1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
+        VAL="${VAL/#\$HOME/$HOME}"
+        VAL="${VAL/#\~/$HOME}"
+        if [ -n "$VAL" ] && [ -f "$VAL" ]; then
+            OURA_DB_FILE="$VAL"
+        fi
+    fi
+fi
+
+if [ -z "${OURA_DB_FILE:-}" ] || [ ! -f "${OURA_DB_FILE:-}" ]; then
+    if [ -f "$HOME/Dropbox/open_health/oura.db" ]; then
+        OURA_DB_FILE="$HOME/Dropbox/open_health/oura.db"
+    elif [ -f "$HOME/.local/share/open_health/oura.db" ]; then
+        OURA_DB_FILE="$HOME/.local/share/open_health/oura.db"
+    elif [ -f "$HOME/open_health/oura.db" ]; then
+        OURA_DB_FILE="$HOME/open_health/oura.db"
+    fi
+fi
+
+# Detect key file path if not explicitly provided
+if [ -z "${OURA_KEY_FILE:-}" ]; then
+    if [ -f "$HOME/.bashrc" ]; then
+        VAL=$(grep -E '^\s*export\s+OURA_KEY_FILE=' "$HOME/.bashrc" | tail -n 1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
+        VAL="${VAL/#\$HOME/$HOME}"
+        VAL="${VAL/#\~/$HOME}"
+        if [ -n "$VAL" ] && [ -f "$VAL" ]; then
+            OURA_KEY_FILE="$VAL"
+        fi
+    fi
+fi
+
+if [ -z "${OURA_KEY_FILE:-}" ] || [ ! -f "${OURA_KEY_FILE:-}" ]; then
+    if [ -f "$HOME/Dropbox/open_health/oura.key" ]; then
+        OURA_KEY_FILE="$HOME/Dropbox/open_health/oura.key"
+    elif [ -n "${OURA_DB_FILE:-}" ] && [ -f "$(dirname "$OURA_DB_FILE")/oura.key" ]; then
+        OURA_KEY_FILE="$(dirname "$OURA_DB_FILE")/oura.key"
+    elif [ -f "$HOME/open_health/oura.key" ]; then
+        OURA_KEY_FILE="$HOME/open_health/oura.key"
+    fi
+fi
+
+if [ -n "${OURA_DB_FILE:-}" ]; then
+    export OURA_DB_FILE
+fi
+if [ -n "${OURA_KEY_FILE:-}" ]; then
+    export OURA_KEY_FILE
+fi
+
+# Pick an available port starting at 8090
+PORT=8090
+SPAWN_SERVER=1
+
+while ss -tuln 2>/dev/null | grep -q ":$PORT "; do
+    # Check if our own open_health dashboard is already running on this port
+    HTTP_TITLE="$(curl -s --max-time 1 "http://127.0.0.1:$PORT/" 2>/dev/null || true)"
+    if echo "$HTTP_TITLE" | grep -iq "open_health\|open_oura"; then
+        SPAWN_SERVER=0
+        break
+    fi
+    PORT=$((PORT + 1))
+done
+
+SERVER_PID=""
+
+if [ "$SPAWN_SERVER" -eq 1 ]; then
+    CMD=("$APPDIR/usr/bin/oura" dashboard --name "" --port "$PORT")
+    if [ -n "${OURA_DB_FILE:-}" ]; then
+        CMD+=(--db "$OURA_DB_FILE")
+    fi
+    if [ -n "${OURA_KEY_FILE:-}" ]; then
+        CMD+=(--key-file "$OURA_KEY_FILE")
+    fi
+
+    "${CMD[@]}" &
+    SERVER_PID=$!
+
+    cleanup() {
+        if [ -n "$SERVER_PID" ]; then
+            kill "$SERVER_PID" 2>/dev/null || true
+            wait "$SERVER_PID" 2>/dev/null || true
+        fi
+    }
+    trap cleanup EXIT INT TERM HUP
+
+    # Wait for dashboard HTTP endpoint to be ready
+    MAX_ATTEMPTS=50
+    ATTEMPT=0
+    while ! curl -s -I "http://127.0.0.1:$PORT/" >/dev/null 2>&1; do
+        sleep 0.1
+        ATTEMPT=$((ATTEMPT + 1))
+        if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
+            echo "Failed to start Open Health dashboard on port $PORT" >&2
+            exit 1
+        fi
+    done
+fi
+
+URL="http://127.0.0.1:$PORT"
+
+# Launch desktop app window
+if command -v chromium >/dev/null 2>&1; then
+    PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/open-health/chromium-profile"
+    mkdir -p "$PROFILE_DIR"
+    chromium \
+        --app="$URL" \
+        --class="OpenHealth" \
+        --name="Open Health" \
+        --user-data-dir="$PROFILE_DIR" \
+        --no-first-run \
+        --no-default-browser-check \
+        --disable-sync \
+        --disable-extensions \
+        --app-id="open-health-dashboard" \
+        "$@"
+elif command -v zen-browser >/dev/null 2>&1; then
+    zen-browser --new-window "$URL"
+    if [ -n "$SERVER_PID" ]; then
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+else
+    xdg-open "$URL"
+    if [ -n "$SERVER_PID" ]; then
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+fi
