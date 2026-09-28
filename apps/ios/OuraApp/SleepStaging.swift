@@ -54,7 +54,7 @@ enum SleepStaging {
             for t in inputs.temp { h.combine(t.0); h.combine(t.1) }
             return h.hex
         }
-        let globalKey = ModelCacheStore.globalKey(profile: nil)
+        let globalKey = ModelCacheStore.globalKey(profile: nil, timezone: false)
         var cache: [String: StagedNightEntry] = ModelCacheStore.load(ModelCacheStore.stagingFile,
                                                                      globalKey: globalKey)
 

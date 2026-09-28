@@ -103,6 +103,7 @@ enum Core {
     /// Refresh one report without running unrelated models or discarding other days.
     static func refreshAnalysis(_ previous: Summary, request: DayAnalysisRequest,
                                 progress: @escaping @Sendable (String) -> Void = { _ in }) -> (summary: Summary, error: String?) {
+        defer { oura_torch_release() }
         let base = Core.base()
         guard base.error == nil else { return (previous, "Couldn’t read saved data. Try again.") }
         do {
@@ -169,26 +170,16 @@ enum Core {
                            progress: @escaping @Sendable (String) -> Void = { _ in }) -> Summary {
         var s = base
         let profile = base.profile
+        // Loaded modules are only reused within one pass; free them before the app
+        // can be suspended with them resident (see TorchBridge.mm).
+        defer { oura_torch_release() }
 
         let validPrevious = previous?.analysis_version == ModelCacheStore.version ? previous : nil
-        var sleepPlan = automaticSleepPlan(nights: base.nights, previous: validPrevious)
-        var staged = sleepPlan.saved
         var cva: CvaModel.Result?
         var workouts: [WorkoutSession] = []
         var illness: IllnessResult?
         var sleepErr: String?, cvaErr: String?, actErr: String?, illErr: String?
 
-        // One shared read: one failure point, one lock-contention window, and the
-        // RingClock epoch recovery is paid once instead of once per model.
-        progress("Reading ring data")
-        var events = EventStore.Events(path: DB.readPath())
-        var readErr: String?
-        do {
-            events = try EventStore.decodedEvents(dbPath: DB.readPath())
-        } catch {
-            readErr = "\(error)"
-        }
-        memLog("streaming events")
         var stageStarted = ProcessInfo.processInfo.systemUptime
         func stageFinished(_ stage: String) {
             dlog("models", "stage=\(stage) duration=\(String(format: "%.2f", ProcessInfo.processInfo.systemUptime - stageStarted))s")
@@ -196,37 +187,67 @@ enum Core {
             memLog(stage)
         }
 
-        if readErr == nil, !events.isEmpty {
-            let storeDigest = events.digest()
+        // One store digest per pass (a full-table scan), shared by the models. When
+        // no night is pending and the store is unchanged since the last complete
+        // pass, every event model is a cache hit: skip the event read and the
+        // RingClock rebuild, which cost ~15 s on every foreground with nothing new.
+        progress("Reading ring data")
+        let storeDigest = EventStore.Events(path: DB.readPath()).digest()
+        let sleepPlan = automaticSleepPlan(nights: base.nights, previous: validPrevious,
+                                           revalidateLatest: storeDigest == nil || validPrevious?.analysis_digest != storeDigest)
+        var staged = sleepPlan.saved
+        if sleepPlan.pending.isEmpty,
+           let rAct = ActivityModel.cachedRun(profile: profile, storeDigest: storeDigest),
+           let rIll = IllnessModel.cachedRun(profile: profile, storeDigest: storeDigest) {
             s.analysis_digest = storeDigest
             s.analysis_version = ModelCacheStore.version
-            sleepPlan = automaticSleepPlan(nights: base.nights, previous: validPrevious,
-                                          revalidateLatest: storeDigest == nil || validPrevious?.analysis_digest != storeDigest)
-            staged = sleepPlan.saved
-            progress("Mapping ring clock")
-            let clock = EventStore.RingClock(events: events)
-            if events.error != nil || AnalysisRun.cancelled { return previous ?? base }
-            let rSleep = sleepPlan.pending.isEmpty
-                ? (staged: [String: [Int]](), error: Optional<String>.none)
-                : SleepStaging.run(nights: sleepPlan.pending, events: events, clock: clock,
-                                   pruneCache: false, progress: progress)
-            staged.merge(rSleep.staged) { _, fresh in fresh }
-            sleepErr = rSleep.error
-            dlog("models", "sleep automatic saved=\(sleepPlan.saved.count) pending=\(sleepPlan.pending.count)")
-            stageFinished("sleep")
-            if AnalysisRun.cancelled { return previous ?? base }
-            let rAct = ActivityModel.run(profile: profile, events: events, clock: clock, progress: progress)
             workouts = rAct.sessions; actErr = rAct.error
-            stageFinished("activity")
-            if AnalysisRun.cancelled { return previous ?? base }
-            progress("Analyzing symptom radar")
-            let rIll = IllnessModel.run(profile: profile, events: events, clock: clock)
             illness = rIll.result; illErr = rIll.error
-            stageFinished("illness")
-        } else if let readErr {
-            // The shared read failed: every event-fed model is unavailable this
-            // pass. Surface one error; the publish below falls back to `previous`.
-            sleepErr = readErr; actErr = readErr; illErr = readErr
+            dlog("models", "store unchanged since the last complete pass; event read skipped")
+            stageFinished("cached")
+            if AnalysisRun.cancelled { return previous ?? base }
+        } else {
+            // One shared read: one failure point, one lock-contention window, and the
+            // RingClock epoch recovery is paid once instead of once per model.
+            var events = EventStore.Events(path: DB.readPath())
+            var readErr: String?
+            do {
+                events = try EventStore.decodedEvents(dbPath: DB.readPath())
+            } catch {
+                readErr = "\(error)"
+            }
+            memLog("streaming events")
+            stageStarted = ProcessInfo.processInfo.systemUptime
+
+            if readErr == nil, !events.isEmpty {
+                s.analysis_digest = storeDigest
+                s.analysis_version = ModelCacheStore.version
+                progress("Mapping ring clock")
+                let clock = EventStore.RingClock(events: events)
+                if events.error != nil || AnalysisRun.cancelled { return previous ?? base }
+                let rSleep = sleepPlan.pending.isEmpty
+                    ? (staged: [String: [Int]](), error: Optional<String>.none)
+                    : SleepStaging.run(nights: sleepPlan.pending, events: events, clock: clock,
+                                       pruneCache: false, progress: progress)
+                staged.merge(rSleep.staged) { _, fresh in fresh }
+                sleepErr = rSleep.error
+                dlog("models", "sleep automatic saved=\(sleepPlan.saved.count) pending=\(sleepPlan.pending.count)")
+                stageFinished("sleep")
+                if AnalysisRun.cancelled { return previous ?? base }
+                let rAct = ActivityModel.run(profile: profile, events: events, clock: clock,
+                                             knownDigest: storeDigest, progress: progress)
+                workouts = rAct.sessions; actErr = rAct.error
+                stageFinished("activity")
+                if AnalysisRun.cancelled { return previous ?? base }
+                progress("Analyzing symptom radar")
+                let rIll = IllnessModel.run(profile: profile, events: events, clock: clock, knownDigest: storeDigest)
+                illness = rIll.result; illErr = rIll.error
+                stageFinished("illness")
+            } else if let readErr {
+                // The shared read failed: every event-fed model is unavailable this
+                // pass. Surface one error; the publish below falls back to `previous`.
+                sleepErr = readErr; actErr = readErr; illErr = readErr
+            }
         }
         if AnalysisRun.cancelled { return previous ?? base }
         progress("Analyzing cardiovascular age")

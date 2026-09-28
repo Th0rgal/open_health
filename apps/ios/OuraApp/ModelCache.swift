@@ -53,6 +53,16 @@ private struct ModelCacheFile<Entry: Codable>: Codable {
     /// store's row count and last id). When it still matches, a model can return its
     /// cached results without streaming the store at all.
     var digest: String?
+    /// The last few generations written under other global keys, newest first.
+    /// Travelling out of a timezone and back (or undoing a profile edit) restores
+    /// them instead of recomputing the whole history twice. Absent in older files
+    /// and in files saved without `keepGenerations`.
+    var previous: [ModelCacheGeneration<Entry>]?
+}
+
+private struct ModelCacheGeneration<Entry: Codable>: Codable {
+    var globalKey: String
+    var entries: [String: Entry]
 }
 
 private struct ModelCacheDigest: Codable {
@@ -68,6 +78,8 @@ enum ModelCacheStore {
     static let illnessFile = "illness-model-cache.json"
     static let activityFile = "activity-model-cache.json"
     static let stagingFile = "sleep-staging-cache.json"
+    /// Generations kept besides the current one (see `ModelCacheFile.previous`).
+    static let previousGenerations = 2
     private static let queue = DispatchQueue(label: "md.thomas.openoura.model-cache", qos: .utility)
 
     private static func url(_ file: String) -> URL {
@@ -90,6 +102,10 @@ enum ModelCacheStore {
                 return [:]
             }
             guard decoded.globalKey == globalKey else {
+                if let earlier = decoded.previous?.first(where: { $0.globalKey == globalKey }) {
+                    dlog("models", "\(file): restored \(earlier.entries.count) entries saved under global key \(globalKey.prefix(8)) (was \(decoded.globalKey.prefix(8)))")
+                    return earlier.entries
+                }
                 dlog("models", "\(file): cache discarded (global key \(decoded.globalKey.prefix(8))→\(globalKey.prefix(8)): profile, timezone or store changed), recomputing everything")
                 return [:]
             }
@@ -112,9 +128,26 @@ enum ModelCacheStore {
     /// even when the run around it is being cancelled (backgrounding mid-history
     /// used to throw away every day computed so far and redo them on relaunch).
     /// `digest` is only passed by a run that finished every entry.
-    static func save<E: Codable>(_ file: String, globalKey: String, entries: [String: E], digest: String? = nil) {
-        let payload = ModelCacheFile(version: version, globalKey: globalKey, entries: entries, digest: digest)
+    ///
+    /// `keepGenerations` is for timezone/profile-keyed files (activity, illness):
+    /// the other generations are carried forward and a key change demotes the
+    /// file's current one into them. Timezone-free files never switch back, so
+    /// they don't pay for rereading and rewriting a generation nothing can reuse.
+    static func save<E: Codable>(_ file: String, globalKey: String, entries: [String: E], digest: String? = nil,
+                                 keepGenerations: Bool = false) {
         queue.async {
+            var payload = ModelCacheFile(version: version, globalKey: globalKey, entries: entries, digest: digest)
+            if keepGenerations,
+               let data = try? Data(contentsOf: url(file)),
+               let old = try? JSONDecoder().decode(ModelCacheFile<E>.self, from: data),
+               old.version == version {
+                var previous = old.previous ?? []
+                if old.globalKey != globalKey {
+                    previous.insert(ModelCacheGeneration(globalKey: old.globalKey, entries: old.entries), at: 0)
+                }
+                previous = Array(previous.filter { $0.globalKey != globalKey }.prefix(previousGenerations))
+                payload.previous = previous.isEmpty ? nil : previous
+            }
             guard let data = try? JSONEncoder().encode(payload) else { return }
             try? data.write(to: url(file), options: .atomic)
         }
@@ -134,10 +167,14 @@ enum ModelCacheStore {
     /// store). Deliberately NOT the DB's absolute path (it contains the install
     /// container id, so every reinstall/dev build used to recompute all history)
     /// nor the build number: a shipped model or port change bumps `version` instead.
-    static func globalKey(profile: Profile?) -> String {
+    ///
+    /// `timezone: false` is for models whose inputs and outputs are absolute times
+    /// (sleep staging, CVA): the timezone cannot change their result, and keying on it
+    /// recomputed all of them after every trip.
+    static func globalKey(profile: Profile?, timezone: Bool = true) -> String {
         let material = "v\(version)|\(profile?.sex ?? "")|\(profile?.age ?? -1)"
             + "|\(profile?.height_m ?? -1)|\(profile?.weight_kg ?? -1)|\(profile?.ring_size ?? -1)"
-            + "|\(TimeZone.current.identifier)"
+            + (timezone ? "|\(TimeZone.current.identifier)" : "")
             + "|\(storeKind())"
         return SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()
     }

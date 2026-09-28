@@ -593,12 +593,14 @@ private struct TechnicalReportsView: View {
                     Button { onShare() } label: {
                         Label("Share report", systemImage: "square.and.arrow.up")
                             .font(.subheadline.weight(.medium))
+                            .lineLimit(1).minimumScaleFactor(0.85)
                             .frame(maxWidth: .infinity, minHeight: 44)
                             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Obs.rule))
                     }
                     Button { onCheck() } label: {
-                        Label("Check saved data", systemImage: "externaldrive")
+                        Label("Check data", systemImage: "externaldrive")
                             .font(.subheadline.weight(.medium))
+                            .lineLimit(1).minimumScaleFactor(0.85)
                             .frame(maxWidth: .infinity, minHeight: 44)
                             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Obs.rule))
                     }

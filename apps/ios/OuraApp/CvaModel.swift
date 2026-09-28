@@ -19,11 +19,16 @@ enum CvaModel {
         guard let modelPath = Bundle.main.path(forResource: "cva_2_1_0", ofType: "ptl")
         else { return (nil, "cardiovascular model file missing from the app bundle") }
 
+        let sexVal: Float = sex.uppercased() == "F" ? -1 : (sex.uppercased() == "O" ? 0 : 1)
+        var demo: [Float] = [sexVal, Float(heightM), Float(age), Float(ringSize), Float(weightKg)]
+
         // Vascular age moves on a scale of months; one inference per local day is
         // plenty, and every sync adds PPG segments that would otherwise trigger a
-        // ~30 s recompute on the phone. A profile change still invalidates (global key).
-        let key = ModelCacheStore.globalKey(profile: nil)
-        let today = localDay()
+        // ~30 s recompute on the phone. The demographics are part of that daily stamp,
+        // so a profile edit still recomputes the same day.
+        let key = ModelCacheStore.globalKey(profile: nil, timezone: false)
+        var demoHash = FNV64(); demoHash.combine(demo)
+        let today = "\(localDay())|\(demoHash.hex)"
         if ModelCacheStore.loadDigest(ModelCacheStore.cvaFile, globalKey: key) == today {
             let cached: [String: FingerprintedEntry<Result>] = ModelCacheStore.load(ModelCacheStore.cvaFile, globalKey: key)
             if let entry = cached["result"] { dlog("models", "cva cache=today segments=\(entry.value.segments)"); return (entry.value, nil) }
@@ -33,8 +38,6 @@ enum CvaModel {
         let nSegs = segments.count / SEG_LEN
         guard nSegs > 0 else { return (nil, nil) }
 
-        let sexVal: Float = sex.uppercased() == "F" ? -1 : (sex.uppercased() == "O" ? 0 : 1)
-        var demo: [Float] = [sexVal, Float(heightM), Float(age), Float(ringSize), Float(weightKg)]
         guard !AnalysisRun.cancelled else { return (nil, "analysis paused") }
         // Segments and demographics are fingerprinted inside the entry; the file key
         // is the stable global key so a newly synced PPG segment never discards the file.
