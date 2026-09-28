@@ -54,7 +54,7 @@ if [ -d "$HOME/.local/share/applications" ]; then
     echo "==> Updating desktop launcher and icon..."
     mkdir -p "$HOME/.local/share/icons/hicolor/512x512/apps"
     cp "$APPDIR/open-health.png" "$HOME/.local/share/icons/hicolor/512x512/apps/open-health.png"
-    cp "$APPDIR/open-health.desktop" "$HOME/.local/share/applications/open-health.desktop"
+    sed "s|^Exec=AppRun|Exec=$OUTPUT_FILE|" "$APPDIR/open-health.desktop" > "$HOME/.local/share/applications/open-health.desktop"
     update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 fi
 

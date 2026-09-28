@@ -129,9 +129,7 @@ if command -v chromium >/dev/null 2>&1; then
         --no-first-run \
         --no-default-browser-check \
         --disable-sync \
-        --disable-extensions \
-        --app-id="open-health-dashboard" \
-        "$@"
+        --app-id="open-health-dashboard"
 elif command -v zen-browser >/dev/null 2>&1; then
     zen-browser --new-window "$URL"
     if [ -n "$SERVER_PID" ]; then
