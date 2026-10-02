@@ -3,6 +3,15 @@ import SQLite3
 @testable import OuraApp
 
 final class StabilityTests: XCTestCase {
+    func testSummaryCachePreservesAnalysisIdentity() throws {
+        var summary = Summary()
+        summary.analysis_digest = "10:20:2:15"
+        summary.analysis_version = 6
+        let restored = try JSONDecoder().decode(Summary.self, from: JSONEncoder().encode(summary))
+        XCTAssertEqual(restored.analysis_digest, summary.analysis_digest)
+        XCTAssertEqual(restored.analysis_version, summary.analysis_version)
+    }
+
     func testRebootedRingDoesNotReuseSleepCacheKey() {
         var first = NightRow(start_ds: 100)
         first.start_unix = 1000

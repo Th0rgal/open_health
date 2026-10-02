@@ -14,6 +14,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ios-rust-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: ios-rust-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
       - name: Install build tools
         run: |
           brew install xcodegen

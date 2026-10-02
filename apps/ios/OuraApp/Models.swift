@@ -227,16 +227,20 @@ struct Summary: Codable {
     // `workouts`/`modelErrors` are filled on-device (not in the FFI JSON), so keep them
     // out of decoding.
     enum CodingKeys: String, CodingKey {
+        case analysis_digest, analysis_version
         case digest, device, nights, vitals, activity_profile, activity_daily, profile, cardio, fitness, error
         case symptoms
         case sleepDebt = "sleep_debt"
     }
     init() {}
+    init(nights: [NightRow]) { self.nights = nights }
     init(error: String) { self.error = error }
     /// Every key is optional so the core's `{"error": "…"}` payload decodes into a
     /// Summary that carries the message instead of a generic "decode failed".
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        analysis_digest = try c.decodeIfPresent(String.self, forKey: .analysis_digest)
+        analysis_version = try c.decodeIfPresent(Int.self, forKey: .analysis_version)
         digest = try c.decodeIfPresent(String.self, forKey: .digest)
         device = try c.decodeIfPresent(Device.self, forKey: .device)
         nights = try c.decodeIfPresent([NightRow].self, forKey: .nights) ?? []
