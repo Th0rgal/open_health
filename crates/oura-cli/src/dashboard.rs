@@ -467,7 +467,14 @@ async fn handle(
     {
         match BLE_GATE.try_lock() {
             Ok(guard) => Some(guard),
-            Err(_) => return json_resp(&mut sock, &json!({"ok": false, "error": "Ring is busy; wait for the current operation to finish.", "message": "Ring is busy; wait for the current operation to finish."})).await,
+            Err(_) => {
+                let busy = json!({"ok": false, "error": "Ring is busy; wait for the current operation to finish.", "message": "Ring is busy; wait for the current operation to finish."});
+                if path == "/api/live-hr" {
+                    // The live client consumes newline-delimited records.
+                    return write_resp(&mut sock, "200 OK", "application/x-ndjson", format!("{busy}\n").as_bytes()).await;
+                }
+                return json_resp(&mut sock, &busy).await;
+            }
         }
     } else {
         None

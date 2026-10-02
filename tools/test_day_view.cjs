@@ -14,7 +14,7 @@ w.fetch = async url => {
   requests.push(url);
   return { ok: true, json: async () => ({ minutes: 15, bins: [], latest: null }) };
 };
-w.eval(fs.readFileSync('dashboard/web/app.js', 'utf8').replace(/load\(\);\s*$/, '') + '\nwindow.openDayPage = openDayPage;');
+w.eval(fs.readFileSync('dashboard/web/app.js', 'utf8').replace(/load\(\);\s*$/, '') + '\nwindow.openDayPage = openDayPage; window.toggleLive = toggleLive;');
 const start = Date.UTC(2026, 8, 25, 22) / 1000;
 const night = { ymd: '2026-09-25', wake_ymd: '2026-09-26', start_unix: start,
   end_unix: start + 8 * 3600, start: '22:00', end: '06:00', in_bed_h: 8,
@@ -34,9 +34,16 @@ assert(!motion.querySelector('path'));
 const absent = { ...data, nights: [{ ...night, stages_full: [] }] };
 w.openDayPage(absent, '2026-09-26');
 assert(w.document.querySelector('#sec-sleep').textContent.includes('stages are unavailable'));
-setImmediate(() => {
+setImmediate(async () => {
   assert(w.document.querySelector('#sec-heart').textContent.includes('No heart-rate readings'));
   assert(requests.some(url => url.includes('/api/hourly-hr')));
+  w.fetch = async () => ({ ok: true, body: new ReadableStream({start(controller) {
+    controller.enqueue(new TextEncoder().encode('{"error":"Ring is busy; wait for the current operation to finish."}\n'));
+    controller.close();
+  }}) });
+  await w.toggleLive();
+  assert(w.document.getElementById('live-status').textContent.includes('Ring is busy'));
+  assert.equal(w.document.getElementById('live-label').textContent, 'Start');
   console.log('Day view DOM integration checks passed');
   dom.window.close();
 });
