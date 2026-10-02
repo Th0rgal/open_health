@@ -453,8 +453,8 @@ struct SyncView: View {
             }
             VStack(spacing: 0) {
                 SupportRow(icon: "arrow.down.doc", title: "Export data",
-                           detail: "One file with every synced event",
-                           disabled: ring.busy) {
+                           detail: ring.exportStatus ?? "One file with every synced event",
+                           disabled: ring.busy || ring.exportStatus != nil) {
                     Task { if let url = await ring.exportRawDatabase() { diagnosticFile = url } }
                 }
                 SupportDivider()

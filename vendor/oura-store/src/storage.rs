@@ -123,8 +123,18 @@ impl Store {
                 )
             })?;
         }
-        let path = out.to_string_lossy().into_owned();
-        self.conn.execute("VACUUM INTO ?1", params![path])?;
+        // Copy pages, including committed WAL content, without rebuilding every
+        // table and index as VACUUM INTO does. The caller serializes DB work.
+        let mut destination = Connection::open(out)?;
+        {
+            let backup = rusqlite::backup::Backup::new(&self.conn, &mut destination)?;
+            match backup.step(-1)? {
+                rusqlite::backup::StepResult::Done => {}
+                _ => return Err(crate::error::Error::Storage("database busy during export".into())),
+            }
+        }
+        // A WAL source may copy its journal mode too. Make the shared file standalone.
+        destination.execute_batch("PRAGMA journal_mode=DELETE;")?;
         Ok(())
     }
 
