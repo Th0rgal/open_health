@@ -259,7 +259,11 @@ enum EventStore {
                     let late = Double(after.unix) - Double(after.ds - ds) / 10.0
                     let early = Double(before.unix) + Double(ds - before.ds) / 10.0
                     // A ring_start between the anchors marks the stall exactly.
-                    if let boot = epoch.boots.filter({ $0 > before.ds && $0 <= after.ds }).max() {
+                    let boots = epoch.boots.filter { $0 > before.ds && $0 <= after.ds }
+                    if let first = boots.min(), let last = boots.max(), ds >= first && ds < last {
+                        return (predicted, .undated)
+                    }
+                    if let boot = boots.max() {
                         return (ds >= boot ? late : early, .anchor)
                     }
                     let plausible = capturedUnix.map { late <= Double($0 + Self.futureSlackSeconds) } ?? true

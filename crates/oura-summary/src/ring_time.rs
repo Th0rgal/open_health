@@ -178,7 +178,13 @@ impl RingClock {
                     // A ring_start between the anchors marks the stall exactly; without
                     // one, the download time tells which side an event sits on (wrong
                     // when pre-stall events were only downloaded after the stall).
-                    let boot = epoch.boots.iter().copied().filter(|b| *b > before.0 && *b <= after.0).max();
+                    let boots: Vec<_> = epoch.boots.iter().copied().filter(|b| *b > before.0 && *b <= after.0).collect();
+                    let first = boots.iter().min().copied();
+                    let boot = boots.iter().max().copied();
+                    // Between multiple reboots we cannot locate the lost time.
+                    if first.zip(boot).is_some_and(|(first, last)| ds >= first && ds < last) {
+                        return Resolved { unix: predicted, source: ClockSource::Undated };
+                    }
                     let unix = match boot {
                         Some(boot) if ds >= boot => late,
                         Some(_) => early,
@@ -343,6 +349,19 @@ mod tests {
 
     fn event(ds: i64, tag: u8, json: &str, captured: i64) -> (i64, u8, String, i64) {
         (ds, tag, json.into(), captured)
+    }
+
+    #[test]
+    fn multiple_reboots_leave_middle_undated() {
+        let clock = RingClock::from_events(&[
+            event(1000, 0x42, r#"{"unix_time":1700000000}"#, 1700000000),
+            event(2000, 0x41, "{}", 1700100000),
+            event(8000, 0x41, "{}", 1700100000),
+            event(10000, 0x42, r#"{"unix_time":1700100000}"#, 1700100000),
+        ]);
+        assert_eq!(clock.resolve(5000, 1700100000).source, ClockSource::Undated);
+        assert_eq!(clock.resolve(1500, 1700100000).unix, 1700000050.0);
+        assert_eq!(clock.resolve(9000, 1700100000).unix, 1700099900.0);
     }
 
     #[test]

@@ -89,5 +89,16 @@ class RingClockTests(unittest.TestCase):
         self.assertAlmostEqual(unix_s(25_000_000, captured), after[1] - (after[0] - 25_000_000) / 10.0)
 
 
+    def test_multiple_reboots_leave_middle_undated(self):
+        rows = [(1000, 0x42, '{"unix_time":1700000000}', 1700000000),
+                (2000, 0x41, '{}', 1700100000),
+                (8000, 0x41, '{}', 1700100000),
+                (10000, 0x42, '{"unix_time":1700100000}', 1700100000)]
+        resolve = make_unix_s(build_epochs(rows))
+        self.assertIsNone(resolve(5000, 1700100000))
+        self.assertEqual(resolve(1500, 1700100000), 1700000050)
+        self.assertEqual(resolve(9000, 1700100000), 1700099900)
+
+
 if __name__ == '__main__':
     unittest.main()

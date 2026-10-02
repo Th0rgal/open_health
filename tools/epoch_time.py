@@ -101,6 +101,8 @@ def make_unix_s(epochs):
                 # A ring_start between the anchors marks the stall exactly.
                 boots = [b for b in e[6] if before[0] < b <= after[0]]
                 if boots:
+                    if min(boots) <= ds < max(boots):
+                        return None  # lost time cannot be assigned to one of several reboots
                     return late if ds >= max(boots) else early
                 if captured_unix is None or late <= captured_unix + FUTURE_SLACK_S:
                     return late
