@@ -769,6 +769,7 @@ function stageBar(n) {
 
 // science-based read of the night → a few plain-language sentences + a sleep-debt note
 function sleepInterpretation(d, n, m) {
+  if (n.staging_complete === false) return el("p", "error", "Sleep analysis is incomplete; gaps cannot establish awake time or sleep onset.");
   const wrap = el("div", "interp");
   const out = [];
   if (n.efficiency != null)
@@ -820,7 +821,7 @@ function sleepReport(d, ymd) {
   const stages = n.stages_full;
   const lanes = [{
     label: "Hypnogram", summary: "", tall: true, svg: hypnoSvg(stages, W, HH),
-    valueAt: (f) => (STAGE[stages[Math.round(f * (stages.length - 1))]] || {}).name || "",
+    valueAt: (f) => (STAGE[stages[Math.round(f * (stages.length - 1))]] || {}).name || "No data",
   }];
   const addLane = (key, label, unit, color, dp = 0, span = [0, 1], times = null) => {
     const v = (s[key] || []).filter((x) => x != null);

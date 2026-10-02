@@ -21,6 +21,8 @@ jobs:
         run: |
           python3 -m unittest discover -s tools -p test_sleep_inputs.py
           python3 -m unittest discover -s tools -p test_epoch_time.py
+      - name: Web chart regression tests
+        run: node tools/test_sleep_charts.cjs
       - name: Build Rust iOS framework
         run: bash apps/ios/build-xcframework.sh
       - name: Generate simulator project
