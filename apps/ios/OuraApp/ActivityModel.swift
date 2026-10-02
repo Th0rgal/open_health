@@ -51,9 +51,24 @@ enum ActivityModel {
     /// instead of being trusted for inputs the new pipeline would build differently.
     private static let pipelineVersion = 2
 
+    /// The last complete pass's result when the store is unchanged since (same rows,
+    /// same clock anchors) — no event read needed. `storeDigest` is `Events.digest()`.
+    static func cachedRun(profile: Profile?, storeDigest: String?,
+                          cacheFile: String = ModelCacheStore.activityFile) -> (sessions: [WorkoutSession], error: String?)? {
+        guard let storeDigest else { return nil }
+        let globalKey = ModelCacheStore.globalKey(profile: profile)
+        guard ModelCacheStore.loadDigest(cacheFile, globalKey: globalKey) == "v\(pipelineVersion):\(storeDigest)"
+        else { return nil }
+        let cache: [String: ActivityDayEntry] = ModelCacheStore.load(cacheFile, globalKey: globalKey)
+        let failed = cache.filter { $0.value.failed == true }.map(\.key).sorted(by: >)
+        dlog("models", "activity cache=digest-hit days=\(cache.count) rejected=\(failed.count)")
+        return (cache.values.flatMap(\.sessions).sorted { $0.start < $1.start }, failureMessage(failed))
+    }
+
     static func run(profile: Profile?, events: EventStore.Events, clock: EventStore.RingClock,
                     onlyDay: String? = nil, force: Bool = false,
                     cacheFile: String = ModelCacheStore.activityFile,
+                    knownDigest: String? = nil,
                     progress: @escaping @Sendable (String) -> Void = { _ in },
                     inputsSink: (([String: Any]) -> Void)? = nil) -> (sessions: [WorkoutSession], error: String?) {
         guard let aadPath = Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl")
@@ -61,15 +76,15 @@ enum ActivityModel {
 
         guard !events.isEmpty else { return ([], onlyDay == nil ? nil : "No activity data is saved for this day.") }
         let globalKey = ModelCacheStore.globalKey(profile: profile)
-        // Nothing changed since the last complete pass (same rows, same clock
-        // anchors): the cached days are the answer, without streaming the store.
-        let storeDigest = events.digest().map { "v\(pipelineVersion):\($0)" }
-        if onlyDay == nil, !force, let storeDigest,
-           ModelCacheStore.loadDigest(cacheFile, globalKey: globalKey) == storeDigest {
-            let cache: [String: ActivityDayEntry] = ModelCacheStore.load(cacheFile, globalKey: globalKey)
-            let failed = cache.filter { $0.value.failed == true }.map(\.key).sorted(by: >)
-            dlog("models", "activity cache=digest-hit days=\(cache.count) rejected=\(failed.count)")
-            return (cache.values.flatMap(\.sessions).sorted { $0.start < $1.start }, failureMessage(failed))
+        // Nothing changed since the last complete pass: the cached days are the
+        // answer, without streaming the store. The caller may pass the digest it
+        // already computed (one full-table scan per pass instead of one per model).
+        // A single-day refresh never stamps the digest, so it skips that scan.
+        let rawDigest = onlyDay == nil ? (knownDigest ?? events.digest()) : nil
+        let storeDigest = rawDigest.map { "v\(pipelineVersion):\($0)" }
+        if onlyDay == nil, !force,
+           let hit = cachedRun(profile: profile, storeDigest: rawDigest, cacheFile: cacheFile) {
+            return hit
         }
         let nan = Float.nan
         func number(_ value: Any?) -> Float { (value as? NSNumber)?.floatValue ?? 0 }
@@ -220,7 +235,7 @@ enum ActivityModel {
         var failedDays: [String] = []
         for (index, day) in pending.enumerated() {
             guard !AnalysisRun.cancelled, events.error == nil else {
-                if recomputed > 0 { ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: cache) }
+                if recomputed > 0 { ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: cache, keepGenerations: true) }
                 return ([], "analysis interrupted")
             }
             progress(onlyDay != nil ? "Refreshing activity" : pending.count > 1 ? "Analyzing activity \(index + 1)/\(pending.count)" : "Analyzing activity")
@@ -232,7 +247,7 @@ enum ActivityModel {
                 do { daySessions = try runDay(day.inputs, user: user, aadPath: aadPath, nan: nan, inputsSink: inputsSink) }
                 catch {
                     guard !AnalysisRun.cancelled else {
-                        if recomputed > 0 { ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: cache) }
+                        if recomputed > 0 { ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: cache, keepGenerations: true) }
                         return ([], "analysis interrupted")
                     }
                     let inputs = day.inputs
@@ -244,9 +259,9 @@ enum ActivityModel {
             sessions.append(contentsOf: daySessions)
             cache[day.key] = ActivityDayEntry(fp: day.fp, sessions: daySessions, failed: failed ? true : nil)
             recomputed += 1
-            if recomputed % 5 == 0 { ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: cache) }
+            if recomputed % 5 == 0 { ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: cache, keepGenerations: true) }
         }
-        if recomputed > 0 { ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: cache) }
+        if recomputed > 0 { ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: cache, keepGenerations: true) }
         guard !AnalysisRun.cancelled, events.error == nil else { return ([], "analysis interrupted") }
         if onlyDay != nil && currentKeys.isEmpty { return ([], "No activity data is saved for this day.") }
         dlog("models", "activity recomputed=\(recomputed) total=\(currentKeys.count) rejected=\(failedDays.count + cachedFailures.count)")
@@ -255,7 +270,8 @@ enum ActivityModel {
         // stamp the complete pass with the store digest for the next early exit.
         let pruned = cache.filter { currentKeys.contains($0.key) }
         if onlyDay == nil {
-            ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: pruned, digest: storeDigest)
+            ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: pruned, digest: storeDigest,
+                                  keepGenerations: true)
         }
         let allFailed = (failedDays + cachedFailures).sorted(by: >)
         return (sessions.sorted { $0.start < $1.start }, failureMessage(allFailed))

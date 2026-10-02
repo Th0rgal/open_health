@@ -21,6 +21,24 @@
 // plus four models used to race here and abort the process.
 static std::mutex g_torch;
 
+// One loaded module per model, reused across calls (ActivityModel calls once per
+// day) and dropped by oura_torch_release() once a model pass is over. Kept for the
+// process lifetime, they held ~280 MB while the app sat suspended, where iOS
+// terminates the largest apps first under memory pressure.
+struct ModuleSlot {
+    std::unique_ptr<torch::jit::mobile::Module> module;
+    std::string path;
+};
+static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_illness;
+
+void oura_torch_release(void) {
+    std::lock_guard<std::mutex> lock(g_torch);
+    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_illness}) {
+        slot->module.reset();
+        slot->path.clear();
+    }
+}
+
 static torch::jit::mobile::Module &cachedModule(const char *path,
                                                 std::unique_ptr<torch::jit::mobile::Module> &slot,
                                                 std::string &slotPath) {
@@ -50,9 +68,7 @@ int oura_sleepnet(const char *model_path,
     if (!model_path || !out_stages || !out_timestamps_ms || max_out <= 0 || n_ibi <= 0) return -1;
     std::lock_guard<std::mutex> lock(g_torch);
     try {
-        static std::unique_ptr<torch::jit::mobile::Module> cached;
-        static std::string cached_path;
-        auto &m = cachedModule(model_path, cached, cached_path);
+        auto &m = cachedModule(model_path, g_sleepnet.module, g_sleepnet.path);
 
         auto ibi_ts_t = blobLong(ibi_ts, n_ibi);
         auto ibi_val_t = blobFloat2d(ibi_val, n_ibi, 3);
@@ -104,9 +120,7 @@ int oura_cva(const char *model_path, const float *ppg, int n_segs, const float *
     if (!model_path || !ppg || !demo || !out_vascular_age || !out_pwv || n_segs <= 0) return -1;
     std::lock_guard<std::mutex> lock(g_torch);
     try {
-        static std::unique_ptr<torch::jit::mobile::Module> cached;
-        static std::string cached_path;
-        auto &m = cachedModule(model_path, cached, cached_path);
+        auto &m = cachedModule(model_path, g_cva.module, g_cva.path);
         auto ppg_t = blobFloat2d(ppg, n_segs, 1500);
         auto demo_t = blobFloat2d(demo, 1, 5);
         auto out = m.forward({ppg_t, demo_t}).toTuple();
@@ -145,10 +159,8 @@ int oura_activity(const char *model_path, const float *context, const float *use
     std::lock_guard<std::mutex> lock(g_torch);
     try {
         // ActivityModel calls once per retained local day. Loading the 15 MB module
-        // for every day dominated sync time, so retain it for the process lifetime.
-        static std::unique_ptr<torch::jit::mobile::Module> cached;
-        static std::string cached_path;
-        auto &m = cachedModule(model_path, cached, cached_path);
+        // for every day dominated sync time, so keep it until oura_torch_release().
+        auto &m = cachedModule(model_path, g_activity.module, g_activity.path);
         auto context_t = at::from_blob((void *)context, {4}, at::kFloat).clone();
         auto user_t = at::from_blob((void *)user, {14}, at::kFloat).clone();
         auto met_t = mat(met, n_met, 2);
@@ -190,9 +202,7 @@ int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
     if (n_raw <= 0 || max_rows <= 0) return 0;
     std::lock_guard<std::mutex> lock(g_torch);
     try {
-        static std::unique_ptr<torch::jit::mobile::Module> cached;
-        static std::string cached_path;
-        auto &m = cachedModule(model_path, cached, cached_path);
+        auto &m = cachedModule(model_path, g_stepmotion.module, g_stepmotion.path);
         auto timestamps = blobLong(timestamps_ms, n_raw);
         auto data = blobFloat2d(raw, n_raw, 27);
         auto result = m.forward({timestamps, data}).toTuple();
@@ -222,9 +232,7 @@ int oura_illness(const char *model_path, const float *series, const float *scala
     if (!model_path || !series || !scalars || !out_score || !out_decision || !out_biomarkers) return -1;
     std::lock_guard<std::mutex> lock(g_torch);
     try {
-        static std::unique_ptr<torch::jit::mobile::Module> cached;
-        static std::string cached_path;
-        auto &m = cachedModule(model_path, cached, cached_path);
+        auto &m = cachedModule(model_path, g_illness.module, g_illness.path);
         const float nan = std::numeric_limits<float>::quiet_NaN();
         // 7 daily series -> [30,1] columns (index 0 = today)
         auto colf = [&](int k) { return blobFloat2d(series + k * 30, 30, 1); };

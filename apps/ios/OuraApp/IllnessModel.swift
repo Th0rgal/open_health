@@ -78,19 +78,26 @@ enum IllnessModel {
         }
     }
 
+    /// Same rows and anchors as the last complete run: the answer cannot differ, so
+    /// return it without the full-history IBI ingest (the slowest stage of a launch).
+    static func cachedRun(profile: Profile?, storeDigest: String?) -> (result: IllnessResult?, error: String?)? {
+        guard let storeDigest else { return nil }
+        let cacheKey = ModelCacheStore.globalKey(profile: profile)
+        guard ModelCacheStore.loadDigest(ModelCacheStore.illnessFile, globalKey: cacheKey) == storeDigest else { return nil }
+        let cached: [String: FingerprintedEntry<IllnessResult>] = ModelCacheStore.load(ModelCacheStore.illnessFile, globalKey: cacheKey)
+        guard let entry = cached["result"] else { return nil }
+        dlog("models", "illness cache=digest-hit")
+        return (entry.value, nil)
+    }
+
     static func run(profile: Profile?, events: EventStore.Events,
-                    clock: EventStore.RingClock) -> (result: IllnessResult?, error: String?) {
+                    clock: EventStore.RingClock, knownDigest: String? = nil) -> (result: IllnessResult?, error: String?) {
         guard let modelPath = Bundle.main.path(forResource: "illness_detection_0_5_1", ofType: "ptl")
         else { return (nil, "illness model file missing from the app bundle") }
         guard !events.isEmpty else { return (nil, nil) }
-        // Same rows and anchors as the last complete run: the answer cannot differ,
-        // so skip the full-history IBI ingest (the slowest stage of a launch).
         let cacheKey = ModelCacheStore.globalKey(profile: profile)
-        let storeDigest = events.digest()
-        if let storeDigest, ModelCacheStore.loadDigest(ModelCacheStore.illnessFile, globalKey: cacheKey) == storeDigest {
-            let cached: [String: FingerprintedEntry<IllnessResult>] = ModelCacheStore.load(ModelCacheStore.illnessFile, globalKey: cacheKey)
-            if let entry = cached["result"] { dlog("models", "illness cache=digest-hit"); return (entry.value, nil) }
-        }
+        let storeDigest = knownDigest ?? events.digest()
+        if let hit = cachedRun(profile: profile, storeDigest: storeDigest) { return hit }
         func u(_ ds: Int64, _ cu: Int64) -> Double { clock.unixSeconds(ds, capturedUnix: cu) }
         func dated(_ ds: Int64, _ cu: Int64) -> Bool { clock.datedUnixSeconds(ds, capturedUnix: cu) != nil }
         let tz = Double(TimeZone.current.secondsFromGMT())
@@ -268,7 +275,8 @@ enum IllnessModel {
         let cached: [String: FingerprintedEntry<IllnessResult>] = ModelCacheStore.load(ModelCacheStore.illnessFile, globalKey: cacheKey)
         if let entry = cached["result"], entry.fp == fingerprint.hex {
             dlog("models", "illness cache=hit")
-            ModelCacheStore.save(ModelCacheStore.illnessFile, globalKey: cacheKey, entries: cached, digest: storeDigest)
+            ModelCacheStore.save(ModelCacheStore.illnessFile, globalKey: cacheKey, entries: cached, digest: storeDigest,
+                                 keepGenerations: true)
             return (entry.value, nil)
         }
         var score = 0.0, decision: Int32 = 0
@@ -297,7 +305,7 @@ enum IllnessModel {
             daysWithData: daysWithData, biomarkers: biomarkers)
         ModelCacheStore.save(ModelCacheStore.illnessFile, globalKey: cacheKey,
                              entries: ["result": FingerprintedEntry(fp: fingerprint.hex, value: result)],
-                             digest: storeDigest)
+                             digest: storeDigest, keepGenerations: true)
         dlog("models", "illness cache=miss")
         return (result, nil)
     }

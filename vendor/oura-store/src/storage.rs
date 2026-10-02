@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_serial_tag ON events(serial, tag);
 CREATE INDEX IF NOT EXISTS idx_events_capture ON events(captured_unix, id);
 CREATE INDEX IF NOT EXISTS idx_events_tag_time ON events(tag, ring_timestamp);
+-- Covers the iOS models' store digest (count / last id of decoded rows and anchors),
+-- which otherwise scans every row of the table on each analysis pass.
+CREATE INDEX IF NOT EXISTS idx_events_decoded_tag ON events(tag) WHERE decoded_json IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS readings (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -59,6 +59,9 @@ int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
 // out_biomarkers (16 floats). Returns 0 / -1.
 int oura_illness(const char *model_path, const float *series, const float *scalars,
                  double *out_score, int *out_decision, float *out_biomarkers);
+// Free every loaded model module (they reload on next use). Waits for a running
+// inference to finish, so call it off the main thread.
+void oura_torch_release(void);
 #ifdef __cplusplus
 }
 #endif
