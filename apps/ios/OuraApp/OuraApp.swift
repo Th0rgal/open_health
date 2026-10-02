@@ -991,6 +991,7 @@ struct RootView: View {
                 if generation == loadGeneration { isRefreshingSummary = false; modelProgress.report(generation, "Analysis paused") }
                 return
             }
+            modelProgress.report(generation, "Reading ring data")
             IdleTimerLock.acquire("models")
             dlog("models", "start run=\(run.id)")
             let started = ProcessInfo.processInfo.systemUptime
@@ -1066,7 +1067,7 @@ struct RootView: View {
                                 if ring.busy || isRefreshingSummary {
                                     ProgressView().controlSize(.mini).scaleEffect(0.68).tint(Obs.ink)
                                     // one line next to the tag: short labels, no wrapping
-                                    Text((modelProgress.label ?? "updating").lowercased()).font(Obs.mono(9, .medium))
+                                    Text((ring.busy ? "Syncing ring" : (modelProgress.label ?? "Analyzing saved data")).lowercased()).font(Obs.mono(9, .medium))
                                         .tracking(0.6).foregroundStyle(Obs.ink2)
                                         .lineLimit(1).minimumScaleFactor(0.8).truncationMode(.tail)
                                 }
