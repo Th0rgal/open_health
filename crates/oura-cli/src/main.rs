@@ -266,6 +266,22 @@ fn feature_state_name(state: u8) -> &'static str {
     }
 }
 
+fn discover_key(db: &Path) -> Result<Option<PathBuf>> {
+    let candidate = db.with_file_name("oura.key");
+    if candidate.is_file() { return Ok(Some(candidate)); }
+    let dir = db.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let Ok(entries) = std::fs::read_dir(dir) else { return Ok(None) };
+    let mut keys: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path())
+        .filter(|p| p.is_file() && p.file_name().and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("oura-") && n.ends_with(".key"))).collect();
+    keys.sort();
+    match keys.len() {
+        0 => Ok(None),
+        1 => Ok(keys.pop()),
+        _ => Err(anyhow!("multiple adjacent ring keys; select one with --key-file or OURA_KEY_FILE")),
+    }
+}
+
 fn load_key(path: &Option<PathBuf>) -> Result<Option<[u8; 16]>> {
     let Some(path) = path else { return Ok(None) };
     // A missing file is not an error: `pair` writes it, others treat it as "no key".
@@ -349,13 +365,16 @@ async fn main() -> Result<()> {
         .init();
 
     let mut cli = Cli::parse();
-    if cli.key_file.is_none() {
-        let candidate = cli.db.with_file_name("oura.key");
-        if candidate.exists() {
-            cli.key_file = Some(candidate);
-        }
+    let uses_ring = matches!(cli.command,
+        Command::Pair | Command::Info | Command::Sync { .. } | Command::Latest |
+        Command::LiveHr { .. } | Command::Accel { .. } | Command::SleepAnalyze { .. } |
+        Command::Viz { .. } | Command::Game { .. } | Command::Rdata { .. } |
+        Command::FeatureMode { .. });
+    if cli.key_file.is_none() && (uses_ring || matches!(cli.command, Command::Dashboard { .. })) {
+        cli.key_file = discover_key(&cli.db)?;
     }
-    let key = load_key(&cli.key_file)?;
+    // Saved-data commands never need an auth key, even when one is configured.
+    let key = if uses_ring { load_key(&cli.key_file)? } else { None };
 
     match &cli.command {
         Command::Scan => cmd_scan(&cli).await,
@@ -770,7 +789,7 @@ async fn cmd_pair(cli: &Cli) -> Result<()> {
     let out = cli
         .key_file
         .clone()
-        .unwrap_or_else(|| PathBuf::from(format!("oura-{serial}.key")));
+        .unwrap_or_else(|| cli.db.with_file_name(format!("oura-{serial}.key")));
 
     // Persist the key before installing it, so a crash mid-pair never loses the
     // only copy of a key that may already be live on the ring.
