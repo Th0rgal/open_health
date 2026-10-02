@@ -37,7 +37,9 @@ final class StabilityTests: XCTestCase {
 
     func testAnalysisDeadlineCancelsCooperativeWork() {
         let run = AnalysisRun(timeout: -1)
-        run.perform { XCTAssertThrowsError(try AnalysisRun.check()) }
+        run.perform {
+            do { try AnalysisRun.check(); XCTFail("expired run accepted") } catch {}
+        }
     }
 
     func testOperationFailureSummaryKeepsCauseBeforeStackTrace() {

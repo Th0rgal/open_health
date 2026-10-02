@@ -204,6 +204,7 @@ struct UndatedNight: Codable {
 }
 struct Summary: Codable {
     var analysis_digest: String? = nil
+    var analysis_version: Int? = nil
     var digest: String?
     var device: Device?
     var nights: [NightRow] = []

@@ -170,7 +170,8 @@ enum Core {
         var s = base
         let profile = base.profile
 
-        var sleepPlan = automaticSleepPlan(nights: base.nights, previous: previous)
+        let validPrevious = previous?.analysis_version == ModelCacheStore.version ? previous : nil
+        var sleepPlan = automaticSleepPlan(nights: base.nights, previous: validPrevious)
         var staged = sleepPlan.saved
         var cva: CvaModel.Result?
         var workouts: [WorkoutSession] = []
@@ -198,8 +199,9 @@ enum Core {
         if readErr == nil, !events.isEmpty {
             let storeDigest = events.digest()
             s.analysis_digest = storeDigest
-            sleepPlan = automaticSleepPlan(nights: base.nights, previous: previous,
-                                          revalidateLatest: storeDigest == nil || previous?.analysis_digest != storeDigest)
+            s.analysis_version = ModelCacheStore.version
+            sleepPlan = automaticSleepPlan(nights: base.nights, previous: validPrevious,
+                                          revalidateLatest: storeDigest == nil || validPrevious?.analysis_digest != storeDigest)
             staged = sleepPlan.saved
             progress("Mapping ring clock")
             let clock = EventStore.RingClock(events: events)
@@ -236,7 +238,7 @@ enum Core {
 
         // If staging failed outright, refill from the last published summary so a
         // transient read failure can't strip hypnograms that were already on screen.
-        if sleepErr != nil, let previous {
+        if sleepErr != nil, let previous = validPrevious {
             for night in previous.nights where night.staging_source == "sleepnet" {
                 if let sds = night.start_ds, staged[String(sds)] == nil, let stages = night.hypnogram, !stages.isEmpty {
                     staged[String(sds)] = stages
