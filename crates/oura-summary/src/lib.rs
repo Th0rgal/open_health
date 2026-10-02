@@ -536,7 +536,7 @@ fn ring_sleep_runs(pages: &[(i64, i64, i64, Vec<i64>)]) -> Vec<RingSleep> {
 }
 
 /// One `sleep_phase_data` stage epoch, in the codes the rest of the pipeline speaks:
-/// 1=deep 2=light 3=rem 4=wake (anything unrecognised counts as wake).
+/// 0=unknown 1=deep 2=light 3=rem 4=wake.
 fn stage_code(phase: &str) -> i64 {
     match phase {
         "deep" => 1,

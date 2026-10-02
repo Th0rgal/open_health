@@ -58,8 +58,7 @@ enum SleepStaging {
         var cache: [String: StagedNightEntry] = ModelCacheStore.load(ModelCacheStore.stagingFile,
                                                                      globalKey: globalKey)
 
-        // key by the exact bedtime start_ds (matches the summary's night.start_ds)
-        // so two sleeps on one calendar day stay distinct.
+        // Key by bedtime start and absolute epoch, since ds resets after a reboot.
         var result: [String: [Int]] = [:]
         var currentKeys = Set<String>()
         var recomputed = 0

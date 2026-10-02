@@ -78,7 +78,7 @@ enum Core {
         for night in nights {
             guard night.start_ds != nil else { continue }
             if let old = previous?.nights.first(where: {
-                $0.start_ds == start && $0.end_ds == night.end_ds
+                $0.start_ds == night.start_ds && $0.end_ds == night.end_ds
                     && $0.ymd == night.ymd && $0.start == night.start && $0.end == night.end
                     && $0.start_unix == night.start_unix && $0.end_unix == night.end_unix
             }), old.staging_source == "sleepnet", let stages = old.hypnogram, !stages.isEmpty {
@@ -237,7 +237,7 @@ enum Core {
         stageFinished("cva")
 
         // fold SleepNet's hypnogram + stage breakdown into each night, keyed by the exact
-        // bedtime start_ds so two sleeps on one calendar day don't collide.
+        // bedtime start and absolute epoch so rebooted counters cannot collide.
         applySleepStages(staged, to: &s)
         if let cva {
             s.cardio = Cardio(vascular_age: cva.vascularAge, chronological_age: profile?.age ?? 30,
