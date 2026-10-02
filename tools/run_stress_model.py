@@ -106,7 +106,7 @@ def zone(intensity, stress_lim, recovery_lim):
 def main():
     ap = argparse.ArgumentParser(description="Local daytime-stress timeseries from ring HRV")
     ap.add_argument("db", nargs="?", help="events DB (default: ./oura.db)")
-    ap.add_argument("--tz", type=int, default=1, help="hours offset for printed clock times")
+    ap.add_argument("--tz", type=float, default=1, help="hours offset for printed clock times")
     ap.add_argument("--met", type=float, default=1.0,
                     help="ring MET to assume for awake samples (must be <=1.8; default sedentary 1.0)")
     ap.add_argument("--json", action="store_true", help="emit the timeseries as JSON")

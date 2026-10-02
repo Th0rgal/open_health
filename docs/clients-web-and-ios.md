@@ -339,7 +339,7 @@ Unanalysed ring epochs are `0` (unknown), never wake. Both clients leave gaps an
 withhold complete-night metrics/scores/debt for partial staging. The summary exports
 `staging_source`, `staging_coverage_pct`, `staging_complete` and `captured_unix`.
 iOS uses `stages_full` for calculations; `stages` remains the compact preview.
-Apple Health skips unknown epochs. Motion uses `series.motion_time` (normalized
+Apple Health skips unknown epochs. Web motion uses timestamped `series_t.motion` bars, with `series.motion_time` as a legacy fallback. iOS uses `series.motion_time` (normalized
 positions), rendered as discrete measurements without interpolation.
 
 SleepNet output timestamps are retained on both paths and mapped onto the bedtime
@@ -359,3 +359,26 @@ A report JSON alone cannot replay Gen4 inference or prove the original bedtime.
 GitHub iOS validation also compiles the TORCH Swift paths against a validation-only
 C bridge and runs pure planning/alignment tests. This checks model plumbing, not
 LibTorch inference; release projects never include the stub bridge.
+
+
+### CLI configuration and community integration
+
+`--db` and `--key-file` override `OURA_DB_FILE` and `OURA_KEY_FILE`. Ring operations
+look for adjacent `oura.key`, then a single `oura-<serial>.key`; multiple serial keys
+require an explicit selection. Pairing saves its default key beside the database.
+Saved-data commands do not load auth keys.
+
+CLI display commands default to the current local UTC offset on Unix (UTC on
+other platforms). `--tz-offset` accepts fractional hours, e.g. `5.5`, `5.75`, or
+`-3.5`. This remains a fixed offset across the requested history, not a named
+zone with historical DST/travel rules; use an explicit offset when needed. The
+existing integer-offset iOS FFI contract is retained.
+
+Multiple `ring_start` markers between disagreeing anchors make the interval
+between the first and last reboot undatable. Rust, Python, and Swift agree on
+this rule; model caches are invalidated for the clock/bedtime changes.
+
+The web BLE actions (sync, live HR, feature mode) share one operation gate. Live
+HR drains stderr concurrently, retains only a bounded tail, and kills/reaps a
+stalled or disconnected child before releasing the gate. Hardware/firmware live
+HR support still depends on the pinned BLE implementation.

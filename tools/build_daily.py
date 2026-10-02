@@ -91,7 +91,7 @@ def main():
     ap = argparse.ArgumentParser(description="Build daily_summary + baselines from ring data")
     ap.add_argument("db", nargs="?")
     ap.add_argument("--csv", help="trends export for Sleep-Score calibration")
-    ap.add_argument("--tz", type=int, default=1)
+    ap.add_argument("--tz", type=float, default=1)
     args = ap.parse_args()
     db = resolve_db(args.db, REPO)
 

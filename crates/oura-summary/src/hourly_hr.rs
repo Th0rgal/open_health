@@ -99,7 +99,7 @@ impl Bar {
 
 /// One bar per local-clock hour that actually has beats, oldest first.
 ///
-/// `tz` is whole hours from UTC (the same offset `build_summary` takes), `days` caps
+/// `tz` is hours from UTC (including fractional offsets) (the same offset `build_summary` takes), `days` caps
 /// the window to that many days back from the newest sample — 0 means everything.
 ///
 /// ```text
@@ -111,7 +111,8 @@ impl Bar {
 /// ```
 /// `low`/`high` are the 5th/95th percentiles — the band the hour actually lived in.
 /// This is [`hr_bins`] at 60 minutes under the `hours` key the iOS app reads.
-pub fn hourly_hr(db: &Path, tz: i64, days: u32) -> Result<Value> {
+pub fn hourly_hr(db: &Path, tz: impl Into<crate::OffsetHours>, days: u32) -> Result<Value> {
+    let tz = tz.into().0;
     let mut v = hr_bins(db, tz, days, 60)?;
     let bins = v
         .as_object_mut()
@@ -128,15 +129,24 @@ pub fn hourly_hr(db: &Path, tz: i64, days: u32) -> Result<Value> {
 /// slots hold fewer values, and at night the only source is `hrv_event`'s 5-minute
 /// averages — three per quarter hour — so each row splits `count` into `beats` and
 /// `averages` for the chart to say what a bar is made of.
-pub fn hr_bins(db: &Path, tz: i64, days: u32, minutes: u32) -> Result<Value> {
+pub fn hr_bins(
+    db: &Path,
+    tz: impl Into<crate::OffsetHours>,
+    days: u32,
+    minutes: u32,
+) -> Result<Value> {
+    let tz = tz.into().0;
     if minutes == 0 || 60 % minutes != 0 {
         anyhow::bail!("bin size must divide an hour, got {minutes} minutes");
     }
+    anyhow::ensure!(tz.is_finite() && (-24.0..=24.0).contains(&tz), "invalid UTC offset");
     let span = minutes as i64 * 60;
     let store = Store::open_read_only(db).context("opening DB")?;
     let events = store.decoded_events().context("reading events")?;
     if events.is_empty() {
-        return Ok(json!({ "tz_offset": tz, "minutes": minutes, "bins": [], "latest": Value::Null }));
+        return Ok(
+            json!({ "tz_offset": tz, "minutes": minutes, "bins": [], "latest": Value::Null }),
+        );
     }
     let clock = RingClock::from_events(&events);
 
@@ -171,8 +181,7 @@ pub fn hr_bins(db: &Path, tz: i64, days: u32, minutes: u32) -> Result<Value> {
             if name == "hrv_event" {
                 bar.averages += 1;
             }
-            if name == "green_ibi_quality_event"
-                && latest.map_or(true, |(current, _)| at > current)
+            if name == "green_ibi_quality_event" && latest.map_or(true, |(current, _)| at > current)
             {
                 latest = Some((at, bpm));
             }
@@ -194,7 +203,7 @@ pub fn hr_bins(db: &Path, tz: i64, days: u32, minutes: u32) -> Result<Value> {
                 "unix": start,
                 "ymd": ymd,
                 "hour": hour,
-                "minute": (start + tz * HOUR).rem_euclid(HOUR) / 60,
+                "minute": (start + crate::offset_seconds(tz)).rem_euclid(HOUR) / 60,
                 "low": bar.percentile(5.0),
                 "high": bar.percentile(95.0),
                 "median": bar.percentile(50.0),
@@ -219,16 +228,18 @@ pub fn hr_bins(db: &Path, tz: i64, days: u32, minutes: u32) -> Result<Value> {
 /// sample falls in. Bucketing in local time is what makes "3 am" mean 3 am on the
 /// wearer's wall clock; the key stays UTC so the chart's x-axis needs no second
 /// conversion.
-fn bucket_start(unix: f64, tz: i64, span: i64) -> i64 {
-    let local = unix + (tz * HOUR) as f64;
-    (local / span as f64).floor() as i64 * span - tz * HOUR
+fn bucket_start(unix: f64, tz: impl Into<crate::OffsetHours>, span: i64) -> i64 {
+    let tz = tz.into().0;
+    let local = unix + (crate::offset_seconds(tz)) as f64;
+    (local / span as f64).floor() as i64 * span - crate::offset_seconds(tz)
 }
 
 /// `(YYYY-MM-DD, hour)` of a bucket start, in the wearer's local clock. Civil-date
 /// arithmetic from days-since-epoch (Howard Hinnant's algorithm) — no chrono in the
-/// dependency set, and the whole stack works in whole-hour offsets anyway.
-fn local_ymd_hour(bucket_start_unix: i64, tz: i64) -> (String, i64) {
-    let local = bucket_start_unix + tz * HOUR;
+/// dependency set, including fractional-hour offsets.
+fn local_ymd_hour(bucket_start_unix: i64, tz: impl Into<crate::OffsetHours>) -> (String, i64) {
+    let tz = tz.into().0;
+    let local = bucket_start_unix + crate::offset_seconds(tz);
     let days = local.div_euclid(86_400);
     let hour = local.rem_euclid(86_400) / HOUR;
     let z = days + 719_468;
@@ -249,6 +260,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fractional_offsets_align_the_local_slots_and_midnight() {
+        assert_eq!(bucket_start(0.0, 5.75, 3600), -2700);
+        assert_eq!(local_ymd_hour(-20700, 5.75), ("1970-01-01".to_string(), 0));
+        assert_eq!(local_ymd_hour(12600, -3.5), ("1970-01-01".to_string(), 0));
+    }
+
+    #[test]
     fn civil_date_matches_known_instants() {
         // 2026-09-13T00:00:00Z = 1789257600; at tz=+3 that is 03:00 local the same day.
         assert_eq!(
@@ -265,7 +283,10 @@ mod tests {
         let tz = 3;
         let start = bucket_start(1_789_257_600.0 + 1_900.0, tz, HOUR);
         assert_eq!(start, 1_789_257_600);
-        assert_eq!(bucket_start(1_789_257_600.0 + 3_601.0, tz, HOUR), 1_789_261_200);
+        assert_eq!(
+            bucket_start(1_789_257_600.0 + 3_601.0, tz, HOUR),
+            1_789_261_200
+        );
         // a sample before the epoch must floor down, not toward zero
         assert_eq!(bucket_start(-1.0, 0, HOUR), -3600);
     }
@@ -278,7 +299,11 @@ mod tests {
         }
         bar.add(176.0); // one misdetected beat, exactly what the raw IBI stream emits
         assert_eq!(bar.max, 176.0, "the outlier is still recorded");
-        assert_eq!(bar.percentile(95.0), 60.0, "but it must not become the band top");
+        assert_eq!(
+            bar.percentile(95.0),
+            60.0,
+            "but it must not become the band top"
+        );
         assert_eq!(bar.percentile(50.0), 60.0);
         assert_eq!(bar.count, 100);
     }
@@ -439,8 +464,18 @@ mod tests {
             };
             push(0x42, "time_sync", 0, json!({ "unix_time": anchor }));
             // +1:00 two beats, +1:15 one beat (deciseconds: 15 min = 9 000)
-            push(0x80, "green_ibi_quality_event", 36_000, json!({ "hr_bpm": [60, 70] }));
-            push(0x80, "green_ibi_quality_event", 45_000, json!({ "hr_bpm": [80] }));
+            push(
+                0x80,
+                "green_ibi_quality_event",
+                36_000,
+                json!({ "hr_bpm": [60, 70] }),
+            );
+            push(
+                0x80,
+                "green_ibi_quality_event",
+                45_000,
+                json!({ "hr_bpm": [80] }),
+            );
             // +3:00, +3:05, +3:10: three 5-minute averages, all in the 3:00 slot
             push(
                 0x5d,
@@ -454,12 +489,27 @@ mod tests {
         assert_eq!(v["minutes"], 15);
         let bins = v["bins"].as_array().unwrap();
         assert_eq!(bins.len(), 3, "{v}");
-        assert_eq!((bins[0]["minute"].as_i64(), bins[1]["minute"].as_i64()), (Some(0), Some(15)));
-        assert_eq!(bins[1]["unix"].as_i64().unwrap() - bins[0]["unix"].as_i64().unwrap(), 900);
-        assert_eq!((bins[0]["beats"].as_u64(), bins[0]["averages"].as_u64()), (Some(2), Some(0)));
+        assert_eq!(
+            (bins[0]["minute"].as_i64(), bins[1]["minute"].as_i64()),
+            (Some(0), Some(15))
+        );
+        assert_eq!(
+            bins[1]["unix"].as_i64().unwrap() - bins[0]["unix"].as_i64().unwrap(),
+            900
+        );
+        assert_eq!(
+            (bins[0]["beats"].as_u64(), bins[0]["averages"].as_u64()),
+            (Some(2), Some(0))
+        );
         assert_eq!(bins[1]["beats"], 1);
-        assert_eq!((bins[2]["beats"].as_u64(), bins[2]["averages"].as_u64()), (Some(0), Some(3)));
-        assert_eq!((bins[2]["min"].as_f64(), bins[2]["max"].as_f64()), (Some(40.0), Some(50.0)));
+        assert_eq!(
+            (bins[2]["beats"].as_u64(), bins[2]["averages"].as_u64()),
+            (Some(0), Some(3))
+        );
+        assert_eq!(
+            (bins[2]["min"].as_f64(), bins[2]["max"].as_f64()),
+            (Some(40.0), Some(50.0))
+        );
         assert_eq!(bins[2]["count"], 3);
 
         // the hourly contract the iOS app reads is unchanged: same data, `hours` key

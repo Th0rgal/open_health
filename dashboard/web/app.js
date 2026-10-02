@@ -304,9 +304,10 @@ function dayCard(d, ymd) {
 
 // The summary doesn't carry per-slot heart rate, so the "Your day" strip fetches it
 // on its own and fills in when it arrives.
+let HR_QUARTER_LOAD = null;
 function fillDayHr(ymd, meta, strip) {
-  fetch("/api/hourly-hr?minutes=15")
-    .then((r) => r.json())
+  const request = HR_QUARTER_LOAD ||= fetch("/api/hourly-hr?minutes=15").then((r) => r.json());
+  request
     .then((j) => {
       if (j.error) throw new Error(j.error);
       const { bySlot, rows } = hrDaySlots(j, ymd);
@@ -811,7 +812,8 @@ function exportDayJson(d, ymd, axis) {
   const hr = HOURLY_HR || {};
   const payload = {
     day: ymd, kind: "day", generated_at: new Date().toISOString(),
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    timezone: `UTC${(d.tz || 0) >= 0 ? "+" : ""}${d.tz || 0}`,
+    tz_offset: d.tz || 0,
     app_version: "web", profile: d.profile || null,
     sleep: n ? { night: n, sleep_debt: debt } : null,
     activity: {
@@ -838,16 +840,16 @@ function hypnoSvg(stages, w, h, span = [0, 1]) {
   const n = stages.length;
   const padT = 8, plotH = h - 16;
   const yOf = (lvl) => padT + (lvl / 3) * plotH;
-  const xOf = (i) => (span[0] + (i / (n - 1)) * (span[1] - span[0])) * w;
+  const xOf = (i) => (span[0] + (i / Math.max(1, n)) * (span[1] - span[0])) * w;
   let grid = "";
-  for (let l = 0; l < 4; l++) grid += `<line x1="${xOf(0).toFixed(1)}" y1="${yOf(l).toFixed(1)}" x2="${xOf(n - 1).toFixed(1)}" y2="${yOf(l).toFixed(1)}" stroke="var(--line-soft)" stroke-width="0.5"/>`;
+  for (let l = 0; l < 4; l++) grid += `<line x1="${xOf(0).toFixed(1)}" y1="${yOf(l).toFixed(1)}" x2="${xOf(n).toFixed(1)}" y2="${yOf(l).toFixed(1)}" stroke="var(--line-soft)" stroke-width="0.5"/>`;
   let runs = "", conn = "", prevLvl = null, i = 0;
   while (i < n) {
     const code = stages[i]; let j = i;
     while (j < n && stages[j] === code) j++;
     if (!STAGE[code]) { prevLvl = null; i = j; continue; }
     const st = STAGE[code];
-    const x1 = xOf(i), x2 = xOf(Math.min(j, n - 1)), y = yOf(st.lvl);
+    const x1 = xOf(i), x2 = xOf(j), y = yOf(st.lvl);
     runs += `<line x1="${x1.toFixed(1)}" y1="${y.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--${st.cls})" stroke-width="2.5" vector-effect="non-scaling-stroke"/>`;
     if (prevLvl !== null) conn += `<line x1="${x1.toFixed(1)}" y1="${yOf(prevLvl).toFixed(1)}" x2="${x1.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--faint)" stroke-width="0.8" opacity="0.5" vector-effect="non-scaling-stroke"/>`;
     prevLvl = st.lvl; i = j;
@@ -981,7 +983,7 @@ function sleepSection(d, ymd, axis, cursor) {
   if (n.staging_complete === false)
     sec.append(el("p", "error", "Incomplete sleep analysis. Gaps mean no data, not awake time; sleep metrics are withheld."));
   if (staged) sec.append(stageLegend());
-  else sec.append(el("p", "hr-note", "Sleep stages need Oura's sleep model, which isn't installed, so there's no hypnogram. The lanes below are what the ring recorded overnight."));
+  else sec.append(el("p", "hr-note", "Sleep stages are unavailable for this night. The lanes below are what the ring recorded overnight."));
 
   const W = 1000, a = axis.frac(n.start_unix), b = axis.frac(n.end_unix);
   const rows = [];
@@ -999,13 +1001,24 @@ function sleepSection(d, ymd, axis, cursor) {
   const addLane = (key, label, unit, color, dp = 0, span = [0, 1]) => {
     if (timed) {
       const pts = timed[key] || [];
-      const L = timedLaneSvg(pts, axis, W, 50, color);
+      const L = key === "motion"
+        ? laneSvg(pts.map(p => p[1]), W, 50, color, [0, 1], pts.map(p => axis.frac(p[0])))
+        : timedLaneSvg(pts, axis, W, 50, color);
       if (!L) return;
       const fmt = (x) => (dp ? x.toFixed(dp) : Math.round(x));
       rows.push({
         label, summary: `${fmt(L.mean)} ${unit}`, html: L.svg,
-        valueAt: (t) => { const p = nearestPoint(pts, t, LANE_GAP_S / 2); return p ? `${fmt(p[1])} ${unit}` : "—"; },
+        valueAt: (t) => { const p = nearestPoint(pts, t, key === "motion" ? 30 : LANE_GAP_S / 2); return p ? `${fmt(p[1])} ${unit}` : "—"; },
       });
+      return;
+    }
+    if (key === "motion") {
+      if (Array.isArray(s.motion_time) && s.motion_time.length === (s.motion || []).length) {
+        const L = laneSvg(s.motion, W, 50, color, [0, 1], s.motion_time.map(f => a + f * (b - a)));
+        if (L) rows.push({label, summary: `${Math.round(L.mean)} ${unit}`, html: L.svg,
+          valueAt: t => { const pts = s.motion_time.map((f,i) => [n.start_unix + f * (n.end_unix-n.start_unix), s.motion[i]]);
+            const p = nearestPoint(pts,t,30); return p ? `${Math.round(p[1])} ${unit}` : "—"; }});
+      }
       return;
     }
     const v = (s[key] || []).filter((x) => x != null);
@@ -1409,7 +1422,7 @@ function batteryChart(pts) {
 
   const days = Math.max(1, Math.round((t1 - t0) / 86400));
   const foot = el("div", "batt-foot");
-  foot.append(el("span", "", `${dayTitle(ymdOf(t0, d0TZ()))} → now`), el("span", "", `${days} day${days === 1 ? "" : "s"}`));
+  foot.append(el("span", "", `${dayTitle(ymdOf(t0, d0TZ()))} → ${hhmmOf(t1)}`), el("span", "", `${days} day${days === 1 ? "" : "s"}`));
   wrap.append(foot);
 
   const cursor = plot.querySelector(".batt-cursor");
@@ -2067,6 +2080,7 @@ async function load() {
   $("digest").innerHTML = (d.digest || "").replace(/([+-]?\d[\d.]*\s?(?:%|bpm|ms|m\/s))/g, '<span class="metric">$1</span>');
   renderActions(d);
   renderTiles(d);
+  HR_QUARTER_LOAD = null;
   renderDay(d);
   renderSleepDebt(d);
   renderIllness(d);

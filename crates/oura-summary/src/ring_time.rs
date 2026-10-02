@@ -60,7 +60,10 @@ impl ClockSource {
 enum Bracket {
     Consistent,
     /// The counter lost time between the two anchors (ring powered off).
-    Stalled { before: (i64, i64), after: (i64, i64) },
+    Stalled {
+        before: (i64, i64),
+        after: (i64, i64),
+    },
     /// The counter advanced faster than wall time: untrustworthy.
     Erratic,
 }
@@ -178,12 +181,23 @@ impl RingClock {
                     // A ring_start between the anchors marks the stall exactly; without
                     // one, the download time tells which side an event sits on (wrong
                     // when pre-stall events were only downloaded after the stall).
-                    let boots: Vec<_> = epoch.boots.iter().copied().filter(|b| *b > before.0 && *b <= after.0).collect();
+                    let boots: Vec<_> = epoch
+                        .boots
+                        .iter()
+                        .copied()
+                        .filter(|b| *b > before.0 && *b <= after.0)
+                        .collect();
                     let first = boots.iter().min().copied();
                     let boot = boots.iter().max().copied();
                     // Between multiple reboots we cannot locate the lost time.
-                    if first.zip(boot).is_some_and(|(first, last)| ds >= first && ds < last) {
-                        return Resolved { unix: predicted, source: ClockSource::Undated };
+                    if first
+                        .zip(boot)
+                        .is_some_and(|(first, last)| ds >= first && ds < last)
+                    {
+                        return Resolved {
+                            unix: predicted,
+                            source: ClockSource::Undated,
+                        };
                     }
                     let unix = match boot {
                         Some(boot) if ds >= boot => late,
@@ -372,19 +386,38 @@ mod tests {
             event(20_000, 1, "{}", 1_783_000_000),
             event(20_928, 0x42, r#"{"unix_time":1782939604}"#, 1_783_000_000),
             event(500_000, 1, "{}", 1_783_000_000),
-            event(1_032_193, 0x85, r#"{"unix_time":1782943316}"#, 1_783_000_000),
+            event(
+                1_032_193,
+                0x85,
+                r#"{"unix_time":1782943316}"#,
+                1_783_000_000,
+            ),
             event(1_100_000, 1, "{}", 1_783_000_000),
-            event(1_133_000, 0x85, r#"{"unix_time":1782953397}"#, 1_783_000_000),
+            event(
+                1_133_000,
+                0x85,
+                r#"{"unix_time":1782953397}"#,
+                1_783_000_000,
+            ),
             event(1_200_000, 1, "{}", 1_783_000_000),
         ]);
-        assert_eq!(clock.resolve(500_000, 1_783_000_000).source, ClockSource::Undated);
+        assert_eq!(
+            clock.resolve(500_000, 1_783_000_000).source,
+            ClockSource::Undated
+        );
         // Inside the healthy pocket the nearest anchor dates the event as usual.
         let inside = clock.resolve(1_100_000, 1_783_000_000);
         assert_eq!(inside.source, ClockSource::Anchor);
         assert!((inside.unix - (1_782_953_397.0 - 3_300.0)).abs() < 0.01);
         // Past the last anchor, extrapolation from that anchor still applies.
-        assert_eq!(clock.resolve(1_200_000, 1_783_000_000).source, ClockSource::Anchor);
-        assert_eq!(clock.resolve(20_000, 1_783_000_000).source, ClockSource::Anchor);
+        assert_eq!(
+            clock.resolve(1_200_000, 1_783_000_000).source,
+            ClockSource::Anchor
+        );
+        assert_eq!(
+            clock.resolve(20_000, 1_783_000_000).source,
+            ClockSource::Anchor
+        );
     }
 
     #[test]
@@ -396,13 +429,25 @@ mod tests {
         let before = (47_893_458_i64, 1_787_733_180_i64); // 08-26 08:33
         let after = (61_076_535_i64, 1_789_195_380_i64); // 09-12 06:43
         let clock = RingClock::from_events(&[
-            event(before.0, 0x42, &format!(r#"{{"unix_time":{}}}"#, before.1), before.1 + 60),
+            event(
+                before.0,
+                0x42,
+                &format!(r#"{{"unix_time":{}}}"#, before.1),
+                before.1 + 60,
+            ),
             event(52_000_000, 1, "{}", 1_788_100_000),
-            event(after.0, 0x42, &format!(r#"{{"unix_time":{}}}"#, after.1), after.1 + 60),
+            event(
+                after.0,
+                0x42,
+                &format!(r#"{{"unix_time":{}}}"#, after.1),
+                after.1 + 60,
+            ),
         ]);
         let early = clock.resolve(52_000_000, 1_788_100_000);
         assert_eq!(early.source, ClockSource::Anchor);
-        assert!((early.unix - (before.1 as f64 + (52_000_000 - before.0) as f64 / 10.0)).abs() < 0.01);
+        assert!(
+            (early.unix - (before.1 as f64 + (52_000_000 - before.0) as f64 / 10.0)).abs() < 0.01
+        );
         let late = clock.resolve(52_000_000, after.1 + 60);
         assert_eq!(late.source, ClockSource::Anchor);
         assert!((late.unix - (after.1 as f64 - (after.0 - 52_000_000) as f64 / 10.0)).abs() < 0.01);
@@ -457,15 +502,27 @@ mod tests {
         let after = (25_724_127_i64, 1_790_523_679_i64);
         let captured = after.1;
         let clock = RingClock::from_events(&[
-            event(before.0, 0x42, &format!(r#"{{"unix_time":{},"source":"phone"}}"#, before.1), before.1),
+            event(
+                before.0,
+                0x42,
+                &format!(r#"{{"unix_time":{},"source":"phone"}}"#, before.1),
+                before.1,
+            ),
             event(20_000_000, 1, "{}", captured),
             event(boot, 0x41, "{}", captured),
             event(25_000_000, 1, "{}", captured),
-            event(after.0, 0x42, &format!(r#"{{"unix_time":{},"source":"phone"}}"#, after.1), captured),
+            event(
+                after.0,
+                0x42,
+                &format!(r#"{{"unix_time":{},"source":"phone"}}"#, after.1),
+                captured,
+            ),
         ]);
         let early = clock.resolve(20_000_000, captured);
         assert_eq!(early.source, ClockSource::Anchor);
-        assert!((early.unix - (before.1 as f64 + (20_000_000 - before.0) as f64 / 10.0)).abs() < 0.01);
+        assert!(
+            (early.unix - (before.1 as f64 + (20_000_000 - before.0) as f64 / 10.0)).abs() < 0.01
+        );
         let late = clock.resolve(25_000_000, captured);
         assert!((late.unix - (after.1 as f64 - (after.0 - 25_000_000) as f64 / 10.0)).abs() < 0.01);
     }
@@ -578,14 +635,22 @@ mod tests {
         // new boot has no anchor yet: its night must not be dated through the old
         // boot's clock (which would land it days earlier), nor to the download time.
         let clock = RingClock::from_events(&[
-            event(5_000_000, 0x42, r#"{"unix_time":1788800000}"#, 1_788_800_000),
+            event(
+                5_000_000,
+                0x42,
+                r#"{"unix_time":1788800000}"#,
+                1_788_800_000,
+            ),
             event(5_100_000, 1, "{}", 1_788_800_000),
             event(10, 1, "{}", 1_789_056_420),
             event(300_000, 0x76, "{}", 1_789_056_420),
         ]);
         let r = clock.resolve(300_000, 1_789_056_420);
         assert_eq!(r.source, ClockSource::Undated);
-        assert_ne!(r.unix, 1_788_800_000.0 + (300_000 - 5_000_000) as f64 / 10.0);
+        assert_ne!(
+            r.unix,
+            1_788_800_000.0 + (300_000 - 5_000_000) as f64 / 10.0
+        );
     }
 
     #[test]
@@ -594,7 +659,12 @@ mod tests {
         // (ring ds of the newest drained event ↔ phone time). 23:00→08:00 UTC+2.
         let sync_unix = 1_789_056_420; // 2026-09-11 ~ 09:27 UTC
         let clock = RingClock::from_events(&[
-            event(5_000_000, 0x42, r#"{"unix_time":1788800000}"#, 1_788_800_000),
+            event(
+                5_000_000,
+                0x42,
+                r#"{"unix_time":1788800000}"#,
+                1_788_800_000,
+            ),
             event(10, 1, "{}", sync_unix),
             event(
                 705_000,

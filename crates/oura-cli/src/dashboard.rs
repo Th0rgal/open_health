@@ -71,19 +71,39 @@ fn python_bin(root: &Path) -> PathBuf {
 
 /// Bound model subprocesses and drain stdout concurrently (large results must not
 /// fill the pipe while the parent waits). A stalled runner is killed and reaped.
-fn model_output(mut command: Command, input: Option<&[u8]>, timeout: std::time::Duration) -> Option<Value> {
+fn model_output(
+    mut command: Command,
+    input: Option<&[u8]>,
+    timeout: std::time::Duration,
+) -> Option<Value> {
     use std::io::{Read, Write};
-    command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped()).stderr(Stdio::null());
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     let mut child = command.spawn().ok()?;
     let stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        stdout.take(32 * 1024 * 1024).read_to_end(&mut bytes).map(|_| bytes)
+        stdout
+            .take(32 * 1024 * 1024)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
     });
     if let Some(input) = input {
-        if child.stdin.take().and_then(|mut pipe| pipe.write_all(input).ok()).is_none() {
-            let _ = child.kill(); let _ = child.wait(); let _ = reader.join();
+        if child
+            .stdin
+            .take()
+            .and_then(|mut pipe| pipe.write_all(input).ok())
+            .is_none()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
             return None;
         }
     }
@@ -91,16 +111,21 @@ fn model_output(mut command: Command, input: Option<&[u8]>, timeout: std::time::
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() < timeout => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
             _ => {
                 tracing::warn!("model runner timed out or could not be monitored");
-                let _ = child.kill(); let _ = child.wait();
+                let _ = child.kill();
+                let _ = child.wait();
                 break None;
             }
         }
     };
     let bytes = reader.join().ok()?.ok()?;
-    if !status?.success() { return None; }
+    if !status?.success() {
+        return None;
+    }
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -108,11 +133,23 @@ fn run_py_json(root: &Path, py: &Path, script: &str, args: &[String]) -> Option<
     run_py_json_stdin_optional(root, py, script, args, None)
 }
 
-fn run_py_json_stdin(root: &Path, py: &Path, script: &str, args: &[String], input: &[u8]) -> Option<Value> {
+fn run_py_json_stdin(
+    root: &Path,
+    py: &Path,
+    script: &str,
+    args: &[String],
+    input: &[u8],
+) -> Option<Value> {
     run_py_json_stdin_optional(root, py, script, args, Some(input))
 }
 
-fn run_py_json_stdin_optional(root: &Path, py: &Path, script: &str, args: &[String], input: Option<&[u8]>) -> Option<Value> {
+fn run_py_json_stdin_optional(
+    root: &Path,
+    py: &Path,
+    script: &str,
+    args: &[String],
+    input: Option<&[u8]>,
+) -> Option<Value> {
     let mut command = Command::new(py);
     command.current_dir(root).arg(root.join(script)).args(args);
     model_output(command, input, std::time::Duration::from_secs(180))
@@ -158,11 +195,7 @@ impl ModelRunner for PythonRunner {
             tz.to_string(),
             "--json".into(),
         ];
-        let illness_args = vec![
-            db.display().to_string(),
-            tz.to_string(),
-            "--json".into(),
-        ];
+        let illness_args = vec![db.display().to_string(), tz.to_string(), "--json".into()];
 
         let (sleep_batch, cva, activity, illness) = match (root.as_deref(), py.as_deref()) {
             (Some(r), Some(p)) => std::thread::scope(|s| {
@@ -191,7 +224,7 @@ impl ModelRunner for PythonRunner {
 }
 
 /// `build_summary` for the web dashboard — runs the models via Python.
-fn build_summary(db: &Path, tz: i64) -> Result<Value> {
+fn build_summary(db: &Path, tz: f64) -> Result<Value> {
     oura_summary::build_summary(db, tz, &PythonRunner)
 }
 
@@ -203,7 +236,7 @@ fn build_summary(db: &Path, tz: i64) -> Result<Value> {
 // edit transparently invalidates the cache with no explicit wiring.
 struct SummaryCache {
     db: PathBuf,
-    tz: i64,
+    tz: f64,
     token: CacheToken, // (db, profile.json, feature_modes.json) mtimes
     value: Arc<Value>,
 }
@@ -231,7 +264,7 @@ fn mtime(p: &Path) -> Option<SystemTime> {
 
 /// Cached `build_summary`: recompute only when oura.db, profile.json, or
 /// feature_modes.json changes.
-fn cached_summary(db: &Path, tz: i64) -> Result<Arc<Value>> {
+fn cached_summary(db: &Path, tz: f64) -> Result<Arc<Value>> {
     let token = summary_token(db);
     if let Some(c) = summary_cache().lock().unwrap().as_ref() {
         if c.db == db && c.tz == tz && c.token == token {
@@ -266,7 +299,7 @@ fn cached_summary(db: &Path, tz: i64) -> Result<Arc<Value>> {
 pub async fn serve(
     port: u16,
     db: PathBuf,
-    tz: i64,
+    tz: f64,
     name: String,
     key_file: Option<PathBuf>,
     seed: Demographics,
@@ -373,7 +406,7 @@ async fn handle(
     mut sock: TcpStream,
     port: u16,
     db: PathBuf,
-    tz: i64,
+    tz: f64,
     name: String,
     key_file: Option<PathBuf>,
 ) -> Result<()> {
@@ -427,6 +460,18 @@ async fn handle(
         return write_resp(&mut sock, "403 Forbidden", "text/plain", b"forbidden").await;
     }
 
+    // A dashboard can own only one BLE operation at a time.
+    static BLE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _ble_guard = if method == "POST"
+        && matches!(path, "/api/sync" | "/api/live-hr" | "/api/feature")
+    {
+        match BLE_GATE.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => return json_resp(&mut sock, &json!({"ok": false, "error": "Ring is busy; wait for the current operation to finish.", "message": "Ring is busy; wait for the current operation to finish."})).await,
+        }
+    } else {
+        None
+    };
     match (method, path) {
         (_, "/") | (_, "/index.html") => {
             write_resp(
@@ -579,8 +624,12 @@ async fn handle(
         ("GET", "/api/hourly-hr") => {
             // HR bars per `minutes` slot (default hourly, the iOS HeartRate screen's
             // data); `days` = 0 → all of them, the day page picks out the day it shows
-            let days = query_param(query, "days").and_then(|v| v.parse().ok()).unwrap_or(0);
-            let minutes = query_param(query, "minutes").and_then(|v| v.parse().ok()).unwrap_or(60);
+            let days = query_param(query, "days")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let minutes = query_param(query, "minutes")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60);
             let body = tokio::task::spawn_blocking(move || {
                 oura_summary::hourly_hr::hr_bins(&db, tz, days, minutes)
             })
@@ -739,37 +788,70 @@ async fn live_hr(
         .kill_on_drop(true)
         .spawn()
         .context("running `oura live-hr`")?;
+    let stderr = child.stderr.take().context("child stderr")?;
+    let stderr_task = tokio::spawn(read_stderr_tail(stderr));
     let mut lines = tokio::io::BufReader::new(child.stdout.take().context("child stdout")?).lines();
     let mut probe = [0u8; 1];
-    loop {
-        tokio::select! {
-            line = lines.next_line() => {
-                let Some(line) = line? else { break };
-                let msg = if line.starts_with("Streaming live heart rate") {
-                    json!({ "status": "live" })
-                } else if let Some((bpm, ibi_ms)) = parse_beat_line(&line) {
-                    json!({ "bpm": bpm, "ibi_ms": ibi_ms })
-                } else {
-                    continue;
-                };
-                send_line(&mut wr, &msg).await?;
+    let session = tokio::time::timeout(std::time::Duration::from_secs(210), async {
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    let Some(line) = line? else { break };
+                    let msg = if line.starts_with("Streaming live heart rate") {
+                        json!({ "status": "live" })
+                    } else if let Some((bpm, ibi_ms)) = parse_beat_line(&line) {
+                        json!({ "bpm": bpm, "ibi_ms": ibi_ms })
+                    } else { continue };
+                    send_line(&mut wr, &msg).await?;
+                }
+                n = rd.read(&mut probe) => if matches!(n, Ok(0) | Err(_)) {
+                    return Err(anyhow!("client disconnected"));
+                },
             }
-            // the page stopped or went away: dropping `child` kills it
-            n = rd.read(&mut probe) => if matches!(n, Ok(0) | Err(_)) { return Ok(()) },
         }
-    }
-    let ok = child.wait().await?.success();
-    let mut stderr = String::new();
-    if let Some(mut e) = child.stderr.take() {
-        let _ = e.read_to_string(&mut stderr).await;
-    }
+        Ok::<_, anyhow::Error>(child.wait().await?.success())
+    })
+    .await;
+    let ok = match session {
+        Ok(Ok(ok)) => ok,
+        _ => {
+            // Retain the BLE gate until the process is killed and reaped.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            stderr_task.abort();
+            return send_line(
+                &mut wr,
+                &json!({"error": "Live heart rate stopped or timed out."}),
+            )
+            .await;
+        }
+    };
+    let stderr = stderr_task.await.unwrap_or_default();
     let last = if ok {
         json!({ "done": true })
     } else {
-        let msg = stderr.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("live heart rate failed");
+        let msg = stderr
+            .lines()
+            .rfind(|l| !l.trim().is_empty())
+            .unwrap_or("live heart rate failed");
         json!({ "error": msg.trim() })
     };
     send_line(&mut wr, &last).await
+}
+
+async fn read_stderr_tail(mut reader: impl tokio::io::AsyncRead + Unpin) -> String {
+    let mut tail = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = reader.read(&mut buf).await {
+        if n == 0 {
+            break;
+        }
+        tail.extend_from_slice(&buf[..n]);
+        if tail.len() > 8192 {
+            tail.drain(..tail.len() - 8192);
+        }
+    }
+    String::from_utf8_lossy(&tail).into_owned()
 }
 
 async fn send_line(wr: &mut (impl AsyncWriteExt + Unpin), v: &Value) -> Result<()> {
@@ -871,6 +953,19 @@ fn run_feature(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn live_stderr_is_drained_without_unbounded_retention() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let task = tokio::spawn(async move {
+            writer.write_all(&vec![b'x'; 200000]).await.unwrap();
+            writer.write_all(b"\nlast error\n").await.unwrap();
+        });
+        let tail = tokio::time::timeout(std::time::Duration::from_secs(2), read_stderr_tail(reader)).await.unwrap();
+        task.await.unwrap();
+        assert_eq!(tail.len(), 8192);
+        assert!(tail.ends_with("last error\n"));
+    }
+
     #[test]
     fn stalled_runner_is_killed_and_reaped() {
         let mut command = Command::new("python3");
@@ -880,14 +975,21 @@ mod tests {
     #[test]
     fn large_runner_output_does_not_deadlock_and_input_reaches_eof() {
         let mut command = Command::new("python3");
-        command.args(["-c", "import json,sys; print(json.dumps({'input':sys.stdin.read(),'data':'x'*200000}))"]);
-        let value = model_output(command, Some(b"window"), std::time::Duration::from_secs(5)).unwrap();
+        command.args([
+            "-c",
+            "import json,sys; print(json.dumps({'input':sys.stdin.read(),'data':'x'*200000}))",
+        ]);
+        let value =
+            model_output(command, Some(b"window"), std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(value["input"], "window");
         assert_eq!(value["data"].as_str().unwrap().len(), 200000);
     }
     #[test]
     fn parses_live_hr_beat_lines() {
         assert_eq!(parse_beat_line("  81 bpm (IBI 733 ms)"), Some((81, 733)));
-        assert_eq!(parse_beat_line("No beats captured. Make sure the ring is worn."), None);
+        assert_eq!(
+            parse_beat_line("No beats captured. Make sure the ring is worn."),
+            None
+        );
     }
 }

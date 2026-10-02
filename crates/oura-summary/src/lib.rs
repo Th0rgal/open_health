@@ -77,7 +77,7 @@ impl Default for Demographics {
 /// stage. The runner returns each model's raw `--json` output (or `None`).
 pub struct ModelInputs<'a> {
     pub db: &'a Path,
-    pub tz: i64,
+    pub tz: f64,
     pub demo: &'a Demographics,
     pub sleep_ranges: &'a [[i64; 3]],
 }
@@ -189,16 +189,40 @@ pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 
 const WD: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-fn date_label(unix_s: f64, tz: i64) -> String {
-    let days = (unix_s as i64 + tz * 3600).div_euclid(86400);
+/// Fixed UTC offset in hours. Accepts legacy integer callers and fractional offsets.
+#[derive(Clone, Copy)]
+pub struct OffsetHours(pub f64);
+impl From<i64> for OffsetHours {
+    fn from(v: i64) -> Self {
+        Self(v as f64)
+    }
+}
+impl From<i32> for OffsetHours {
+    fn from(v: i32) -> Self {
+        Self(v as f64)
+    }
+}
+impl From<f64> for OffsetHours {
+    fn from(v: f64) -> Self {
+        Self(v)
+    }
+}
+fn offset_seconds(tz: f64) -> i64 {
+    (tz * 3600.0).round() as i64
+}
+
+fn date_label(unix_s: f64, tz: impl Into<OffsetHours>) -> String {
+    let tz = tz.into().0;
+    let days = (unix_s as i64 + offset_seconds(tz)).div_euclid(86400);
     let (_, m, d) = civil(days);
     let wd = WD[(days + 3).rem_euclid(7) as usize];
     format!("{wd} {m:02}-{d:02}")
 }
 /// Full calendar date (`YYYY-MM-DD`) — an unambiguous key for matching a night to a
 /// day's activity (the weekday `date_label` collides across years).
-fn ymd_label(unix_s: f64, tz: i64) -> String {
-    let days = (unix_s as i64 + tz * 3600).div_euclid(86400);
+fn ymd_label(unix_s: f64, tz: impl Into<OffsetHours>) -> String {
+    let tz = tz.into().0;
+    let days = (unix_s as i64 + offset_seconds(tz)).div_euclid(86400);
     let (y, m, d) = civil(days);
     format!("{y:04}-{m:02}-{d:02}")
 }
@@ -323,8 +347,9 @@ fn sleep_debt_summary(asleep_by_day: &std::collections::BTreeMap<i64, i32>) -> V
         "days": days,
     })
 }
-fn hm(unix_s: f64, tz: i64) -> String {
-    let sod = (unix_s as i64 + tz * 3600).rem_euclid(86400);
+fn hm(unix_s: f64, tz: impl Into<OffsetHours>) -> String {
+    let tz = tz.into().0;
+    let sod = (unix_s as i64 + offset_seconds(tz)).rem_euclid(86400);
     format!("{:02}:{:02}", sod / 3600, (sod % 3600) / 60)
 }
 /// Oura "SpO2 Simple" calibration → percent, clamped to the 85–100 display range.
@@ -382,7 +407,6 @@ struct Night {
     temp_end_ds: Option<i64>,
     spo2: Vec<f64>,
     motion: Vec<f64>,
-    motion_t: Vec<(i64, f64)>,
     // timestamped (time_ds, value) HRV/HR samples for stage-resolved autonomics — the
     // flat `rmssd`/`hr` vecs above drop timing, which we need to map each sample to its
     // hypnogram stage.
@@ -1258,7 +1282,10 @@ fn timed_series(
         .filter(|b| b.2 > 0)
         .map(|b| {
             let n = b.2 as f64;
-            [to_unix((b.0 / n).round() as i64).round(), ((b.1 / n) * m).round() / m]
+            [
+                to_unix((b.0 / n).round() as i64).round(),
+                ((b.1 / n) * m).round() / m,
+            ]
         })
         .collect()
 }
@@ -1326,7 +1353,16 @@ fn make_digest(hrv: &VitalStat, rhr: &VitalStat) -> String {
 
 /// Assemble the full dashboard summary as a JSON value. The torch models are
 /// supplied by `runner` (Python subprocess on desktop, `.ptl` on-device).
-pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Value> {
+pub fn build_summary(
+    db: &Path,
+    tz: impl Into<OffsetHours>,
+    runner: &dyn ModelRunner,
+) -> Result<Value> {
+    let tz = tz.into().0;
+    anyhow::ensure!(
+        tz.is_finite() && (-24.0..=24.0).contains(&tz),
+        "invalid UTC offset"
+    );
     let db_abs = std::fs::canonicalize(db).unwrap_or_else(|_| {
         std::env::current_dir()
             .map(|d| d.join(db))
@@ -1577,8 +1613,11 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 // temperature. Generic `temp_event` contains several device/ambient
                 // channels; mixing it here creates a false plunge when sleep mode ends.
                 if let Some(a) = v["temps_c"].as_array() {
-                    let temps: Vec<f64> =
-                        a.iter().filter_map(|x| x.as_f64()).filter(|&c| c > 0.0).collect();
+                    let temps: Vec<f64> = a
+                        .iter()
+                        .filter_map(|x| x.as_f64())
+                        .filter(|&c| c > 0.0)
+                        .collect();
                     nights[idx].temp_t.extend(temps.iter().map(|&c| (*ds, c)));
                     nights[idx].temp.extend(temps);
                     nights[idx].temp_start_ds = Some(
@@ -1618,7 +1657,10 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     }
 
     // the model seam — sleep / cva / activity (Python subprocess or on-device .ptl)
-    let sleep_ranges: Vec<[i64; 3]> = nights.iter().map(|nt| [nt.start_ds, nt.end_ds, nt.captured_unix]).collect();
+    let sleep_ranges: Vec<[i64; 3]> = nights
+        .iter()
+        .map(|nt| [nt.start_ds, nt.end_ds, nt.captured_unix])
+        .collect();
     let ModelOutputs {
         sleep_batch,
         cva,
@@ -1638,8 +1680,12 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             arr.iter()
                 .filter_map(|h| {
                     let start = h["start_ds"].as_i64()?;
-                    let captured = h["captured_unix"].as_i64().or_else(||
-                        nights.iter().find(|nt| nt.start_ds == start).map(|nt| nt.captured_unix))?;
+                    let captured = h["captured_unix"].as_i64().or_else(|| {
+                        nights
+                            .iter()
+                            .find(|nt| nt.start_ds == start)
+                            .map(|nt| nt.captured_unix)
+                    })?;
                     Some(((start, captured), h.clone()))
                 })
                 .collect()
@@ -1726,7 +1772,9 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         let end_unix = unix_s_at(nt.end_ds, nt.captured_unix);
         // time-true lane points on this night's clock (see `timed_series`)
         let timed = |v: &[(i64, f64)], dp: i32| {
-            timed_series(v, nt.start_ds, nt.end_ds, SERIES_MAX, dp, |ds| unix_s_at(ds, nt.captured_unix))
+            timed_series(v, nt.start_ds, nt.end_ds, SERIES_MAX, dp, |ds| {
+                unix_s_at(ds, nt.captured_unix)
+            })
         };
         let span_ds = (nt.end_ds - nt.start_ds).max(1) as f64;
         let temp_span = match (nt.temp_start_ds, nt.temp_end_ds) {
@@ -1737,10 +1785,10 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             _ => None,
         };
         if !complete_staging {
-            incomplete_sleep_days.insert((end_unix as i64 + tz * 3600).div_euclid(86_400));
+            incomplete_sleep_days.insert((end_unix as i64 + offset_seconds(tz)).div_euclid(86_400));
         }
         if asleep_s > 0 {
-            let wake_day = (end_unix as i64 + tz * 3600).div_euclid(86_400);
+            let wake_day = (end_unix as i64 + offset_seconds(tz)).div_euclid(86_400);
             *asleep_by_day.entry(wake_day).or_default() += asleep_s;
         }
         let night_rhr = {
@@ -1889,7 +1937,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 for (i, m) in met.iter().enumerate() {
                     let mv = m.as_f64().unwrap_or(1.0);
                     let unix = unix_s_at(*ds, *cu) + i as f64 * 60.0;
-                    let local = unix + tz as f64 * 3600.0;
+                    let local = unix + tz * 3600.0;
                     let day_idx = (local / 86400.0).floor() as i64;
                     let (y, mo, dd) = civil(day_idx);
                     let key = format!("{y:04}-{mo:02}-{dd:02}");
@@ -2211,14 +2259,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fractional_timezone_preserves_minutes_and_day_boundaries() {
+        assert_eq!(hm(0.0, 5.75), "05:45");
+        assert_eq!(hm(0.0, -3.5), "20:30");
+        assert_eq!(ymd_label(0.0, -3.5), "1969-12-31");
+        assert_eq!(ymd_label(66600.0, 5.5), "1970-01-02");
+    }
+
+    #[test]
     fn battery_history_is_time_ordered_and_windowed() {
         let day = 86_400.0;
         // readings across three days, deliberately out of order
-        let mut raw = vec![(3.0 * day, 70), (1.0 * day, 90), (2.0 * day, 80), (3.0 * day + 60.0, 71)];
+        let mut raw = vec![
+            (3.0 * day, 70),
+            (1.0 * day, 90),
+            (2.0 * day, 80),
+            (3.0 * day + 60.0, 71),
+        ];
         raw.reverse();
         let got = battery_history(&raw, 2);
         // windowed to the last 2 days from the newest reading, oldest first
-        assert_eq!(got, vec![[2.0 * day, 80.0], [3.0 * day, 70.0], [3.0 * day + 60.0, 71.0]]);
+        assert_eq!(
+            got,
+            vec![
+                [2.0 * day, 80.0],
+                [3.0 * day, 70.0],
+                [3.0 * day + 60.0, 71.0]
+            ]
+        );
         assert!(battery_history(&[], 14).is_empty());
     }
 
@@ -2227,7 +2295,9 @@ mod tests {
         let secs = |ds: i64| ds as f64 / 10.0;
         // 5-minute samples (3 000 ds) for the first half hour of an hour-long night, then
         // nothing: the points must stay in that first half, not be spread to the end.
-        let samples: Vec<(i64, f64)> = (0..=6).map(|i| (1_000 + i * 3_000, 60.0 + i as f64)).collect();
+        let samples: Vec<(i64, f64)> = (0..=6)
+            .map(|i| (1_000 + i * 3_000, 60.0 + i as f64))
+            .collect();
         let pts = timed_series(&samples, 1_000, 37_000, 240, 0, secs);
         assert_eq!(pts.len(), 7);
         assert_eq!(pts[0], [100.0, 60.0]);
@@ -2235,7 +2305,9 @@ mod tests {
         // samples outside the night window are dropped
         assert!(timed_series(&[(0, 50.0), (40_000, 50.0)], 1_000, 37_000, 240, 0, secs).is_empty());
         // a dense stream is bucketed down to at most `max` points of bucket means
-        let dense: Vec<(i64, f64)> = (0..1_000).map(|i| (i * 10, if i % 2 == 0 { 10.0 } else { 20.0 })).collect();
+        let dense: Vec<(i64, f64)> = (0..1_000)
+            .map(|i| (i * 10, if i % 2 == 0 { 10.0 } else { 20.0 }))
+            .collect();
         let few = timed_series(&dense, 0, 10_000, 50, 1, secs);
         assert_eq!(few.len(), 50);
         assert!(few.iter().all(|p| (p[1] - 15.0).abs() < 1e-9), "{few:?}");
@@ -2255,15 +2327,37 @@ mod tests {
     #[test]
     fn identical_relative_starts_in_different_boots_keep_distinct_hypnograms() {
         let nights = [
-            Night { start_ds: 0, end_ds: 36000, captured_unix: 1, ..Default::default() },
-            Night { start_ds: 0, end_ds: 36000, captured_unix: 86401, ..Default::default() },
+            Night {
+                start_ds: 0,
+                end_ds: 36000,
+                captured_unix: 1,
+                ..Default::default()
+            },
+            Night {
+                start_ds: 0,
+                end_ds: 36000,
+                captured_unix: 86401,
+                ..Default::default()
+            },
         ];
         let runs = [
-            RingSleep { start_ds: 0, end_ds: 36000, captured_unix: 1, codes: vec![1; 120] },
-            RingSleep { start_ds: 0, end_ds: 36000, captured_unix: 86401, codes: vec![3; 120] },
+            RingSleep {
+                start_ds: 0,
+                end_ds: 36000,
+                captured_unix: 1,
+                codes: vec![1; 120],
+            },
+            RingSleep {
+                start_ds: 0,
+                end_ds: 36000,
+                captured_unix: 86401,
+                codes: vec![3; 120],
+            },
         ];
-        let hyps: std::collections::HashMap<_, _> = ring_hypnograms(&runs, &nights,
-            |ds, cu| ds as f64 / 10.0 + cu as f64).into_iter().collect();
+        let hyps: std::collections::HashMap<_, _> =
+            ring_hypnograms(&runs, &nights, |ds, cu| ds as f64 / 10.0 + cu as f64)
+                .into_iter()
+                .collect();
         assert_eq!(hyps.len(), 2);
         assert_eq!(hyps[&(0, 1)]["stages"][0], 1);
         assert_eq!(hyps[&(0, 86401)]["stages"][0], 3);
@@ -2420,15 +2514,13 @@ mod tests {
         // the ring's marker ends early while its sleep streams keep coming (every 5 min)
         let bed_end = 5 * 3600 * 10;
         let support_end = 7 * 3600 * 10;
-        let support: Vec<(i64, i64)> =
-            (bed_end..=support_end).step_by(5 * 60 * 10).map(|ds| (ds, 1)).collect();
-        let got = normalize_bed_periods(
-            vec![bed(0, bed_end)],
-            &support,
-            &[],
-            &[],
-            |ds, _| ds as f64 / 10.0,
-        );
+        let support: Vec<(i64, i64)> = (bed_end..=support_end)
+            .step_by(5 * 60 * 10)
+            .map(|ds| (ds, 1))
+            .collect();
+        let got = normalize_bed_periods(vec![bed(0, bed_end)], &support, &[], &[], |ds, _| {
+            ds as f64 / 10.0
+        });
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].end_ds, support_end);
         assert_eq!(got[0].raw_end_ds, bed_end);
@@ -2442,11 +2534,21 @@ mod tests {
         // burst of resting SpO2/temperature packets (sitting still) must not become part
         // of the night.
         let end = 8 * 60 * minute;
-        let mut support: Vec<(i64, i64)> = (0..=end).step_by(5 * minute as usize).map(|ds| (ds, 1)).collect();
+        let mut support: Vec<(i64, i64)> = (0..=end)
+            .step_by(5 * minute as usize)
+            .map(|ds| (ds, 1))
+            .collect();
         support.extend((0..20).map(|i| (end + (150 + i) * minute, 1)));
-        let got = normalize_bed_periods(vec![bed(0, end)], &support, &[], &[], |ds, _| ds as f64 / 10.0);
+        let got = normalize_bed_periods(vec![bed(0, end)], &support, &[], &[], |ds, _| {
+            ds as f64 / 10.0
+        });
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].end_ds, end, "night ended {} min late", (got[0].end_ds - end) / minute);
+        assert_eq!(
+            got[0].end_ds,
+            end,
+            "night ended {} min late",
+            (got[0].end_ds - end) / minute
+        );
     }
 
     #[test]
@@ -2464,8 +2566,11 @@ mod tests {
         }
         pulses.push((157 * minute, 1, 1));
         // the explicit sleep streams run on (every 5 min) from the marker to 05:34
-        let support: Vec<(i64, i64)> =
-            (raw_end..=explicit_end).step_by(5 * minute as usize).chain([explicit_end]).map(|ds| (ds, 1)).collect();
+        let support: Vec<(i64, i64)> = (raw_end..=explicit_end)
+            .step_by(5 * minute as usize)
+            .chain([explicit_end])
+            .map(|ds| (ds, 1))
+            .collect();
         let got = normalize_bed_periods(
             vec![bed(-6 * 3600 * 10, raw_end)],
             &support,

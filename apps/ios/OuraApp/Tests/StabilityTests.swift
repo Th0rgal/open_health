@@ -530,6 +530,26 @@ final class StabilityTests: XCTestCase {
         try events.validate()
     }
 
+    func testMultipleRebootsLeaveMiddleUndated() throws {
+        let url = try fixture()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        let sql = """
+        DELETE FROM events;
+        INSERT INTO events VALUES (1,1000,66,'{"unix_time":1700000000}',1700000000,NULL);
+        INSERT INTO events VALUES (2,2000,65,'{}',1700100000,NULL);
+        INSERT INTO events VALUES (3,8000,65,'{}',1700100000,NULL);
+        INSERT INTO events VALUES (4,10000,66,'{"unix_time":1700100000}',1700100000,NULL);
+        """
+        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        let clock = EventStore.RingClock(events: try EventStore.decodedEvents(dbPath: url.path))
+        XCTAssertEqual(clock.resolve(5000, capturedUnix: 1700100000).source, .undated)
+        XCTAssertEqual(clock.resolve(1500, capturedUnix: 1700100000).unix, 1700000050)
+        XCTAssertEqual(clock.resolve(9000, capturedUnix: 1700100000).unix, 1700099900)
+    }
+
     func testPhoneAnchorDatesANewBoot() throws {
         // The sync wrote a phone-time anchor at the newest drained ds: 23:00→08:00 UTC+2.
         let url = try fixture()
