@@ -69,11 +69,11 @@ struct DayExport: Encodable {
         switch kind {
         case .sleep:
             guard let n = s.night(forDay: day) else { return }
-            let metrics = n.stages.flatMap { st in
-                Sleep.metrics(Sleep.smooth(st, 5), inBedS: (n.in_bed_h ?? 0) * 3600)
+            let metrics = n.hypnogram.flatMap { st in
+                Sleep.metrics(Sleep.smooth(st, 5), inBedS: n.durationS)
             }
             var autonomic: Autonomic?
-            if let st = n.stages, let series = n.series {
+            if let st = n.hypnogram, let series = n.series {
                 let a = Sleep.autonomic(hr: series.hr, hrv: series.hrv, stages: st)
                 if a.any { autonomic = Autonomic(a) }
             }

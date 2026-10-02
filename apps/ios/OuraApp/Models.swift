@@ -27,6 +27,7 @@ struct NightSeries: Codable {
     var hrv: [Double] = []
     var spo2: [Double] = []
     var temp: [Double] = []
+    var motion_time: [Double]? = nil
     var temp_span: [Double]? = nil
     var motion: [Double] = []
 }
@@ -44,12 +45,23 @@ struct NightRow: Codable, Identifiable {
     var deep_pct: Double?; var light_pct: Double?; var rem_pct: Double?
     var wake_pct: Double?; var efficiency: Double?
     var stages: [Int]? = nil
+    var stages_full: [Int]? = nil
+    var staging_source: String? = nil
+    var staging_coverage_pct: Double? = nil
+    var staging_complete: Bool? = nil
+    var captured_unix: Int64? = nil
+    var hypnogram: [Int]? { stages_full ?? stages }
+    var stagingComplete: Bool { staging_complete ?? (hypnogram?.allSatisfy { (1...4).contains($0) } ?? false) }
+    var durationS: Double {
+        if let start_unix, let end_unix { return Double(end_unix - start_unix) }
+        return (in_bed_h ?? 0) * 3600
+    }
     var series: NightSeries? = nil
     /// Nightly respiratory rate (breaths/min), the ring's own per-window estimate.
     var breath_rate: Double? = nil
     var sleep_score: SleepScore? = nil
     var id: String { (date ?? "") + (start ?? "") }
-    var hasHypnogram: Bool { (stages?.count ?? 0) > 1 }
+    var hasHypnogram: Bool { (hypnogram?.count ?? 0) > 1 }
 }
 /// One component of the literature-based sleep score, with the paper behind it.
 struct SleepScoreComponent: Codable, Identifiable {
@@ -191,6 +203,7 @@ struct UndatedNight: Codable {
     var start_ds: Int64?; var end_ds: Int64?; var in_bed_h: Double?; var captured_unix: Int64?; var source: String?
 }
 struct Summary: Codable {
+    var analysis_digest: String? = nil
     var digest: String?
     var device: Device?
     var nights: [NightRow] = []

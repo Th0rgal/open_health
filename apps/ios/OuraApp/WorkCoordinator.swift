@@ -21,7 +21,11 @@ final class AnalysisRun: @unchecked Sendable {
     private let lock = NSLock()
     private var stopped = false
     let id = UUID().uuidString
-    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+    private let deadline: TimeInterval
+    init(timeout: TimeInterval = 180) {
+        deadline = ProcessInfo.processInfo.systemUptime + timeout
+    }
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return stopped || ProcessInfo.processInfo.systemUptime >= deadline }
     func cancel() { lock.lock(); stopped = true; lock.unlock() }
     static var current: AnalysisRun? { Thread.current.threadDictionary["oura.analysis"] as? AnalysisRun }
     static var cancelled: Bool { current?.isCancelled ?? false }

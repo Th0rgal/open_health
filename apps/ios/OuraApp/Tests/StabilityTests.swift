@@ -3,6 +3,35 @@ import SQLite3
 @testable import OuraApp
 
 final class StabilityTests: XCTestCase {
+    func testSleepNetOutputKeepsItsOwnTimestamps() {
+        XCTAssertEqual(Sleep.alignedStages(timestamps: [60000, 90000], stages: [2, 3], startMs: 0, endMs: 120000), [0, 0, 2, 3])
+        XCTAssertEqual(Sleep.alignedStages(timestamps: [-30000, 0, 30000], stages: [4, 1, 2], startMs: 0, endMs: 60000), [1, 2])
+        XCTAssertNil(Sleep.alignedStages(timestamps: [30000, 0], stages: [1, 2], startMs: 0, endMs: 60000))
+        XCTAssertNil(Sleep.alignedStages(timestamps: [0], stages: [8], startMs: 0, endMs: 60000))
+    }
+
+    func testUnknownStagesStayUnknownAndDoNotProduceSleepMetrics() {
+        let stages = Array(repeating: 0, count: 480) + Array(repeating: 2, count: 480)
+        let smoothed = Sleep.smooth(stages, 5)
+        XCTAssertEqual(Array(smoothed.prefix(480)), Array(repeating: 0, count: 480))
+        XCTAssertNil(Sleep.metrics(smoothed, inBedS: 8 * 3600))
+        XCTAssertEqual(Sleep.asleepS(smoothed, inBedS: 8 * 3600), 0)
+        XCTAssertEqual(Sleep.metrics(Array(repeating: 4, count: 120) + Array(repeating: 2, count: 840),
+                                    inBedS: 8 * 3600)?.solMin, 60)
+    }
+
+    func testNightUsesFullStagesAndExactDurationInsteadOfRoundedPreview() throws {
+        let data = Data(#"{"stages":[4,2],"stages_full":[4,1,2,3],"start_unix":100,"end_unix":220,"in_bed_h":0.1}"#.utf8)
+        let night = try JSONDecoder().decode(NightRow.self, from: data)
+        XCTAssertEqual(night.hypnogram, [4, 1, 2, 3])
+        XCTAssertEqual(night.durationS, 120)
+    }
+
+    func testAnalysisDeadlineCancelsCooperativeWork() {
+        let run = AnalysisRun(timeout: -1)
+        run.perform { XCTAssertThrowsError(try AnalysisRun.check()) }
+    }
+
     func testOperationFailureSummaryKeepsCauseBeforeStackTrace() {
         let cause = "2026-09-09 error [models] activity day=2026-07-06 failed: select index out of range"
         let trace = (0..<24).map { "frame #\($0): libtorch_cpu" }.joined(separator: "\n")
@@ -74,8 +103,10 @@ final class StabilityTests: XCTestCase {
         let older = NightRow(ymd: "2026-09-08", start_ds: 100, end_ds: 190, start: "23:00", end: "07:00")
         var savedLatest = latest
         savedLatest.stages = [1, 2, 3, 4]
+        savedLatest.staging_source = "sleepnet"
         var savedOlder = older
         savedOlder.stages = [2, 3, 2, 1]
+        savedOlder.staging_source = "sleepnet"
         let nights = [latest, older]
 
         let firstLaunch = Core.automaticSleepPlan(nights: nights, previous: nil)
@@ -87,6 +118,8 @@ final class StabilityTests: XCTestCase {
         XCTAssertTrue(missingOlder.pending.isEmpty)
         let reopen = Core.automaticSleepPlan(nights: nights, previous: Summary(nights: [savedLatest, savedOlder]))
         XCTAssertTrue(reopen.pending.isEmpty)
+        let newInputs = Core.automaticSleepPlan(nights: nights, previous: Summary(nights: [savedLatest, savedOlder]), revalidateLatest: true)
+        XCTAssertEqual(newInputs.pending.map(\.start_ds), [200])
         XCTAssertEqual(reopen.saved.count, 2)
 
         var changed = latest

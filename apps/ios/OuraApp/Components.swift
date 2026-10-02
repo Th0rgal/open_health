@@ -474,7 +474,7 @@ struct Hypnogram: View {
         Canvas { ctx, size in
             guard !stages.isEmpty else { return }
             let w = size.width / CGFloat(stages.count)
-            for (i, s) in stages.enumerated() {
+            for (i, s) in stages.enumerated() where (1...4).contains(s) {
                 let frac: CGFloat = switch s { case 1: 1; case 2: 0.72; case 3: 0.48; default: 0.28 }
                 let h = size.height * frac
                 let r = CGRect(x: CGFloat(i) * w, y: size.height - h, width: w + 0.4, height: h)

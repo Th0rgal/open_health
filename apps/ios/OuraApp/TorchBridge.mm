@@ -46,8 +46,8 @@ int oura_sleepnet(const char *model_path,
                   const int64_t *acm_ts, const float *acm_val, int n_acm,
                   const int64_t *temp_ts, const float *temp_val, int n_temp,
                   int64_t bedtime_start_ms, int64_t bedtime_end_ms,
-                  int *out_stages, int max_out) {
-    if (!model_path || !out_stages || max_out <= 0 || n_ibi <= 0) return -1;
+                  int *out_stages, int64_t *out_timestamps_ms, int max_out) {
+    if (!model_path || !out_stages || !out_timestamps_ms || max_out <= 0 || n_ibi <= 0) return -1;
     std::lock_guard<std::mutex> lock(g_torch);
     try {
         static std::unique_ptr<torch::jit::mobile::Module> cached;
@@ -79,7 +79,14 @@ int oura_sleepnet(const char *model_path,
             return -1;
         }
         auto col0 = staging.select(1, 0).to(at::kInt).contiguous();
-        int n = std::min<int>((int)col0.numel(), max_out);
+        auto timestamps = out->elements()[0].toTensor().to(at::kLong).reshape({-1}).contiguous();
+        if (timestamps.numel() != col0.numel() || col0.numel() > max_out) {
+            NSLog(@"oura_sleepnet: mismatched timestamps or output exceeds buffer");
+            return -1;
+        }
+        int n = (int)col0.numel();
+        const int64_t *ts = timestamps.data_ptr<int64_t>();
+        for (int i = 0; i < n; i++) out_timestamps_ms[i] = ts[i];
         const int *acc = col0.data_ptr<int>();
         for (int i = 0; i < n; i++) out_stages[i] = acc[i];
         if ((int)col0.numel() > max_out) {

@@ -17,6 +17,7 @@ from pathlib import Path
 import torch
 
 from _common import resolve_db, resolve_models_dir
+from sleep_inputs import aligned_stages, collect_inputs
 
 REPO = Path(__file__).resolve().parent.parent
 TZ = 1
@@ -55,31 +56,14 @@ def hm(ms_):
 MODEL_M = torch.jit.load(MODEL, map_location="cpu").eval()
 
 
-def score_window(start_ds, end_ds):
+def score_window(start_ds, end_ds, captured_unix=None):
     """Score one bedtime window. Returns (out_dict, ts, stages) or (err_str, None, None)."""
     lo, hi = start_ds - 6000, end_ds + 6000  # ±10 min margin
     beats, acm, temp = [], [], []
-    bed_cu = next((cu for ds, tag, js, cu in rows if tag == 0x76 and
+    bed_cu = captured_unix if captured_unix is not None else next((cu for ds, tag, js, cu in reversed(rows) if tag == 0x76 and
                    json.loads(js).get("bedtime_start_ds") == start_ds), None)
-    for ds, tag, js, cu in rows:
-        if not (lo <= ds <= hi):
-            continue
-        v = json.loads(js)
-        if tag in (0x60, 0x80) and v.get("ibi_ms"):  # ibi_and_amplitude + green_ibi_quality
-            ibi = v["ibi_ms"]; amp = v.get("amplitude", [0] * len(ibi))
-            t = ms(ds, cu); acc = 0
-            for i, x in enumerate(ibi):
-                if x <= 0:  # zero/negative IBI can't advance the beat clock — skip (matches run_bdi)
-                    continue
-                acc += x
-                valid = 1 if 300 <= x <= 2000 else 0
-                beats.append((t + acc, float(x), float(amp[i] if i < len(amp) else 0), valid))
-        elif tag == 0x47 and v.get("motion_seconds") is not None:
-            acm.append((ms(ds, cu), float(v["motion_seconds"])))
-        elif tag == 0x46 and v.get("temps_c"):
-            temp.append((ms(ds, cu), float(v["temps_c"][0])))
-
-    beats.sort(); acm.sort(); temp.sort()
+    decoded_rows = ((ds, tag, json.loads(js), cu) for ds, tag, js, cu in rows)
+    beats, acm, temp = collect_inputs(decoded_rows, start_ds, end_ds, bed_cu, ms)
     if not beats or not any(b[3] == 1 for b in beats):
         return "not enough valid IBI in this window", None, None
 
@@ -103,17 +87,21 @@ def score_window(start_ds, end_ds):
             spo2_val, spo2_ts, scalars, tst)
 
     stages = [int(s) for s in staging[:, 0].tolist()]
+    if not stages:
+        return "SleepNet-moonstone returned zero epochs for this window", None, None
+    stages = aligned_stages(ts.reshape(-1).tolist(), stages, ms(start_ds, bed_cu), ms(end_ds, bed_cu))
     n = len(stages)
     if n == 0:
         return "SleepNet-moonstone returned zero epochs for this window", None, None
     mins = {k: stages.count(c) * 0.5 for c, k in STAGE.items()}
-    asleep = n * 0.5 - mins["WAKE"]
+    asleep = sum(mins[k] for k in ("DEEP", "LIGHT", "REM"))
     in_bed = n * 0.5
     out = {
         "start_ds": start_ds, "end_ds": end_ds,
         "start_local": hm(int(ts[0])), "end_local": hm(int(ts[-1])),
         "epochs": n, "in_bed_min": in_bed,
-        "asleep_min": asleep, "efficiency_pct": round(100 * asleep / in_bed),
+        "asleep_min": asleep, "efficiency_pct": round(100 * asleep / in_bed) if all(stages) else None,
+        "source": "sleepnet",
         "stages": stages,  # per-30s ints: 1=DEEP 2=LIGHT 3=REM 4=WAKE
     }
     for c, k in STAGE.items():
@@ -128,7 +116,7 @@ if BATCH:
     pairs = json.load(sys.stdin)
     results = []
     for p in pairs:
-        out, _, _ = score_window(int(p[0]), int(p[1]))
+        out, _, _ = score_window(int(p[0]), int(p[1]), int(p[2]) if len(p) > 2 else None)
         results.append(out if isinstance(out, dict) else None)
     print(json.dumps(results))
     sys.exit(0)

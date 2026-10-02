@@ -79,7 +79,7 @@ pub struct ModelInputs<'a> {
     pub db: &'a Path,
     pub tz: i64,
     pub demo: &'a Demographics,
-    pub sleep_ranges: &'a [[i64; 2]],
+    pub sleep_ranges: &'a [[i64; 3]],
 }
 
 /// Raw model outputs, matching the Python runners' `--json` shape.
@@ -382,6 +382,7 @@ struct Night {
     temp_end_ds: Option<i64>,
     spo2: Vec<f64>,
     motion: Vec<f64>,
+    motion_t: Vec<(i64, f64)>,
     // timestamped (time_ds, value) HRV/HR samples for stage-resolved autonomics — the
     // flat `rmssd`/`hr` vecs above drop timing, which we need to map each sample to its
     // hypnogram stage.
@@ -568,12 +569,13 @@ const RING_STAGE_EPOCH_S: f64 = 30.0;
 ///
 /// Asleep versus awake-in-bed, from data the hypnogram never touched. The anchor holds.
 ///
-/// The returned stage array spans the night's whole in-bed window so the existing
-/// uniform tiling stays honest: time in bed the ring did not analyse is filled with
-/// wake, which is what it is — you were in bed and the ring did not think you slept.
-/// That keeps sleep onset, efficiency and stage percentages measured against time in
-/// bed rather than against the sleep the ring chose to score.
-fn ring_hypnograms(runs: &[RingSleep], nights: &[Night]) -> Vec<(i64, Value)> {
+/// Unanalysed epochs are unknown (0), not evidence of wakefulness. Partial
+/// coverage must not manufacture sleep latency, efficiency or sleep debt.
+fn ring_hypnograms(
+    runs: &[RingSleep],
+    nights: &[Night],
+    unix_s_at: impl Fn(i64, i64) -> f64,
+) -> Vec<(i64, Value)> {
     let mut out = Vec::new();
     for night in nights {
         let span_ds = night.end_ds - night.start_ds;
@@ -582,9 +584,17 @@ fn ring_hypnograms(runs: &[RingSleep], nights: &[Night]) -> Vec<(i64, Value)> {
         }
         let epoch_ds = (RING_STAGE_EPOCH_S * 10.0) as i64;
         let cells = (span_ds / epoch_ds).max(1) as usize;
-        let mut stages = vec![4i64; cells];
+        let mut stages = vec![0i64; cells];
         let mut painted = false;
         for run in runs {
+            // Relative counters overlap across boots; reject runs from other epochs.
+            if (unix_s_at(run.end_ds, run.captured_unix)
+                - unix_s_at(run.end_ds, night.captured_unix))
+            .abs()
+                > EPOCH_ALIGNMENT_SLACK_S
+            {
+                continue;
+            }
             // keep a run that lies within this night's window (either end may hang over)
             if run.end_ds <= night.start_ds || run.start_ds >= night.end_ds {
                 continue;
@@ -605,7 +615,8 @@ fn ring_hypnograms(runs: &[RingSleep], nights: &[Night]) -> Vec<(i64, Value)> {
             let n = stages.iter().filter(|&&c| c == code).count();
             (n as f64 / stages.len() as f64 * 1000.0).round() / 10.0
         };
-        let asleep = stages.iter().filter(|&&c| c != 4).count();
+        let asleep = stages.iter().filter(|&&c| (1..=3).contains(&c)).count();
+        let complete = stages.iter().all(|c| (1..=4).contains(c));
         out.push((
             night.start_ds,
             json!({
@@ -615,7 +626,7 @@ fn ring_hypnograms(runs: &[RingSleep], nights: &[Night]) -> Vec<(i64, Value)> {
                 "light_pct": share(2),
                 "rem_pct": share(3),
                 "wake_pct": share(4),
-                "efficiency_pct": (asleep as f64 / stages.len() as f64 * 1000.0).round() / 10.0,
+                "efficiency_pct": complete.then(|| (asleep as f64 / stages.len() as f64 * 1000.0).round() / 10.0),
                 "source": "ring",
             }),
         ));
@@ -662,7 +673,8 @@ fn beds_from_sleep_signal(
 
     // 1. the ring's own analysed sleeps
     for run in ring_sleeps {
-        if run.end_ds - run.start_ds < MIN_DERIVED_BED_DS || covered(run.start_ds, run.end_ds, &derived)
+        if run.end_ds - run.start_ds < MIN_DERIVED_BED_DS
+            || covered(run.start_ds, run.end_ds, &derived)
         {
             continue;
         }
@@ -712,8 +724,7 @@ fn beds_from_sleep_signal(
         let Some((asleep_from, asleep_to)) = asleep_span(&sleep_state, start.0, end.0) else {
             continue;
         };
-        if asleep_to - asleep_from < MIN_DERIVED_BED_DS
-            || covered(asleep_from, asleep_to, &derived)
+        if asleep_to - asleep_from < MIN_DERIVED_BED_DS || covered(asleep_from, asleep_to, &derived)
         {
             continue;
         }
@@ -802,9 +813,7 @@ fn normalize_bed_periods(
     let awake_throughout = |from: i64, to: i64| {
         !asleep.is_empty()
             && to > from
-            && !asleep
-                .iter()
-                .any(|(start, end)| *start < to && from < *end)
+            && !asleep.iter().any(|(start, end)| *start < to && from < *end)
     };
 
     let merge_adjacent = |periods: Vec<BedPeriod>| {
@@ -863,9 +872,7 @@ fn normalize_bed_periods(
             .unwrap_or(i64::MAX);
         for &(support_ds, support_captured) in sleep_support {
             let raw_delta_ds = support_ds - original_end;
-            if !(0..=MAX_SLEEP_SIGNAL_EXTENSION_DS).contains(&raw_delta_ds)
-                || support_ds > wall
-            {
+            if !(0..=MAX_SLEEP_SIGNAL_EXTENSION_DS).contains(&raw_delta_ds) || support_ds > wall {
                 continue;
             }
             // A nocturnal event only means the ring was measuring. Where the ring also
@@ -1024,7 +1031,7 @@ fn count_periods(seq: &[i64], code: i64, merge_gap: usize, min_len: usize) -> u3
 /// the deep/REM front-vs-back-half split, and the asleep seconds used for sleep debt.
 fn sleep_metrics(stages: &[i64], in_bed_s: f64) -> (Value, i32) {
     let n = stages.len();
-    if n == 0 {
+    if n == 0 || stages.iter().any(|c| !(1..=4).contains(c)) {
         return (Value::Null, 0);
     }
     let epoch_min = in_bed_s / 60.0 / n as f64;
@@ -1143,6 +1150,9 @@ fn smooth_stages(vals: &[i64], win: usize) -> Vec<i64> {
     let half = win / 2;
     (0..vals.len())
         .map(|i| {
+            if vals[i] == 0 {
+                return 0;
+            }
             let a = i.saturating_sub(half);
             let b = (i + half + 1).min(vals.len());
             let mut counts = [0u32; 5];
@@ -1192,7 +1202,11 @@ fn downsample_codes(vals: &[i64], n: usize) -> Vec<i64> {
                     counts[s as usize] += 1;
                 }
             }
-            (1..=4).max_by_key(|&k| counts[k as usize]).unwrap_or(2) as i64
+            if slice.contains(&0) {
+                0
+            } else {
+                (1..=4).max_by_key(|&k| counts[k as usize]).unwrap_or(2) as i64
+            }
         })
         .collect()
 }
@@ -1312,9 +1326,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         }
         if n == "sleep_phase_data" {
             if let Ok(v) = serde_json::from_str::<Value>(jstr) {
-                if let (Some(page), Some(phases)) =
-                    (v["header"].as_i64(), v["phases"].as_array())
-                {
+                if let (Some(page), Some(phases)) = (v["header"].as_i64(), v["phases"].as_array()) {
                     ring_hypnogram_pages.push((
                         *ds,
                         *cu,
@@ -1423,7 +1435,12 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         nights
             .iter()
             .enumerate()
-            .filter(|(_, nt)| nt.start_ds - 600 <= ds && ds <= nt.end_ds + 600)
+            .filter(|(_, nt)| {
+                nt.start_ds - 600 <= ds
+                    && ds <= nt.end_ds + 600
+                    && (unix_s_at(ds, captured_unix) - unix_s_at(ds, nt.captured_unix)).abs()
+                        <= EPOCH_ALIGNMENT_SLACK_S
+            })
             .min_by_key(|(_, nt)| (nt.captured_unix - captured_unix).abs())
             .map(|(idx, _)| idx)
     };
@@ -1513,6 +1530,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 // the night, feeds the polysomnograph's movement lane.
                 if let Some(s) = v["motion_seconds"].as_f64() {
                     nights[idx].motion.push(s);
+                    nights[idx].motion_t.push((*ds, s));
                 }
             }
             _ => {}
@@ -1520,7 +1538,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     }
 
     // the model seam — sleep / cva / activity (Python subprocess or on-device .ptl)
-    let sleep_ranges: Vec<[i64; 2]> = nights.iter().map(|nt| [nt.start_ds, nt.end_ds]).collect();
+    let sleep_ranges: Vec<[i64; 3]> = nights.iter().map(|nt| [nt.start_ds, nt.end_ds, nt.captured_unix]).collect();
     let ModelOutputs {
         sleep_batch,
         cva,
@@ -1544,7 +1562,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         .unwrap_or_default();
     // The ring scores its own hypnogram; use it for any night the model runner did not
     // cover — which, in a model-free build, is every night.
-    for (start_ds, hypnogram) in ring_hypnograms(&ring_sleeps, &nights) {
+    for (start_ds, hypnogram) in ring_hypnograms(&ring_sleeps, &nights, unix_s_at) {
         hyps.entry(start_ds).or_insert(hypnogram);
     }
 
@@ -1578,8 +1596,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             return None;
         }
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance =
-            values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
         Some((mean, variance.sqrt().max(f64::EPSILON)))
     };
     let rhr_baseline = history_stats(
@@ -1592,7 +1609,10 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             .collect::<Vec<_>>(),
     );
     let hrv_baseline = history_stats(
-        &nights.iter().filter_map(|nt| mean(&nt.rmssd)).collect::<Vec<_>>(),
+        &nights
+            .iter()
+            .filter_map(|nt| mean(&nt.rmssd))
+            .collect::<Vec<_>>(),
     );
     for nt in &nights {
         let hyp = hyps.get(&nt.start_ds);
@@ -1604,6 +1624,13 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         // derived metrics, so the two always agree.
         let full_stages = smooth_stages(&raw_stages, 5);
         let stage_cells = (!full_stages.is_empty()).then(|| downsample_codes(&full_stages, 120));
+        let complete_staging =
+            !full_stages.is_empty() && full_stages.iter().all(|c| (1..=4).contains(c));
+        let coverage_pct = (!full_stages.is_empty()).then(|| {
+            full_stages.iter().filter(|c| (1..=4).contains(*c)).count() as f64
+                / full_stages.len() as f64
+                * 100.0
+        });
         let in_bed_s = (nt.end_ds - nt.start_ds) as f64 / 10.0;
         let (metrics, asleep_s) = sleep_metrics(&full_stages, in_bed_s);
         let autonomic =
@@ -1658,6 +1685,10 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             "wake_pct": hyp.map(|h| h["wake_pct"].clone()),
             "efficiency": hyp.map(|h| h["efficiency_pct"].clone()),
             "stages": stage_cells,
+            "staging_source": hyp.and_then(|h| h["source"].as_str()),
+            "staging_coverage_pct": coverage_pct,
+            "staging_complete": complete_staging,
+            "captured_unix": nt.captured_unix,
             // full-resolution hypnogram + aligned raw signals for the detail page's
             // stacked polysomnograph (empty arrays stay out of the way when absent).
             "stages_full": (!full_stages.is_empty()).then_some(full_stages),
@@ -1667,7 +1698,9 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 "temp": series(&nt.temp, 2),
                 "temp_span": temp_span,
                 "spo2": series(&nt.spo2, 0),
-                "motion": series(&nt.motion, 0),
+                "motion": nt.motion,
+                "motion_time": nt.motion_t.iter().map(|(ds, _)|
+                    ((*ds - nt.start_ds) as f64 / span_ds).clamp(0.0, 1.0)).collect::<Vec<_>>(),
             },
             "metrics": metrics,
             // mean HR/HRV per sleep stage (deep/light/rem) — deep-sleep HRV is the
@@ -1675,7 +1708,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             "autonomic": autonomic,
             // A score whose every threshold traces to a paper rather than to a fit
             // against Oura's own number. See `sleep_score`.
-            "sleep_score": sleep_score::score_night(sleep_score::NightInput {
+            "sleep_score": if complete_staging { sleep_score::score_night(sleep_score::NightInput {
                 asleep_min: (asleep_s > 0).then(|| asleep_s as f64 / 60.0),
                 efficiency_pct: hyp.and_then(|h| h["efficiency_pct"].as_f64()),
                 onset_latency_min: metrics["sol_min"].as_f64(),
@@ -1688,7 +1721,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
                 hrv_ms: night_hrv,
                 hrv_baseline: hrv_baseline,
                 age: demo.age,
-            }),
+            }) } else { Value::Null },
             "breath_rate": night_breath.map(|b| (b * 10.0).round() / 10.0),
         }));
         if let Some(day) = wake_ymd.clone() {
@@ -2079,6 +2112,85 @@ mod tests {
     }
 
     #[test]
+    fn missing_ring_stages_are_not_wake_or_sleep_latency() {
+        let night = Night {
+            start_ds: 0,
+            end_ds: 8 * 36000,
+            captured_unix: 1,
+            ..Default::default()
+        };
+        let run = RingSleep {
+            start_ds: 4 * 36000,
+            end_ds: 8 * 36000,
+            captured_unix: 1,
+            codes: vec![2; 480],
+        };
+        let hyp = ring_hypnograms(&[run], &[night], |ds, _| ds as f64 / 10.0);
+        let stages: Vec<i64> = hyp[0].1["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect();
+        assert!(stages[..480].iter().all(|&c| c == 0));
+        assert!(stages[480..].iter().all(|&c| c == 2));
+        assert!(hyp[0].1["efficiency_pct"].is_null());
+        let smoothed = smooth_stages(&stages, 5);
+        assert!(smoothed[..480].iter().all(|&c| c == 0));
+        let compact = downsample_codes(&smoothed, 120);
+        assert!(compact[..60].iter().all(|&c| c == 0));
+        assert_eq!(sleep_metrics(&smoothed, 8.0 * 3600.0), (Value::Null, 0));
+    }
+
+    #[test]
+    fn measured_wake_is_preserved_and_complete_nights_still_score() {
+        let night = Night {
+            start_ds: 0,
+            end_ds: 8 * 36000,
+            captured_unix: 1,
+            ..Default::default()
+        };
+        let mut codes = vec![4; 120];
+        codes.extend(vec![2; 840]);
+        let run = RingSleep {
+            start_ds: 0,
+            end_ds: 8 * 36000,
+            captured_unix: 1,
+            codes,
+        };
+        let hyp = ring_hypnograms(&[run], &[night], |ds, _| ds as f64 / 10.0);
+        let stages: Vec<i64> = hyp[0].1["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect();
+        let (metrics, asleep) = sleep_metrics(&stages, 8.0 * 3600.0);
+        assert_eq!(metrics["sol_min"], 60.0);
+        assert_eq!(asleep, 7 * 3600);
+        assert_eq!(hyp[0].1["efficiency_pct"], 87.5);
+    }
+
+    #[test]
+    fn ring_stages_do_not_leak_between_boots_with_overlapping_counters() {
+        let night = Night {
+            start_ds: 0,
+            end_ds: 36000,
+            captured_unix: 1,
+            ..Default::default()
+        };
+        let run = RingSleep {
+            start_ds: 0,
+            end_ds: 36000,
+            captured_unix: 86401,
+            codes: vec![2; 120],
+        };
+        assert!(
+            ring_hypnograms(&[run], &[night], |ds, cu| ds as f64 / 10.0 + cu as f64).is_empty()
+        );
+    }
+
+    #[test]
     fn sleep_debt_aggregates_sessions_and_uses_fourteen_calendar_days() {
         let mut sleep = std::collections::BTreeMap::new();
         for day in 100..105 {
@@ -2103,7 +2215,7 @@ mod tests {
         assert_eq!(sleep_need_s(&sleep, 113), 28800); // still the 8 h default
         sleep.insert(113, 27000); // 14th valid day
         assert_eq!(sleep_need_s(&sleep, 114), 27000); // typical sleep becomes the need
-        // causal: a day's own sleep is not part of its need window
+                                                      // causal: a day's own sleep is not part of its need window
         assert_eq!(sleep_need_s(&sleep, 113), 28800);
     }
 
@@ -2152,7 +2264,8 @@ mod tests {
             vec![bed(0, 5 * 3600 * 10)],
             &[(support_end, 1)],
             &[],
-            &[], |ds, _| ds as f64 / 10.0,
+            &[],
+            |ds, _| ds as f64 / 10.0,
         );
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].end_ds, support_end);
@@ -2177,7 +2290,8 @@ mod tests {
             vec![bed(-6 * 3600 * 10, raw_end)],
             &[(explicit_end, 1)],
             &pulses,
-            &[], |ds, _| ds as f64 / 10.0,
+            &[],
+            |ds, _| ds as f64 / 10.0,
         );
         assert_eq!(got[0].end_ds, 146 * minute + 10 * 10);
         assert_eq!(got[0].raw_end_ds, raw_end);
@@ -2190,7 +2304,8 @@ mod tests {
             vec![bed(-6 * 3600 * 10, 0)],
             &[],
             &[(10 * minute, 1, 4)],
-            &[], |ds, _| ds as f64 / 10.0,
+            &[],
+            |ds, _| ds as f64 / 10.0,
         );
         assert_eq!(got[0].end_ds, 0);
     }
@@ -2203,7 +2318,8 @@ mod tests {
             vec![bed(-20 * minute, 0)],
             &[(5 * minute, 1)],
             &pulses,
-            &[], |ds, _| ds as f64 / 10.0,
+            &[],
+            |ds, _| ds as f64 / 10.0,
         );
         assert_eq!(got[0].end_ds, 5 * minute);
     }
@@ -2216,7 +2332,8 @@ mod tests {
             vec![bed(-7 * 60 * minute, 0)],
             &[(20 * minute, 1)],
             &pulses,
-            &[], |ds, _| ds as f64 / 10.0,
+            &[],
+            |ds, _| ds as f64 / 10.0,
         );
         assert_eq!(got[0].end_ds, 20 * minute);
     }
@@ -2225,9 +2342,10 @@ mod tests {
     fn pulse_cluster_after_long_gap_does_not_extend_sleep() {
         let minute = 60 * 10;
         let pulses = [(20 * minute, 1, 2), (20 * minute + 10 * 10, 1, 2)];
-        let got = normalize_bed_periods(vec![bed(-6 * 3600 * 10, 0)], &[], &pulses, &[], |ds, _| {
-            ds as f64 / 10.0
-        });
+        let got =
+            normalize_bed_periods(vec![bed(-6 * 3600 * 10, 0)], &[], &pulses, &[], |ds, _| {
+                ds as f64 / 10.0
+            });
         assert_eq!(got[0].end_ds, 0);
     }
 

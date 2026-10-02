@@ -675,7 +675,8 @@ function hypnoSvg(stages, w, h) {
   while (i < n) {
     const code = stages[i]; let j = i;
     while (j < n && stages[j] === code) j++;
-    const st = STAGE[code] || STAGE[2];
+    if (!STAGE[code]) { prevLvl = null; i = j; continue; }
+    const st = STAGE[code];
     const x1 = xOf(i), x2 = xOf(Math.min(j, n - 1)), y = yOf(st.lvl);
     runs += `<line x1="${x1.toFixed(1)}" y1="${y.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--${st.cls})" stroke-width="2.5" vector-effect="non-scaling-stroke"/>`;
     if (prevLvl !== null) conn += `<line x1="${x1.toFixed(1)}" y1="${yOf(prevLvl).toFixed(1)}" x2="${x1.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--faint)" stroke-width="0.8" opacity="0.5" vector-effect="non-scaling-stroke"/>`;
@@ -685,7 +686,16 @@ function hypnoSvg(stages, w, h) {
 }
 
 // smooth auto-scaled line + faint area + dashed mean, for one signal lane
-function laneSvg(v, w, h, color, span = [0, 1]) {
+function laneSvg(v, w, h, color, span = [0, 1], times = null) {
+  if (times && times.length === v.length && v.length) {
+    const min = Math.min(0, ...v), max = Math.max(min + 1, ...v);
+    const mean = v.reduce((a, b) => a + b, 0) / v.length;
+    const bars = v.map((value, i) => {
+      const x = times[i] * w, y = 5 + (1 - (value - min) / (max - min)) * (h - 10);
+      return `<line x1="${x}" x2="${x}" y1="${h - 5}" y2="${y}" stroke="${color}" stroke-width="1.5"/>`;
+    }).join("");
+    return { mean, min, max, svg: `<svg class="lane-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${bars}</svg>` };
+  }
   if (v.length < 2) return null;
   const min = Math.min(...v), max = Math.max(...v), rng = (max - min) || 1;
   const mean = v.reduce((a, b) => a + b, 0) / v.length;
@@ -802,6 +812,8 @@ function sleepReport(d, ymd) {
     ss("Efficiency", n.efficiency != null ? n.efficiency + "%" : "—") +
     ss("Bedtime", `${n.start}–${n.end}`);
   root.append(strip, stageLegend());
+  if (n.staging_complete === false)
+    root.append(el("p", "error", "Incomplete sleep analysis. Gaps mean no data, not awake time; sleep metrics are withheld."));
 
   // polysomnograph lanes (hypnogram + whatever signals are present)
   const W = 1000, LH = 50, HH = 92;
@@ -810,21 +822,29 @@ function sleepReport(d, ymd) {
     label: "Hypnogram", summary: "", tall: true, svg: hypnoSvg(stages, W, HH),
     valueAt: (f) => (STAGE[stages[Math.round(f * (stages.length - 1))]] || {}).name || "",
   }];
-  const addLane = (key, label, unit, color, dp = 0, span = [0, 1]) => {
+  const addLane = (key, label, unit, color, dp = 0, span = [0, 1], times = null) => {
     const v = (s[key] || []).filter((x) => x != null);
-    const L = laneSvg(v, W, LH, color, span);
+    const L = laneSvg(v, W, LH, color, span, times);
     if (!L) return;
     const fmt = (x) => (dp ? x.toFixed(dp) : Math.round(x));
     lanes.push({
       label, svg: L.svg, summary: `${fmt(L.mean)} ${unit}`,
-      valueAt: (f) => f < span[0] || f > span[1] ? "—" : `${fmt(v[Math.round(((f - span[0]) / Math.max(1e-9, span[1] - span[0])) * (v.length - 1))])} ${unit}`,
+      valueAt: (f) => {
+        if (times) {
+          const closest = times.reduce((best, t, i) => Math.abs(t - f) < Math.abs(times[best] - f) ? i : best, 0);
+          const duration = n.end_unix - n.start_unix;
+          return Math.abs(times[closest] - f) * duration <= 30 ? `${fmt(v[closest])} ${unit}` : "—";
+        }
+        return f < span[0] || f > span[1] ? "—" : `${fmt(v[Math.round(((f - span[0]) / Math.max(1e-9, span[1] - span[0])) * (v.length - 1))])} ${unit}`;
+      },
     });
   };
   addLane("hr", "Heart rate", "bpm", "var(--warn)");
   addLane("hrv", "HRV", "ms", "var(--accent)");
   addLane("spo2", "Blood O₂", "%", "var(--rem)");
   addLane("temp", "Skin temp", "°C", "var(--light)", 1, s.temp_span || [0, 1]);
-  addLane("motion", "Motion", "s", "var(--faint)");
+  if (Array.isArray(s.motion_time) && s.motion_time.length === (s.motion || []).length)
+    addLane("motion", "Motion", "s", "var(--faint)", 0, [0, 1], s.motion_time);
   root.append(el("p", "subhead", "Overnight polysomnograph"), polysomnograph(n, lanes));
 
   // architecture + clinical metrics

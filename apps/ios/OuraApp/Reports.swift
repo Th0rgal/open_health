@@ -30,6 +30,21 @@ struct StageAutonomic {
 }
 
 enum Sleep {
+    /// Preserve SleepNet's absolute 30-second grid instead of stretching its output.
+    static func alignedStages(timestamps: [Int64], stages: [Int], startMs: Int64, endMs: Int64) -> [Int]? {
+        guard timestamps.count == stages.count, endMs > startMs,
+              endMs - startMs <= 48 * 3600 * 1000,
+              stages.allSatisfy({ (1...4).contains($0) }),
+              zip(timestamps, timestamps.dropFirst()).allSatisfy({ $0 < $1 }) else { return nil }
+        var aligned = Array(repeating: 0, count: max(1, Int((endMs - startMs) / 30000)))
+        for (timestamp, stage) in zip(timestamps, stages) {
+            guard timestamp >= startMs, timestamp < endMs else { continue }
+            let index = Int((timestamp - startMs) / 30000)
+            if index < aligned.count { aligned[index] = stage }
+        }
+        return aligned
+    }
+
     /// Mean of each stage's samples, mapping series index → stage by fraction of the night.
     /// A single overnight HRV slope is intentionally not derived — nocturnal HRV is
     /// stage-driven (deep ↑, REM ↓), so a slope tracks stage order, not recovery.
@@ -55,6 +70,7 @@ enum Sleep {
         guard v.count >= win, win >= 3 else { return v }
         let half = win / 2
         return v.indices.map { i in
+            if v[i] == 0 { return 0 }
             let a = max(0, i - half), b = min(v.count, i + half + 1)
             var counts = [0, 0, 0, 0, 0]
             for s in v[a..<b] where (1...4).contains(s) { counts[s] += 1 }
@@ -93,7 +109,7 @@ enum Sleep {
 
     static func metrics(_ stages: [Int], inBedS: Double) -> SleepMetrics? {
         let n = stages.count
-        guard n > 0 else { return nil }
+        guard n > 0, inBedS > 0, stages.allSatisfy({ (1...4).contains($0) }) else { return nil }
         let epochMin = inBedS / 60.0 / Double(n)
         let isSleep = { (c: Int) in (1...3).contains(c) }
         guard let onset = stages.firstIndex(where: isSleep),
@@ -132,7 +148,7 @@ enum Sleep {
     /// asleep seconds for a night from its (smoothed) stages.
     static func asleepS(_ stages: [Int], inBedS: Double) -> Int {
         let n = stages.count
-        guard n > 0 else { return 0 }
+        guard n > 0, stages.allSatisfy({ (1...4).contains($0) }) else { return 0 }
         let epochS = inBedS / Double(n)
         return Int(Double(stages.filter { (1...3).contains($0) }.count) * epochS)
     }
@@ -145,10 +161,10 @@ extension Summary {
     func stagedSleepDebt() -> SleepDebtSummary? {
         let defaultNeedS = 8.0 * 3600.0
         var byDay: [String: Double] = [:]
-        for n in nights where (n.stages?.count ?? 0) > 1 {
+        for n in nights where (n.hypnogram?.count ?? 0) > 1 {
             guard let day = wakeYmd(n) else { continue }
-            let actual = Double(Sleep.asleepS(Sleep.smooth(n.stages ?? [], 5),
-                                              inBedS: (n.in_bed_h ?? 0) * 3600))
+            let actual = Double(Sleep.asleepS(Sleep.smooth(n.hypnogram ?? [], 5),
+                                              inBedS: n.durationS))
             if actual > 0 { byDay[day, default: 0] += actual }
         }
         guard let anchor = byDay.keys.max() else { return nil }
@@ -252,25 +268,28 @@ struct Polysomnograph: View {
     private let axisH: CGFloat = 18
 
     private struct Lane { let label: String; let unit: String; let signal: SignalLane?; let stages: [Int]? }
-    private struct SignalLane { let v: [Double]; let color: Color; let dp: Int; let span: [Double] }
+    private struct SignalLane { let v: [Double]; let color: Color; let dp: Int; let span: [Double]; var times: [Double]? = nil }
 
     private var lanes: [Lane] {
         var out: [Lane] = []
-        if let st = night.stages, st.count > 1 { out.append(Lane(label: "Hypnogram", unit: "", signal: nil, stages: Sleep.smooth(st, 5))) }
+        if let st = night.hypnogram, st.count > 1 { out.append(Lane(label: "Hypnogram", unit: "", signal: nil, stages: Sleep.smooth(st, 5))) }
         func sig(_ label: String, _ unit: String, _ v: [Double]?, _ color: Color,
-                 _ dp: Int = 0, span: [Double]? = nil) {
+                 _ dp: Int = 0, span: [Double]? = nil, times: [Double]? = nil) {
             guard let v, v.count > 1 else { return }
             let coverage = span.flatMap { $0.count == 2 ? $0 : nil } ?? [0, 1]
             out.append(Lane(label: label, unit: unit,
                             signal: SignalLane(v: v, color: color, dp: dp,
-                                               span: coverage), stages: nil))
+                                               span: coverage, times: times), stages: nil))
         }
         let s = night.series
         sig("Heart rate", "bpm", s?.hr, Obs.chart)
         sig("HRV", "ms", s?.hrv, Obs.chart)
         sig("Blood O₂", "%", s?.spo2, Obs.chart)
         sig("Skin temp", "°C", s?.temp, Obs.chart, 1, span: s?.temp_span)
-        sig("Motion", "s", s?.motion, Obs.chart)
+        // Legacy exports lost motion timestamps; do not invent their positions.
+        if let times = s?.motion_time, times.count == s?.motion.count {
+            sig("Motion", "s", s?.motion, Obs.chart, times: times)
+        }
         return out
     }
 
@@ -319,7 +338,7 @@ struct Polysomnograph: View {
             .frame(width: gutterW, alignment: .leading)
             Group {
                 if let st = lane.stages { HypnoCanvas(stages: st) }
-                else if let s = lane.signal { SignalCanvas(v: s.v, color: s.color, span: s.span) }
+                else if let s = lane.signal { SignalCanvas(v: s.v, color: s.color, span: s.span, times: s.times) }
             }
             .frame(width: plotW, height: h)
         }
@@ -336,6 +355,11 @@ struct Polysomnograph: View {
         let fmt = { (x: Double) in s.dp > 0 ? String(format: "%.\(s.dp)f", x) : String(Int(x.rounded())) }
         if let f = cursorF {
             guard f >= s.span[0], f <= s.span[1] else { return "–" }
+            if let times = s.times {
+                guard let index = times.indices.min(by: { abs(times[$0] - f) < abs(times[$1] - f) }),
+                      abs(times[index] - f) * night.durationS <= 30 else { return "–" }
+                return "\(fmt(s.v[index])) \(lane.unit)"
+            }
             let local = (f - s.span[0]) / max(1e-9, s.span[1] - s.span[0])
             let v = s.v[min(s.v.count - 1, max(0, Int(local * Double(s.v.count - 1))))]
             return "\(fmt(v)) \(lane.unit)"
@@ -377,7 +401,9 @@ private struct HypnoCanvas: View {
             }
             var i = 0; var prev: CGFloat? = nil
             while i < n {
-                let code = stages[i]; var j = i
+                let code = stages[i]
+                if code == 0 { prev = nil; i += 1; continue }
+                var j = i
                 while j < n, stages[j] == code { j += 1 }
                 let x1 = xOf(i), x2 = xOf(min(j, n - 1)), y = yOf(lvl(code))
                 if let p = prev {
@@ -397,9 +423,20 @@ private struct SignalCanvas: View {
     let v: [Double]
     let color: Color
     let span: [Double]
+    var times: [Double]? = nil
     var body: some View {
         Canvas { ctx, size in
             guard v.count > 1 else { return }
+            if let times, times.count == v.count {
+                let lo = min(0, v.min()!), hi = max(lo + 1, v.max()!)
+                for i in v.indices {
+                    let x = size.width * CGFloat(times[i])
+                    let y = 5 + (1 - CGFloat((v[i] - lo) / (hi - lo))) * (size.height - 10)
+                    ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: size.height - 5)); $0.addLine(to: CGPoint(x: x, y: y)) },
+                               with: .color(color), lineWidth: 1.5)
+                }
+                return
+            }
             let lo = v.min()!, hi = v.max()!, rng = max(hi - lo, 1e-6)
             let pad: CGFloat = 5
             func pt(_ i: Int) -> CGPoint {
@@ -450,7 +487,7 @@ private func hourTicks(_ win: (a: Int, b: Int, span: Int)) -> [Int] {
     while t <= win.b { out.append(t); t += 60 }
     return out
 }
-private func stageName(_ c: Int) -> String { switch c { case 1: return "Deep"; case 2: return "Light"; case 3: return "REM"; default: return "Awake" } }
+private func stageName(_ c: Int) -> String { switch c { case 1: return "Deep"; case 2: return "Light"; case 3: return "REM"; case 4: return "Awake"; default: return "No data" } }
 
 private func debtDuration(_ minutes: Double) -> String {
     let m = max(0, Int(minutes.rounded()))
@@ -969,7 +1006,7 @@ struct SleepReport: View {
     let day: String
     var body: some View {
         if let n = s.night(forDay: day) {
-            let metrics = (n.stages.flatMap { st in Sleep.metrics(Sleep.smooth(st, 5), inBedS: (n.in_bed_h ?? 0) * 3600) })
+            let metrics = (n.hypnogram.flatMap { st in Sleep.metrics(Sleep.smooth(st, 5), inBedS: n.durationS) })
             let asleepH = metrics.map { $0.asleepMin / 60 }
 
             // summary strip
@@ -986,6 +1023,10 @@ struct SleepReport: View {
             }
 
             if n.hasHypnogram {
+                if !n.stagingComplete && n.hasHypnogram {
+                    Text("Incomplete sleep analysis. Gaps mean no data, not awake time; sleep metrics are withheld.")
+                        .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                }
                 Rule("Sleep stages & signals")
                 stageLegend
                 Polysomnograph(night: n)
@@ -1001,7 +1042,7 @@ struct SleepReport: View {
                 if let m = metrics { clinicalGrid(m) }
 
                 let auto = Sleep.autonomic(hr: n.series?.hr ?? [], hrv: n.series?.hrv ?? [],
-                                           stages: Sleep.smooth(n.stages ?? [], 5))
+                                           stages: Sleep.smooth(n.hypnogram ?? [], 5))
                 if auto.any {
                     Rule("HR & HRV by stage")
                     autonomicGrid(auto)

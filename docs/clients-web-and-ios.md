@@ -315,3 +315,26 @@ temperature, time-sync, and alert events at one-minute resolution. That detector
 dynamically delivered model is not embedded in the APK. The shared summary therefore
 keeps the raw ring bounds alongside locally adjusted bounds, and only adjusts an end
 when adjacent bedtime segments or sleep-only sensor evidence support it.
+
+## Sleep coverage and refresh lifecycle
+
+Unanalysed ring epochs are `0` (unknown), never wake. Both clients leave gaps and
+withhold complete-night metrics/scores/debt for partial staging. The summary exports
+`staging_source`, `staging_coverage_pct`, `staging_complete` and `captured_unix`.
+iOS uses `stages_full` for calculations; `stages` remains the compact preview.
+Apple Health skips unknown epochs. Motion uses `series.motion_time` (normalized
+positions), rendered as discrete measurements without interpolation.
+
+SleepNet output timestamps are retained on both paths and mapped onto the bedtime
+30-second grid. Input selection checks absolute time as well as relative counters;
+Ring 5 quality flags gate beat validity. Batch windows carry capture time to select
+the right boot. The latest iOS night rechecks its input fingerprint after store changes.
+
+Automatic lifecycle sync requests are coalesced and concurrent summary reloads queue
+one follow-up. iOS reports gate/clock/model stages and has a cooperative 180-second
+analysis deadline; a native Torch forward cannot safely be forcibly interrupted, so
+its watchdog reports the delay while retaining exclusive database ownership.
+Desktop Python runners have a 180-second kill/reap timeout and drain stdout concurrently.
+
+Validation uses synthetic cases; personal exports and model weights remain local.
+A report JSON alone cannot replay Gen4 inference or prove the original bedtime.

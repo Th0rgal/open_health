@@ -33,7 +33,7 @@ enum SleepStaging {
         // night the user is looking at stages first.
         let beds = nights.compactMap { night -> (start: Int64, end: Int64, cu: Int64)? in
             guard let start = night.start_ds, let end = night.end_ds else { return nil }
-            let captured = events.restricted("tag=118").first { event in
+            let captured = night.captured_unix ?? events.restricted("tag=118").first { event in
                 event.tag == 0x76
                     && (event.json["bedtime_start_ds"] as? NSNumber)?.int64Value == start
             }?.cu
@@ -108,20 +108,25 @@ enum SleepStaging {
         func ms(_ ds: Int64, _ cu: Int64) -> Int64 {
             Int64(clock.unixSeconds(ds, capturedUnix: cu) * 1000)
         }
+        let startMs = ms(startDs, bedCu), endMs = ms(endDs, bedCu)
         let lo = startDs - 6000, hi = endDs + 6000
         var beats: [(Int64, Float, Float, Float)] = []
         var acm: [(Int64, Float)] = [], temp: [(Int64, Float)] = []
         for e in events.restricted("ring_timestamp BETWEEN \(lo) AND \(hi) AND tag IN (96,128,71,70)") {
+            let timestamp = ms(e.ds, e.cu)
+            guard timestamp >= startMs - 600000, timestamp <= endMs + 600000,
+                  abs(timestamp - (startMs + (e.ds - startDs) * 100)) <= 300000 else { continue }
             switch e.tag {
             case 0x60, 0x80:
                 guard let ibi = e.json["ibi_ms"] as? [NSNumber] else { continue }
                 let amp = (e.json["amplitude"] as? [NSNumber]) ?? []
+                let quality = (e.json["quality"] as? [NSNumber]) ?? []
                 let t = ms(e.ds, e.cu); var acc: Int64 = 0
                 for (i, xn) in ibi.enumerated() {
                     let x = xn.int64Value
                     if x <= 0 { continue }
                     acc += x
-                    let valid: Float = (x >= 300 && x <= 2000) ? 1 : 0
+                    let valid: Float = (x >= 300 && x <= 2000 && (e.tag != 0x80 || (i < quality.count && quality[i].intValue == 1))) ? 1 : 0
                     beats.append((t + acc, Float(x), i < amp.count ? amp[i].floatValue : 0, valid))
                 }
             case 0x47:
@@ -145,13 +150,16 @@ enum SleepStaging {
         var acmTs = inputs.acm.map { $0.0 }, acmVal = inputs.acm.map { $0.1 }
         var tempTs = inputs.temp.map { $0.0 }, tempVal = inputs.temp.map { $0.1 }
         var out = [Int32](repeating: 0, count: 8192)
+        var timestamps = [Int64](repeating: 0, count: 8192)
         let n = oura_sleepnet(modelPath,
                               &ibiTs, &ibiVal, Int32(inputs.beats.count),
                               &acmTs, &acmVal, Int32(inputs.acm.count),
                               &tempTs, &tempVal, Int32(inputs.temp.count),
-                              inputs.startMs, inputs.endMs, &out, 8192)
+                              inputs.startMs, inputs.endMs, &out, &timestamps, 8192)
         guard n >= 0 else { return nil }
-        return out.prefix(Int(n)).map(Int.init)
+        return Sleep.alignedStages(timestamps: Array(timestamps.prefix(Int(n))),
+                                   stages: out.prefix(Int(n)).map(Int.init),
+                                   startMs: inputs.startMs, endMs: inputs.endMs)
     }
 }
 #endif

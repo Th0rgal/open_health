@@ -69,47 +69,53 @@ fn python_bin(root: &Path) -> PathBuf {
     crate::pyrunner::venv_python(root)
 }
 
-/// Run a python runner and parse its `--json` stdout. Returns None on any failure
-/// (missing venv/model, night with no data, …) so the dashboard degrades softly.
-fn run_py_json(root: &Path, py: &Path, script: &str, args: &[String]) -> Option<Value> {
-    let out = Command::new(py)
-        .current_dir(root)
-        .arg(root.join(script))
-        .args(args)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+/// Bound model subprocesses and drain stdout concurrently (large results must not
+/// fill the pipe while the parent waits). A stalled runner is killed and reaped.
+fn model_output(mut command: Command, input: Option<&[u8]>, timeout: std::time::Duration) -> Option<Value> {
+    use std::io::{Read, Write};
+    command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.take(32 * 1024 * 1024).read_to_end(&mut bytes).map(|_| bytes)
+    });
+    if let Some(input) = input {
+        if child.stdin.take().and_then(|mut pipe| pipe.write_all(input).ok()).is_none() {
+            let _ = child.kill(); let _ = child.wait(); let _ = reader.join();
+            return None;
+        }
     }
-    serde_json::from_slice(&out.stdout).ok()
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < timeout => std::thread::sleep(std::time::Duration::from_millis(20)),
+            _ => {
+                tracing::warn!("model runner timed out or could not be monitored");
+                let _ = child.kill(); let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let bytes = reader.join().ok()?.ok()?;
+    if !status?.success() { return None; }
+    serde_json::from_slice(&bytes).ok()
 }
 
-/// Like `run_py_json` but feeds `stdin` to the process — used for the batched sleep
-/// runner, which reads its list of night ranges from stdin. The payload is small
-/// (a few night pairs), so writing it before draining stdout can't deadlock.
-fn run_py_json_stdin(
-    root: &Path,
-    py: &Path,
-    script: &str,
-    args: &[String],
-    stdin: &[u8],
-) -> Option<Value> {
-    use std::io::Write;
-    let mut child = Command::new(py)
-        .current_dir(root)
-        .arg(root.join(script))
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    child.stdin.take()?.write_all(stdin).ok()?; // dropped here → EOF
-    let out = child.wait_with_output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    serde_json::from_slice(&out.stdout).ok()
+fn run_py_json(root: &Path, py: &Path, script: &str, args: &[String]) -> Option<Value> {
+    run_py_json_stdin_optional(root, py, script, args, None)
+}
+
+fn run_py_json_stdin(root: &Path, py: &Path, script: &str, args: &[String], input: &[u8]) -> Option<Value> {
+    run_py_json_stdin_optional(root, py, script, args, Some(input))
+}
+
+fn run_py_json_stdin_optional(root: &Path, py: &Path, script: &str, args: &[String], input: Option<&[u8]>) -> Option<Value> {
+    let mut command = Command::new(py);
+    command.current_dir(root).arg(root.join(script)).args(args);
+    model_output(command, input, std::time::Duration::from_secs(180))
 }
 
 /// The web dashboard's [`ModelRunner`]: shells out to the Python torch runners,
@@ -758,4 +764,25 @@ fn run_feature(
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
     Err(anyhow!("{last}"))
+}
+
+#[cfg(test)]
+mod model_timeout_tests {
+    use super::*;
+    #[test]
+    fn stalled_runner_is_killed_and_reaped() {
+        let mut command = Command::new("python3");
+        command.args(["-c", "import time; time.sleep(30)"]);
+        let started = std::time::Instant::now();
+        assert!(model_output(command, None, std::time::Duration::from_millis(60)).is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+    #[test]
+    fn large_runner_output_does_not_deadlock_and_input_reaches_eof() {
+        let mut command = Command::new("python3");
+        command.args(["-c", "import json,sys; print(json.dumps({'input':sys.stdin.read(),'data':'x'*200000}))"]);
+        let value = model_output(command, Some(b"window"), std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(value["input"], "window");
+        assert_eq!(value["data"].as_str().unwrap().len(), 200000);
+    }
 }
