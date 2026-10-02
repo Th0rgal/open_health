@@ -311,6 +311,7 @@ final class SyncProgressBridge: SyncProgressListener, @unchecked Sendable {
 final class RingSync: ObservableObject {
     @Published var status: String = ""
     @Published var busy = false
+    @Published private(set) var exportStatus: String?
     @Published var connectionIssue: String?
     @Published var lastReport: SyncReport?
     @Published private(set) var lastSuccessfulSyncAt: Date?
@@ -439,22 +440,31 @@ final class RingSync: ObservableObject {
     /// for sharing (AirDrop/Files). Contains raw ring records only; the auth key
     /// lives in the Keychain and is never included. Returns nil on failure.
     func exportRawDatabase() async -> URL? {
+        guard exportStatus == nil else { return nil }
+        let started = Date()
+        exportStatus = "Waiting for sync and analysis…"
+        defer { exportStatus = nil }
         await WorkGate.shared.acquire()
         defer { Task { await WorkGate.shared.release() } }
         guard WorkCoordinator.shared.available else { return nil }
+        let waited = Date().timeIntervalSince(started)
+        exportStatus = "Preparing database…"
+        dlog("db", "export gate wait=\(String(format: "%.2f", waited))s")
         let source = DB.readPath()
         let stamp = { () -> String in
             let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmm"; return f.string(from: Date())
         }()
-        let out = FileManager.default.temporaryDirectory.appendingPathComponent("oura-ring-\(stamp).db")
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("oura-ring-\(stamp)-\(UUID().uuidString).db")
         let result: String? = await Task.detached {
             do { try exportDatabase(dbPath: source, outPath: out.path); return nil }
             catch { return "\(error)" }
         }.value
         if let result {
+            try? FileManager.default.removeItem(at: out)
             status = "Export failed: \(result)"; dlog("db", status); return nil
         }
         let size = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? Int) ?? 0
+        dlog("db", "export copy=\(String(format: "%.2f", Date().timeIntervalSince(started) - waited))s")
         dlog("db", "exported \(out.lastPathComponent) (\(size) bytes) from \(source)")
         return out
     }

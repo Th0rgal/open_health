@@ -323,7 +323,7 @@ pub fn database_integrity(db_path: String) -> Result<String, SyncError> {
 }
 
 /// Copy the synced database to `out_path` as one self-contained SQLite file
-/// (`VACUUM INTO`), so the exact on-phone ring records can be replayed on the
+/// (SQLite page backup), so the exact on-phone ring records can be replayed on the
 /// desktop with `oura --db <file> …`. The auth key lives in the Keychain and is
 /// never part of the database.
 #[uniffi::export]
@@ -905,16 +905,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("oura.db");
         let out = dir.join("export.db");
-        {
-            let store = Store::open(&src).unwrap();
-            let anchor = phone_anchor_event(1, 705_001, 1_789_056_420).unwrap();
-            store.insert_event("ring", &anchor).unwrap();
-        }
+        let store = Store::open(&src).unwrap();
+        let anchor = phone_anchor_event(1, 705_001, 1_789_056_420).unwrap();
+        store.insert_event("ring", &anchor).unwrap();
+        // Keep the writer open so the committed event is still in the WAL.
+        assert!(src.with_extension("db-wal").exists());
         std::fs::write(&out, b"stale").unwrap();
         export_database(src.to_string_lossy().into(), out.to_string_lossy().into()).unwrap();
         let copy = Store::open_read_only(&out).unwrap();
         assert_eq!(copy.decoded_events().unwrap().len(), 1);
         assert!(!out.with_extension("db-wal").exists());
+        drop(copy);
+        drop(store);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
