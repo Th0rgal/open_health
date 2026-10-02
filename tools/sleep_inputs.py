@@ -11,7 +11,7 @@ def aligned_stages(timestamps_ms, stages, start_ms, end_ms):
         raise ValueError("invalid sleep stage code")
     result = [0] * max(1, (end_ms - start_ms) // 30000)
     for timestamp, code in zip(timestamps_ms, stages):
-        index = (timestamp - start_ms) // 30000
+        index = int((timestamp - start_ms) // 30000)
         if 0 <= index < len(result):
             result[index] = code
     return result

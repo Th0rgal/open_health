@@ -155,7 +155,7 @@ enum SleepStaging {
                               &acmTs, &acmVal, Int32(inputs.acm.count),
                               &tempTs, &tempVal, Int32(inputs.temp.count),
                               inputs.startMs, inputs.endMs, &out, &timestamps, 8192)
-        guard n >= 0 else { return nil }
+        guard n > 0 else { return nil }
         return Sleep.alignedStages(timestamps: Array(timestamps.prefix(Int(n))),
                                    stages: out.prefix(Int(n)).map(Int.init),
                                    startMs: inputs.startMs, endMs: inputs.endMs)
