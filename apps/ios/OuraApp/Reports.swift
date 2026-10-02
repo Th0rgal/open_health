@@ -1049,7 +1049,7 @@ struct SleepReport: View {
                 }
 
                 Rule("Sleep summary")
-                interpretation(n, metrics)
+                if n.stagingComplete { interpretation(n, metrics) }
             } else {
                 // model-free build: signals only, no hypnogram
                 if hasAnySeries(n) {

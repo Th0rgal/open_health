@@ -920,6 +920,12 @@ struct RootView: View {
         loadGeneration += 1
         let generation = loadGeneration
         isRefreshingSummary = true
+        defer {
+            if reloadPending {
+                reloadPending = false
+                load(force: true, clearCurrent: false)
+            }
+        }
         modelProgress.begin(generation)
         let progress = modelProgress.sink(generation)
         await WorkGate.shared.acquire()
