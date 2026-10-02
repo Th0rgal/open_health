@@ -81,6 +81,23 @@
       </div>
 
       <aside class="dashboard-side">
+        <section class="panel" id="live-panel">
+          <div class="panel-head">
+            <h2><span class="ic" style="--i:url(/icons/heartbeat.svg)"></span>Live heart rate</h2>
+            <button id="live-btn" class="action" title="Stream your heart rate from the ring for a minute">
+              <span id="live-label">Start</span>
+            </button>
+          </div>
+          <div class="live">
+            <div class="live-now">
+              <i id="live-dot" class="live-dot" aria-hidden="true"></i>
+              <span id="live-bpm" class="live-bpm">—</span><span class="unit">bpm</span>
+            </div>
+            <div id="live-spark" class="spark"></div>
+            <p id="live-status" class="live-status" aria-live="polite">Wear the ring, keep your hand near the Mac, then press Start.</p>
+          </div>
+        </section>
+
         <section class="panel" id="sleep-debt-panel">
           <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/moon.svg)"></span>Sleep debt</h2></div>
           <div id="sleep-debt" class="sleep-debt"><div class="skeleton skeleton-block"></div></div>
