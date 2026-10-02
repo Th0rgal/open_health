@@ -63,7 +63,7 @@ private struct ModelCacheDigest: Codable {
 
 /// Mirrors SummaryCache: Application Support, serial queue, atomic writes.
 enum ModelCacheStore {
-    static let version = 6
+    static let version = 7
     static let cvaFile = "cva-model-cache.json"
     static let illnessFile = "illness-model-cache.json"
     static let activityFile = "activity-model-cache.json"

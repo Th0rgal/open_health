@@ -111,7 +111,7 @@ def main():
                     help="calibrated score params (tools/calibrate_scores.py output)")
     ap.add_argument("--start", type=int, help="bedtime start (deciseconds)")
     ap.add_argument("--end", type=int, help="bedtime end (deciseconds)")
-    ap.add_argument("--tz", type=int, default=1, help="hours offset for local bedtime clock")
+    ap.add_argument("--tz", type=float, default=1, help="hours offset for local bedtime clock")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 

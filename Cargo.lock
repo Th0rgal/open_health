@@ -1286,6 +1286,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hex",
+ "libc",
  "oura-dna",
  "oura-link",
  "oura-protocol",

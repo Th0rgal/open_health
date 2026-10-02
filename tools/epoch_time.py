@@ -39,7 +39,8 @@ def build_epochs(rows):
     """Build boot epochs from `(ds, captured)` pairs or DB `(ds, tag, json, captured)` rows.
 
     Epoch layout stays list-based for existing callers:
-    `[min_ds, max_ds, fallback_unix, capture_min, capture_max, [(ds, unix), ...]]`.
+    `[min_ds, max_ds, fallback_unix, capture_min, capture_max, [(ds, unix), ...],
+    [ring_start ds, ...]]`.
     """
     normalized = []
     for row in rows:
@@ -59,7 +60,9 @@ def build_epochs(rows):
                 e[1], e[2] = ds, cu
             e[0], e[3], e[4] = min(e[0], ds), min(e[3], cu), max(e[4], cu)
         else:
-            epochs.append([ds, ds, cu, cu, cu, []])
+            epochs.append([ds, ds, cu, cu, cu, [], []])
+        if tag == 0x41:
+            epochs[-1][6].append(ds)
         if tag in (0x42, 0x85) and js:
             try:
                 unix = json.loads(js).get("unix_time")
@@ -94,9 +97,16 @@ def make_unix_s(epochs):
             if kind == "stalled":
                 before, after = pair
                 late = after[1] - (after[0] - ds) / 10.0
+                early = before[1] + (ds - before[0]) / 10.0
+                # A ring_start between the anchors marks the stall exactly.
+                boots = [b for b in e[6] if before[0] < b <= after[0]]
+                if boots:
+                    if min(boots) <= ds < max(boots):
+                        return None  # lost time cannot be assigned to one of several reboots
+                    return late if ds >= max(boots) else early
                 if captured_unix is None or late <= captured_unix + FUTURE_SLACK_S:
                     return late
-                return before[1] + (ds - before[0]) / 10.0
+                return early
             if kind == "consistent" and (captured_unix is None or predicted <= captured_unix + FUTURE_SLACK_S):
                 return predicted
             if kind == "erratic":

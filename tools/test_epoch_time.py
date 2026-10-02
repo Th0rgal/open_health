@@ -72,5 +72,33 @@ class RingClockTests(unittest.TestCase):
         self.assertEqual(make_unix_s(epochs)(start, 1_789_056_420), 1_789_002_000)
 
 
+    def test_ring_start_marks_the_stall_when_pre_stall_events_download_late(self):
+        # Synced 09-04, died on an empty battery, booted on the charger without
+        # resetting ds, next sync 09-27: pre-stall events were downloaded after it.
+        before, boot, after = (8_040_603, 1_788_523_149), 24_041_617, (25_724_127, 1_790_523_679)
+        captured = after[1]
+        epochs = build_epochs([
+            (before[0], 0x42, '{"unix_time":%d,"source":"phone"}' % before[1], before[1]),
+            (20_000_000, 1, '{}', captured),
+            (boot, 0x41, '{}', captured),
+            (25_000_000, 1, '{}', captured),
+            (after[0], 0x42, '{"unix_time":%d,"source":"phone"}' % after[1], captured),
+        ])
+        unix_s = make_unix_s(epochs)
+        self.assertAlmostEqual(unix_s(20_000_000, captured), before[1] + (20_000_000 - before[0]) / 10.0)
+        self.assertAlmostEqual(unix_s(25_000_000, captured), after[1] - (after[0] - 25_000_000) / 10.0)
+
+
+    def test_multiple_reboots_leave_middle_undated(self):
+        rows = [(1000, 0x42, '{"unix_time":1700000000}', 1700000000),
+                (2000, 0x41, '{}', 1700100000),
+                (8000, 0x41, '{}', 1700100000),
+                (10000, 0x42, '{"unix_time":1700100000}', 1700100000)]
+        resolve = make_unix_s(build_epochs(rows))
+        self.assertIsNone(resolve(5000, 1700100000))
+        self.assertEqual(resolve(1500, 1700100000), 1700000050)
+        self.assertEqual(resolve(9000, 1700100000), 1700099900)
+
+
 if __name__ == '__main__':
     unittest.main()

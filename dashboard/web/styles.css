@@ -189,6 +189,7 @@ body {
 .action:hover { border-color: var(--hover-line); }
 .action .ic { font-size: 14px; color: var(--muted); }
 .action.icon-only { padding: 7px; }
+.action.live-on { color: var(--accent); border-color: var(--hover-line); }
 .action.syncing { pointer-events: none; color: var(--muted); }
 .action.syncing .ic { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -268,12 +269,28 @@ body {
 .tile .delta.up { color: var(--good); }
 .tile .delta.down { color: var(--warn); }
 .tile .delta.flat { color: var(--faint); }
-.tile .spark { margin-top: 8px; height: 26px; position: relative; }
-.tile .spark svg { display: block; width: 100%; height: 100%; overflow: visible; }
-.tile .spark-dot {
+.tile .spark, .live .spark { margin-top: 8px; height: 26px; position: relative; }
+.tile .spark svg, .live .spark svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.tile .spark-dot, .live .spark-dot {
   position: absolute; right: 0; width: 5px; height: 5px; border-radius: 50%;
   background: var(--spark); transform: translate(50%, -50%);
 }
+
+/* ── live heart rate ─────────────────────────────────────── */
+.live-now { display: flex; align-items: baseline; gap: var(--s2); }
+.live-bpm {
+  font-family: var(--mono); font-size: 40px; font-weight: 500; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums; line-height: 1;
+}
+.live-now .unit { font-size: 14px; color: var(--faint); font-weight: 480; }
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none; align-self: center;
+  background: var(--line);
+}
+.live-dot.beat { animation: beat 0.6s ease-out; }
+@keyframes beat { from { background: var(--accent); transform: scale(1.7); } }
+@media (prefers-reduced-motion: reduce) { .live-dot.beat { animation: none; background: var(--accent); } }
+.live-status { margin: var(--s3) 0 0; font-size: 12px; line-height: 1.45; color: var(--muted); }
 
 /* ── panels ─────────────────────────────────────────────── */
 .panel {
@@ -362,6 +379,8 @@ body {
 .day-ridge { display: block; width: 100%; height: 40px; margin: 4px 0 2px; overflow: visible; }
 .day-ridge path { fill: color-mix(in oklab, var(--accent) 16%, transparent); stroke: color-mix(in oklab, var(--accent) 55%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .day-sessions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 11px; }
+/* "Your day" heart-rate strip: the Heart rate tab's bars, compact, on the ridge's 24 h */
+.day-hr-plot { height: 44px; margin-top: 4px; }
 .day-chip {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11.5px; color: var(--muted); text-transform: capitalize;
@@ -433,10 +452,24 @@ body.page-open { overflow: hidden; }
 }
 .rpt-back:hover { color: var(--text); border-color: var(--muted); }
 .rpt-title { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 540; }
-.rpt-tabs { margin-left: auto; display: flex; gap: 3px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 3px; }
-.rpt-tab { font-family: var(--sans); font-size: 13px; color: var(--muted); cursor: pointer; background: none; border: 0; border-radius: 2px; padding: 6px 16px; }
-.rpt-tab.on { background: var(--surface); color: var(--text); box-shadow: var(--sheen); }
-.rpt-export { margin-left: 10px; }
+/* ‹ date › — step to the previous / next day with data */
+.rpt-when { display: flex; align-items: center; gap: 6px; }
+.rpt-day {
+  display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px;
+  font-family: var(--sans); font-size: 17px; line-height: 1; color: var(--muted); cursor: pointer;
+  background: none; border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.rpt-day:hover:not(:disabled) { color: var(--text); border-color: var(--hover-line); }
+.rpt-day:disabled { opacity: 0.35; cursor: default; }
+.rpt-export { margin-left: auto; }
+/* phones: tighter so back, ‹ date › and export share one row */
+@media (max-width: 560px) {
+  .rpt-head { flex-wrap: wrap; row-gap: 10px; column-gap: 8px; }
+  .rpt-when { gap: 4px; }
+  .rpt-back, .rpt-title { white-space: nowrap; }
+  .rpt-title { font-size: 14px; }
+  .rpt-back { padding: 6px 10px; }
+}
 .rpt-legend { margin: 0 0 18px; }
 .rpt-body .subhead { margin: 30px 0 12px; font-size: 11px; letter-spacing: 0.08em; }
 
@@ -450,30 +483,63 @@ body.page-open { overflow: hidden; }
 .ss-v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 540; letter-spacing: -0.02em; }
 .ss-k { font-size: 11px; color: var(--faint); letter-spacing: 0.05em; text-transform: uppercase; margin-top: 3px; }
 
-/* polysomnograph: stacked aligned lanes + shared hover crosshair */
-.psg {
+/* ── day page timelines: every chart on one axis, one shared cursor ─────── */
+.tl {
+  --gut: 92px; --rgut: 30px;
   position: relative; background: var(--surface); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 10px 16px 6px; box-shadow: var(--sheen), var(--shadow);
 }
-.psg-plots { position: relative; }
-.psg-lane { display: grid; grid-template-columns: 92px 1fr; align-items: center; height: 50px; border-top: 1px solid var(--line-soft); }
-.psg-lane:first-child { border-top: 0; }
-.psg-lane.tall { height: 96px; }
-.psg-gut { min-width: 0; padding-right: 12px; }
-.psg-label { font-size: 11px; color: var(--muted); letter-spacing: 0.02em; }
-.psg-val { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 540; color: var(--text); margin-top: 2px; min-height: 16px; }
-.psg-plot { position: relative; height: 100%; }
+.tl-plots { position: relative; touch-action: pan-y; }
+.tl-row {
+  display: grid; grid-template-columns: var(--gut) minmax(0, 1fr) var(--rgut);
+  height: 50px; border-top: 1px solid var(--line-soft);
+}
+.tl-row:first-of-type { border-top: 0; }
+.tl-gut { min-width: 0; padding: 6px 12px 0 0; }
+.tl-label { font-size: 11px; color: var(--muted); letter-spacing: 0.02em; }
+.tl-val {
+  font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 540;
+  color: var(--text); margin-top: 2px; min-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tl-plot { position: relative; height: 100%; }
+.tl-rgut { position: relative; }
+.tl-rgut span {
+  position: absolute; left: 6px; transform: translateY(-50%);
+  font-family: var(--mono); font-size: 10px; color: var(--faint); font-variant-numeric: tabular-nums;
+}
 .lane-svg { position: absolute; inset: 4px 0; width: 100%; height: calc(100% - 8px); overflow: visible; }
-.psg-lane.tall .lane-svg { inset: 6px 0; height: calc(100% - 12px); }
-.psg-cursor { position: absolute; top: 0; bottom: 0; width: 1px; background: color-mix(in oklab, var(--accent) 70%, transparent); pointer-events: none; }
-.psg-readout {
-  position: absolute; top: -2px; transform: translateX(-50%); z-index: 6; pointer-events: none;
+/* the 6-hour lines, the cursor and its clock sit at the same x in every box */
+.tl-vline, .tl-cursor, .tl-pill {
+  position: absolute; pointer-events: none;
+  left: calc(var(--gut) + (100% - var(--gut) - var(--rgut)) * var(--f));
+}
+.tl-vline, .tl-cursor { top: 0; bottom: 0; width: 1px; }
+.tl-vline { background: var(--line-soft); }
+.tl-cursor { z-index: 5; background: color-mix(in oklab, var(--accent) 70%, transparent); }
+.tl-pill {
+  top: -2px; transform: translateX(-50%); z-index: 6;
   font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11px; color: var(--bg);
   background: var(--accent); border-radius: 5px; padding: 1px 6px;
 }
-.psg-axis { height: 20px; }
-.psg-ticks { position: relative; }
-.psg-ticks span { position: absolute; top: 3px; transform: translateX(-50%); font-family: var(--mono); font-size: 10px; color: var(--faint); }
+.tl-axis { position: relative; height: 20px; margin: 0 var(--rgut) 0 var(--gut); }
+.tl-axis span {
+  position: absolute; top: 3px; left: calc(100% * var(--f)); transform: translateX(-50%);
+  font-family: var(--mono); font-size: 10px; color: var(--faint);
+}
+@media (max-width: 560px) {
+  .tl { --gut: 66px; --rgut: 26px; padding: 8px 10px 4px; }
+  .tl-gut { padding-right: 8px; }
+  .tl-val { font-size: 12px; }
+}
+
+/* day-page sections, one after another */
+.rpt-sec { scroll-margin-top: 76px; }
+.rpt-sec + .rpt-sec { margin-top: 44px; padding-top: 28px; border-top: 1px solid var(--line-soft); }
+.rpt-sec-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); margin: 0 0 14px; }
+.rpt-sec-head h2 {
+  margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.11em;
+  text-transform: uppercase; color: var(--muted);
+}
 
 /* stage proportion bar */
 .stagebar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--surface-2); border: 1px solid var(--line-soft); }
@@ -517,11 +583,57 @@ body.page-open { overflow: hidden; }
 .sd-need { stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 6 6; vector-effect: non-scaling-stroke; }
 .sd-axis { display: flex; justify-content: space-between; font: 10px var(--mono); color: var(--faint); margin: 6px 0 24px; }
 
-/* activity movement profile */
-.met-wrap { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; box-shadow: var(--sheen), var(--shadow); }
-.met-svg { display: block; width: 100%; height: 120px; overflow: visible; }
+/* device panel: the ring's battery level over the days it has readings for */
+.batt-chart { margin-top: var(--s5); }
+.batt-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s2); }
+.batt-chart .subhead { margin: 0 0 8px; }
+.batt-readout {
+  font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11px; color: var(--muted);
+}
+.batt-plot { position: relative; height: 40px; padding-right: 30px; touch-action: pan-y; }
+.batt-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.batt-max, .batt-min {
+  position: absolute; right: 0; font-style: normal;
+  font-family: var(--mono); font-size: 10px; color: var(--faint); font-variant-numeric: tabular-nums;
+}
+.batt-max { top: -5px; }
+.batt-min { bottom: -5px; }
+.batt-line { fill: none; stroke: var(--muted); stroke-width: 1.4; vector-effect: non-scaling-stroke; }
+.batt-line.up { stroke: var(--accent); stroke-width: 2; } /* charging */
+.batt-grid { stroke: var(--line-soft); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.batt-cursor { stroke: var(--accent); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.batt-foot {
+  display: flex; justify-content: space-between; margin-top: 6px;
+  font-family: var(--mono); font-size: 10px; color: var(--faint);
+}
+
+/* hour axis under the "Your day" heart-rate strip */
 .met-axis { position: relative; height: 16px; margin-top: 4px; }
 .met-axis span { position: absolute; transform: translateX(-50%); font-family: var(--mono); font-size: 10px; color: var(--faint); }
+
+/* heart-rate bars: 5th–95th band per slot + median tick */
+.hr-svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.hr-grid { stroke: var(--line-soft); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.hr-bar { fill: color-mix(in oklab, var(--accent) 42%, transparent); }
+.hr-med { stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+/* a slot built from only a few values (e.g. three 5-minute night averages) */
+.hr-bar.thin { fill: color-mix(in oklab, var(--accent) 20%, transparent); }
+.hr-med.thin { stroke: color-mix(in oklab, var(--accent) 55%, transparent); }
+.hr-bin {
+  display: flex; gap: 3px; padding: 2px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.hr-bin button {
+  font-family: var(--sans); font-size: 12px; color: var(--muted); cursor: pointer;
+  background: none; border: 0; border-radius: 2px; padding: 4px 10px;
+}
+.hr-bin button.on { background: var(--surface); color: var(--text); box-shadow: var(--sheen); }
+.hr-hover { fill: var(--hover-fill); }
+.hr-readout {
+  margin: var(--s3) 0 0; min-height: 1.45em; font-family: var(--mono); font-size: 12px;
+  color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.hr-note, .hr-empty { margin: var(--s2) 0 0; font-size: 12px; line-height: 1.45; color: var(--faint); }
 
 /* ── day-detail dialog (sleep / activity / combined) + day browser ─────────── */
 .day-dialog { width: min(500px, calc(100vw - 32px)); }

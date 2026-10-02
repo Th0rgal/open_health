@@ -102,7 +102,7 @@ struct Session {
     top3: Vec<(String, f64)>,
 }
 
-pub fn run(db: &Path, root: &Path, tz: i64, threshold: f64, json: bool) -> Result<()> {
+pub fn run(db: &Path, root: &Path, tz: f64, threshold: f64, json: bool) -> Result<()> {
     let model = crate::pyrunner::model_path(root, MODEL_FILE);
     if !model.is_file() {
         bail!("model not found: {}", model.display());
@@ -227,7 +227,7 @@ pub fn run(db: &Path, root: &Path, tz: i64, threshold: f64, json: bool) -> Resul
     let _ = step_t.get(1).get(0).fill_(met[met.len() - 1][0] as f64);
 
     // context [year, month, day, weekday(Mon=0)] from the anchor in local time.
-    let t_local = anchor_unix + tz * 3600;
+    let t_local = anchor_unix + (tz * 3600.0).round() as i64;
     let days = t_local.div_euclid(86400);
     let (y, mo, d) = oura_summary::civil(days);
     let weekday = (days + 3).rem_euclid(7); // 1970-01-01 was Thursday(=3, Mon=0)
@@ -269,7 +269,7 @@ pub fn run(db: &Path, root: &Path, tz: i64, threshold: f64, json: bool) -> Resul
     // *60 scaling (like the Python runner's `(minute + OFFSET) * 60`) so fractional
     // minute boundaries don't get truncated to a different wall-clock minute.
     let to_local = |minute: f64| -> (String, String) {
-        let secs = ((minute + offset as f64) * 60.0 + (tz * 3600) as f64) as i64;
+        let secs = ((minute + offset as f64) * 60.0 + tz * 3600.0) as i64;
         let days = secs.div_euclid(86400);
         let sod = secs.rem_euclid(86400);
         let (y, mo, d) = oura_summary::civil(days);
