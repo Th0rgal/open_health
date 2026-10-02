@@ -12,6 +12,9 @@ struct Epoch {
     fallback_anchor_unix: i64,
     anchors: Vec<(i64, i64)>, // (ring ds, UTC unix seconds)
     anchor_sources: Vec<&'static str>,
+    // `ring_start` ds values: a brownout reboot keeps counting, so this is where a
+    // stalled counter lost its time.
+    boots: Vec<i64>,
 }
 
 const RESET_SLACK_DS: i64 = 6 * 3600 * 10;
@@ -112,7 +115,11 @@ impl RingClock {
                     fallback_anchor_unix: *captured,
                     anchors: Vec::new(),
                     anchor_sources: Vec::new(),
+                    boots: Vec::new(),
                 }),
+            }
+            if *tag == 0x41 {
+                epochs.last_mut().unwrap().boots.push(*ds);
             }
             if matches!(*tag, 0x42 | 0x85) {
                 if let Ok(value) = serde_json::from_str::<Value>(json) {
@@ -168,10 +175,15 @@ impl RingClock {
                 Bracket::Stalled { before, after } => {
                     let late = after.1 as f64 - (after.0 - ds) as f64 / 10.0;
                     let early = before.1 as f64 + (ds - before.0) as f64 / 10.0;
-                    let unix = if late <= captured_unix as f64 + FUTURE_SLACK_S {
-                        late
-                    } else {
-                        early
+                    // A ring_start between the anchors marks the stall exactly; without
+                    // one, the download time tells which side an event sits on (wrong
+                    // when pre-stall events were only downloaded after the stall).
+                    let boot = epoch.boots.iter().copied().filter(|b| *b > before.0 && *b <= after.0).max();
+                    let unix = match boot {
+                        Some(boot) if ds >= boot => late,
+                        Some(_) => early,
+                        None if late <= captured_unix as f64 + FUTURE_SLACK_S => late,
+                        None => early,
                     };
                     return Resolved {
                         unix,
@@ -417,6 +429,29 @@ mod tests {
     }
 
     #[test]
+    fn ring_start_marks_the_stall_when_pre_stall_events_download_late() {
+        // Ring 4, Sep 2026: synced 09-04, died on an empty battery 09-23, booted on the
+        // charger 09-25 without resetting ds, next sync 09-27. Every pre-stall event was
+        // downloaded after the stall, so the download time cannot pick the side.
+        let before = (8_040_603_i64, 1_788_523_149_i64);
+        let boot = 24_041_617_i64;
+        let after = (25_724_127_i64, 1_790_523_679_i64);
+        let captured = after.1;
+        let clock = RingClock::from_events(&[
+            event(before.0, 0x42, &format!(r#"{{"unix_time":{},"source":"phone"}}"#, before.1), before.1),
+            event(20_000_000, 1, "{}", captured),
+            event(boot, 0x41, "{}", captured),
+            event(25_000_000, 1, "{}", captured),
+            event(after.0, 0x42, &format!(r#"{{"unix_time":{},"source":"phone"}}"#, after.1), captured),
+        ]);
+        let early = clock.resolve(20_000_000, captured);
+        assert_eq!(early.source, ClockSource::Anchor);
+        assert!((early.unix - (before.1 as f64 + (20_000_000 - before.0) as f64 / 10.0)).abs() < 0.01);
+        let late = clock.resolve(25_000_000, captured);
+        assert!((late.unix - (after.1 as f64 - (after.0 - 25_000_000) as f64 / 10.0)).abs() < 0.01);
+    }
+
+    #[test]
     fn time_sync_wins_over_download_time() {
         let clock = RingClock::from_events(&[
             event(5_000_000, 1, "{}", 1_783_543_000),
@@ -444,6 +479,7 @@ mod tests {
                     fallback_anchor_unix: 199,
                     anchors: vec![(5_000_000, 1_700_000_000)],
                     anchor_sources: vec!["time_sync"],
+                    boots: Vec::new(),
                 },
                 Epoch {
                     min_ds: 0,
@@ -453,6 +489,7 @@ mod tests {
                     fallback_anchor_unix: 299,
                     anchors: vec![(500_000, 1_800_000_000)],
                     anchor_sources: vec!["time_sync"],
+                    boots: Vec::new(),
                 },
             ],
             anchor_offsets_ds: vec![
