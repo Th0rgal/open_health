@@ -25,6 +25,9 @@ jobs:
         run: node tools/test_sleep_charts.cjs
       - name: Build Rust iOS framework
         run: bash apps/ios/build-xcframework.sh
+      - name: Parse model-enabled Swift sources
+        working-directory: apps/ios/OuraApp
+        run: swiftc -frontend -parse -D TORCH Core.swift SleepStaging.swift EventStore.swift ModelCache.swift ActivityModel.swift CvaModel.swift IllnessModel.swift
       - name: Generate simulator project
         working-directory: apps/ios/OuraApp
         run: xcodegen generate --spec project-ci.yml

@@ -1586,6 +1586,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
 
     let mut nights_json = Vec::new();
     let mut asleep_by_day: std::collections::BTreeMap<i64, i32> = Default::default();
+    let mut incomplete_sleep_days = std::collections::BTreeSet::new();
     // (wake date, biomarkers) per night, oldest first — the Symptom Radar input.
     let mut nightly_biomarkers: Vec<(String, symptoms::NightBiomarkers)> = Vec::new();
     // Personal baselines for the sleep score's physiology component: mean and SD of
@@ -1645,6 +1646,9 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             ]),
             _ => None,
         };
+        if !complete_staging {
+            incomplete_sleep_days.insert((end_unix as i64 + tz * 3600).div_euclid(86_400));
+        }
         if asleep_s > 0 {
             let wake_day = (end_unix as i64 + tz * 3600).div_euclid(86_400);
             *asleep_by_day.entry(wake_day).or_default() += asleep_s;
@@ -1738,6 +1742,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
     }
     nights_json.reverse();
 
+    asleep_by_day.retain(|day, _| !incomplete_sleep_days.contains(day));
     let sleep_debt = sleep_debt_summary(&asleep_by_day);
 
     // Symptom signs for the most recent night, judged against the nights before it.

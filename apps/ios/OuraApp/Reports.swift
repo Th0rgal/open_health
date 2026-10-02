@@ -161,12 +161,15 @@ extension Summary {
     func stagedSleepDebt() -> SleepDebtSummary? {
         let defaultNeedS = 8.0 * 3600.0
         var byDay: [String: Double] = [:]
-        for n in nights where (n.hypnogram?.count ?? 0) > 1 {
+        var incompleteDays = Set<String>()
+        for n in nights {
             guard let day = wakeYmd(n) else { continue }
+            guard n.stagingComplete else { incompleteDays.insert(day); continue }
             let actual = Double(Sleep.asleepS(Sleep.smooth(n.hypnogram ?? [], 5),
                                               inBedS: n.durationS))
             if actual > 0 { byDay[day, default: 0] += actual }
         }
+        byDay = byDay.filter { !incompleteDays.contains($0.key) }
         guard let anchor = byDay.keys.max() else { return nil }
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "UTC")!

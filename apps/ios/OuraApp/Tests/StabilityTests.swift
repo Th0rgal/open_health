@@ -20,6 +20,14 @@ final class StabilityTests: XCTestCase {
                                     inBedS: 8 * 3600)?.solMin, 60)
     }
 
+    func testPartialMainSleepDoesNotTurnCompleteNapIntoDailySleepDebt() {
+        var partial = NightRow(ymd: "2026-09-26", start: "00:07", end: "08:55", in_bed_h: 8.8)
+        partial.wake_ymd = "2026-09-26"; partial.stages_full = [0, 0, 2, 3]
+        var nap = NightRow(ymd: "2026-09-26", start: "14:00", end: "15:00", in_bed_h: 1)
+        nap.wake_ymd = "2026-09-26"; nap.stages_full = [2, 2, 2, 2]
+        XCTAssertNil(Summary(nights: [partial, nap]).stagedSleepDebt())
+    }
+
     func testNightUsesFullStagesAndExactDurationInsteadOfRoundedPreview() throws {
         let data = Data(#"{"stages":[4,2],"stages_full":[4,1,2,3],"start_unix":100,"end_unix":220,"in_bed_h":0.1}"#.utf8)
         let night = try JSONDecoder().decode(NightRow.self, from: data)

@@ -80,6 +80,7 @@ enum Core {
             if let old = previous?.nights.first(where: {
                 $0.start_ds == start && $0.end_ds == night.end_ds
                     && $0.ymd == night.ymd && $0.start == night.start && $0.end == night.end
+                    && $0.start_unix == night.start_unix && $0.end_unix == night.end_unix
             }), old.staging_source == "sleepnet", let stages = old.hypnogram, !stages.isEmpty {
                 saved[String(start)] = stages
             }
@@ -236,7 +237,7 @@ enum Core {
         // If staging failed outright, refill from the last published summary so a
         // transient read failure can't strip hypnograms that were already on screen.
         if sleepErr != nil, let previous {
-            for night in previous.nights {
+            for night in previous.nights where night.staging_source == "sleepnet" {
                 if let sds = night.start_ds, staged[String(sds)] == nil, let stages = night.hypnogram, !stages.isEmpty {
                     staged[String(sds)] = stages
                 }

@@ -3,8 +3,7 @@
 extract a per-30s hypnogram (DEEP/LIGHT/REM/WAKE).
 
 Inputs from the SQLite event log: IBI (0x60), motion_seconds (0x47), temp (0x46),
-bedtime (0x76). SpO2 passed empty (we only have R-ratio, not %). Time axis is the
-device-relative deciseconds anchored to the latest event's captured_unix.
+bedtime (0x76). SpO2 passed empty (we only have R-ratio, not %). Time axis uses per-boot clock anchors and the bedtime capture epoch.
 
 Usage: python tools/run_sleep_model.py START_DS END_DS [DB] [TZ=1]
        (no args → uses the bedtime_period in the DB)
@@ -58,8 +57,6 @@ MODEL_M = torch.jit.load(MODEL, map_location="cpu").eval()
 
 def score_window(start_ds, end_ds, captured_unix=None):
     """Score one bedtime window. Returns (out_dict, ts, stages) or (err_str, None, None)."""
-    lo, hi = start_ds - 6000, end_ds + 6000  # ±10 min margin
-    beats, acm, temp = [], [], []
     bed_cu = captured_unix if captured_unix is not None else next((cu for ds, tag, js, cu in reversed(rows) if tag == 0x76 and
                    json.loads(js).get("bedtime_start_ds") == start_ds), None)
     decoded_rows = ((ds, tag, json.loads(js), cu) for ds, tag, js, cu in rows)
