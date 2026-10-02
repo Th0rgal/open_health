@@ -9,15 +9,23 @@ import Foundation
 final class ModelProgress: ObservableObject {
     @Published private(set) var label: String?
     private var generation = 0
+    private var watchdog: Task<Void, Never>?
 
     func begin(_ generation: Int) {
         self.generation = generation
         label = nil
+        watchdog?.cancel()
+        watchdog = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 180_000_000_000) } catch { return }
+            guard let self, self.generation == generation else { return }
+            self.label = "Analysis is taking too long. Results already saved remain available."
+        }
     }
 
     func report(_ generation: Int, _ text: String?) {
         guard generation == self.generation else { return }
         label = text
+        if text == nil || text == "Analysis paused" { watchdog?.cancel(); watchdog = nil }
     }
 
     /// A progress closure bound to one load generation, safe to call from any

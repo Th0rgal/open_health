@@ -1,0 +1,61 @@
+name: iOS validation
+on:
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: ios-validation-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  simulator:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ios-rust-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: ios-rust-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Install build tools
+        run: |
+          brew install xcodegen
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+      - name: Rust regression tests
+        run: cargo test --locked --workspace
+      - name: Python input and clock regression tests
+        run: |
+          python3 -m unittest discover -s tools -p test_sleep_inputs.py
+          python3 -m unittest discover -s tools -p test_epoch_time.py
+      - name: Web chart regression tests
+        run: node tools/test_sleep_charts.cjs
+      - name: Build Rust iOS framework
+        run: bash apps/ios/build-xcframework.sh
+      - name: Parse model-enabled Swift sources
+        working-directory: apps/ios/OuraApp
+        run: swiftc -frontend -parse -D TORCH Core.swift SleepStaging.swift EventStore.swift ModelCache.swift ActivityModel.swift CvaModel.swift IllnessModel.swift
+      - name: Generate simulator project
+        working-directory: apps/ios/OuraApp
+        run: xcodegen generate --spec project-ci.yml
+      - name: Run iOS tests
+        working-directory: apps/ios/OuraApp
+        run: |
+          SIMULATOR=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for k,vs in d["devices"].items() if "iOS" in k for v in vs if "iPhone" in v["name"]))')
+          xcodebuild test -project OuraApp.xcodeproj -scheme OuraApp -destination "platform=iOS Simulator,id=$SIMULATOR" CODE_SIGNING_ALLOWED=NO -resultBundlePath build/Validation.xcresult
+      - name: Validate model-enabled Swift plumbing (stub bridge, no inference)
+        working-directory: apps/ios/OuraApp
+        run: |
+          ruby ../../../tools/ci_model_project.rb
+          xcodegen generate --spec project-model-validation.yml
+          SIMULATOR=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for k,vs in d["devices"].items() if "iOS" in k for v in vs if "iPhone" in v["name"]))')
+          xcodebuild test -project OuraApp.xcodeproj -scheme OuraApp -destination "platform=iOS Simulator,id=$SIMULATOR" CODE_SIGNING_ALLOWED=NO -resultBundlePath build/ModelPlumbing.xcresult -only-testing:OuraAppTests/StabilityTests/testAutomaticSleepOnlyFillsLatestMissingNight -only-testing:OuraAppTests/StabilityTests/testAutomaticSleepPicksTheNightWokenFromMostRecently -only-testing:OuraAppTests/StabilityTests/testSleepNetOutputKeepsItsOwnTimestamps -only-testing:OuraAppTests/StabilityTests/testUnknownStagesStayUnknownAndDoNotProduceSleepMetrics -only-testing:OuraAppTests/StabilityTests/testPartialMainSleepDoesNotTurnCompleteNapIntoDailySleepDebt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-validation-results
+          path: apps/ios/OuraApp/build/*.xcresult

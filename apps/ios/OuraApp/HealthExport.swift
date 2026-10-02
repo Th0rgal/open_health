@@ -216,7 +216,7 @@ final class HealthExport: ObservableObject {
         var parts: [String] = []
         parts.append(contentsOf: s.workouts.filter { $0.isWorkout >= 0.5 }.map(\.id).sorted())
         for n in s.nights {
-            let st = n.stages ?? []
+            let st = n.hypnogram ?? []
             parts.append("n\(n.start_ds ?? 0):\(st.count):\(st.reduce(0, +)):\(n.hrv_ms ?? 0):\(n.rhr ?? 0)")
         }
         for day in s.activity_daily.keys.sorted() {
@@ -300,11 +300,12 @@ final class HealthExport: ObservableObject {
         let key = "\(night.start_ds ?? 0)"
         out.append(HKCategorySample(type: type, value: HKCategoryValueSleepAnalysis.inBed.rawValue,
                                     start: start, end: end, metadata: meta("sleep.inbed.\(key)")))
-        guard let stages = night.stages, stages.count > 1 else { return out }
+        guard let stages = night.hypnogram, stages.count > 1 else { return out }
         let epoch = end.timeIntervalSince(start) / Double(stages.count)
         var i = 0
         while i < stages.count {
             let code = stages[i]
+            if !(1...4).contains(code) { i += 1; continue }
             var j = i + 1
             while j < stages.count, stages[j] == code { j += 1 }
             let value: HKCategoryValueSleepAnalysis

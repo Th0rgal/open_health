@@ -3,6 +3,62 @@ import SQLite3
 @testable import OuraApp
 
 final class StabilityTests: XCTestCase {
+    func testSummaryCachePreservesAnalysisIdentity() throws {
+        var summary = Summary()
+        summary.analysis_digest = "10:20:2:15"
+        summary.analysis_version = 6
+        let restored = try JSONDecoder().decode(Summary.self, from: JSONEncoder().encode(summary))
+        XCTAssertEqual(restored.analysis_digest, summary.analysis_digest)
+        XCTAssertEqual(restored.analysis_version, summary.analysis_version)
+    }
+
+    func testRebootedRingDoesNotReuseSleepCacheKey() {
+        var first = NightRow(start_ds: 100)
+        first.start_unix = 1000
+        var second = first
+        second.start_unix = 87400
+        XCTAssertNotEqual(first.stagingKey, second.stagingKey)
+    }
+
+    func testSleepNetOutputKeepsItsOwnTimestamps() {
+        XCTAssertEqual(Sleep.alignedStages(timestamps: [60000, 90000], stages: [2, 3], startMs: 0, endMs: 120000), [0, 0, 2, 3])
+        XCTAssertEqual(Sleep.alignedStages(timestamps: [-30000, 0, 30000], stages: [4, 1, 2], startMs: 0, endMs: 60000), [1, 2])
+        XCTAssertNil(Sleep.alignedStages(timestamps: [30000, 0], stages: [1, 2], startMs: 0, endMs: 60000))
+        XCTAssertNil(Sleep.alignedStages(timestamps: [0], stages: [8], startMs: 0, endMs: 60000))
+    }
+
+    func testUnknownStagesStayUnknownAndDoNotProduceSleepMetrics() {
+        let stages = Array(repeating: 0, count: 480) + Array(repeating: 2, count: 480)
+        let smoothed = Sleep.smooth(stages, 5)
+        XCTAssertEqual(Array(smoothed.prefix(480)), Array(repeating: 0, count: 480))
+        XCTAssertNil(Sleep.metrics(smoothed, inBedS: 8 * 3600))
+        XCTAssertEqual(Sleep.asleepS(smoothed, inBedS: 8 * 3600), 0)
+        XCTAssertEqual(Sleep.metrics(Array(repeating: 4, count: 120) + Array(repeating: 2, count: 840),
+                                    inBedS: 8 * 3600)?.solMin, 60)
+    }
+
+    func testPartialMainSleepDoesNotTurnCompleteNapIntoDailySleepDebt() {
+        var partial = NightRow(ymd: "2026-09-26", start: "00:07", end: "08:55", in_bed_h: 8.8)
+        partial.wake_ymd = "2026-09-26"; partial.stages_full = [0, 0, 2, 3]
+        var nap = NightRow(ymd: "2026-09-26", start: "14:00", end: "15:00", in_bed_h: 1)
+        nap.wake_ymd = "2026-09-26"; nap.stages_full = [2, 2, 2, 2]
+        XCTAssertNil(Summary(nights: [partial, nap]).stagedSleepDebt())
+    }
+
+    func testNightUsesFullStagesAndExactDurationInsteadOfRoundedPreview() throws {
+        let data = Data(#"{"stages":[4,2],"stages_full":[4,1,2,3],"start_unix":100,"end_unix":220,"in_bed_h":0.1}"#.utf8)
+        let night = try JSONDecoder().decode(NightRow.self, from: data)
+        XCTAssertEqual(night.hypnogram, [4, 1, 2, 3])
+        XCTAssertEqual(night.durationS, 120)
+    }
+
+    func testAnalysisDeadlineCancelsCooperativeWork() {
+        let run = AnalysisRun(timeout: -1)
+        run.perform {
+            do { try AnalysisRun.check(); XCTFail("expired run accepted") } catch {}
+        }
+    }
+
     func testOperationFailureSummaryKeepsCauseBeforeStackTrace() {
         let cause = "2026-09-09 error [models] activity day=2026-07-06 failed: select index out of range"
         let trace = (0..<24).map { "frame #\($0): libtorch_cpu" }.joined(separator: "\n")
@@ -74,19 +130,23 @@ final class StabilityTests: XCTestCase {
         let older = NightRow(ymd: "2026-09-08", start_ds: 100, end_ds: 190, start: "23:00", end: "07:00")
         var savedLatest = latest
         savedLatest.stages = [1, 2, 3, 4]
+        savedLatest.staging_source = "sleepnet"
         var savedOlder = older
         savedOlder.stages = [2, 3, 2, 1]
+        savedOlder.staging_source = "sleepnet"
         let nights = [latest, older]
 
         let firstLaunch = Core.automaticSleepPlan(nights: nights, previous: nil)
         XCTAssertEqual(firstLaunch.pending.map(\.start_ds), [200])
         let missingLatest = Core.automaticSleepPlan(nights: nights, previous: Summary(nights: [savedOlder]))
         XCTAssertEqual(missingLatest.pending.map(\.start_ds), [200])
-        XCTAssertEqual(missingLatest.saved["100"], savedOlder.stages)
+        XCTAssertEqual(missingLatest.saved[older.stagingKey], savedOlder.stages)
         let missingOlder = Core.automaticSleepPlan(nights: nights, previous: Summary(nights: [savedLatest]))
         XCTAssertTrue(missingOlder.pending.isEmpty)
         let reopen = Core.automaticSleepPlan(nights: nights, previous: Summary(nights: [savedLatest, savedOlder]))
         XCTAssertTrue(reopen.pending.isEmpty)
+        let newInputs = Core.automaticSleepPlan(nights: nights, previous: Summary(nights: [savedLatest, savedOlder]), revalidateLatest: true)
+        XCTAssertEqual(newInputs.pending.map(\.start_ds), [200])
         XCTAssertEqual(reopen.saved.count, 2)
 
         var changed = latest

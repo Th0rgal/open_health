@@ -73,15 +73,16 @@ enum Core {
     #if TORCH
     /// Launch and sync only fill the latest night's missing analysis. Historical
     /// results stay visible, and older missing nights are refreshed on demand.
-    static func automaticSleepPlan(nights: [NightRow], previous: Summary?) -> (saved: [String: [Int]], pending: [NightRow]) {
+    static func automaticSleepPlan(nights: [NightRow], previous: Summary?, revalidateLatest: Bool = false) -> (saved: [String: [Int]], pending: [NightRow]) {
         var saved: [String: [Int]] = [:]
         for night in nights {
-            guard let start = night.start_ds else { continue }
+            guard night.start_ds != nil else { continue }
             if let old = previous?.nights.first(where: {
-                $0.start_ds == start && $0.end_ds == night.end_ds
+                $0.start_ds == night.start_ds && $0.end_ds == night.end_ds
                     && $0.ymd == night.ymd && $0.start == night.start && $0.end == night.end
-            }), let stages = old.stages, !stages.isEmpty {
-                saved[String(start)] = stages
+                    && $0.start_unix == night.start_unix && $0.end_unix == night.end_unix
+            }), old.staging_source == "sleepnet", let stages = old.hypnogram, !stages.isEmpty {
+                saved[night.stagingKey] = stages
             }
         }
         // Pick the night you woke from most recently (absolute end time, falling
@@ -94,8 +95,8 @@ enum Core {
             if lw != rw { return lw < rw }
             return lhs.offset > rhs.offset
         }?.element
-        guard let latest, let start = latest.start_ds,
-              latest.end_ds != nil, saved[String(start)] == nil else { return (saved, []) }
+        guard let latest, latest.start_ds != nil,
+              latest.end_ds != nil, revalidateLatest || saved[latest.stagingKey] == nil else { return (saved, []) }
         return (saved, [latest])
     }
 
@@ -118,7 +119,7 @@ enum Core {
                 let result = SleepStaging.run(nights: [night], events: events, clock: clock,
                                              force: true, pruneCache: false, progress: progress)
                 if let error = result.error { throw AnalysisRefreshFailure(error) }
-                guard let stages = result.staged[String(start)], !stages.isEmpty else {
+                guard let stages = result.staged[night.stagingKey], !stages.isEmpty else {
                     return (previous, "Not enough saved sleep data to refresh this night.")
                 }
                 let previousStart = previous.night(forDay: request.day)?.start_ds
@@ -169,7 +170,8 @@ enum Core {
         var s = base
         let profile = base.profile
 
-        let sleepPlan = automaticSleepPlan(nights: base.nights, previous: previous)
+        let validPrevious = previous?.analysis_version == ModelCacheStore.version ? previous : nil
+        var sleepPlan = automaticSleepPlan(nights: base.nights, previous: validPrevious)
         var staged = sleepPlan.saved
         var cva: CvaModel.Result?
         var workouts: [WorkoutSession] = []
@@ -195,6 +197,13 @@ enum Core {
         }
 
         if readErr == nil, !events.isEmpty {
+            let storeDigest = events.digest()
+            s.analysis_digest = storeDigest
+            s.analysis_version = ModelCacheStore.version
+            sleepPlan = automaticSleepPlan(nights: base.nights, previous: validPrevious,
+                                          revalidateLatest: storeDigest == nil || validPrevious?.analysis_digest != storeDigest)
+            staged = sleepPlan.saved
+            progress("Mapping ring clock")
             let clock = EventStore.RingClock(events: events)
             if events.error != nil || AnalysisRun.cancelled { return previous ?? base }
             let rSleep = sleepPlan.pending.isEmpty
@@ -210,6 +219,7 @@ enum Core {
             workouts = rAct.sessions; actErr = rAct.error
             stageFinished("activity")
             if AnalysisRun.cancelled { return previous ?? base }
+            progress("Analyzing symptom radar")
             let rIll = IllnessModel.run(profile: profile, events: events, clock: clock)
             illness = rIll.result; illErr = rIll.error
             stageFinished("illness")
@@ -219,23 +229,15 @@ enum Core {
             sleepErr = readErr; actErr = readErr; illErr = readErr
         }
         if AnalysisRun.cancelled { return previous ?? base }
+        progress("Analyzing cardiovascular age")
         let rCva = CvaModel.run(sex: profile?.sex ?? "M", age: profile?.age ?? 30,
                                 heightM: profile?.height_m ?? 1.78, weightKg: profile?.weight_kg ?? 75,
                                 ringSize: profile?.ring_size ?? 10)
         cva = rCva.result; cvaErr = rCva.error
         stageFinished("cva")
 
-        // If staging failed outright, refill from the last published summary so a
-        // transient read failure can't strip hypnograms that were already on screen.
-        if sleepErr != nil, let previous {
-            for night in previous.nights {
-                if let sds = night.start_ds, staged[String(sds)] == nil, let stages = night.stages, !stages.isEmpty {
-                    staged[String(sds)] = stages
-                }
-            }
-        }
         // fold SleepNet's hypnogram + stage breakdown into each night, keyed by the exact
-        // bedtime start_ds so two sleeps on one calendar day don't collide.
+        // bedtime start and absolute epoch so rebooted counters cannot collide.
         applySleepStages(staged, to: &s)
         if let cva {
             s.cardio = Cardio(vascular_age: cva.vascularAge, chronological_age: profile?.age ?? 30,
@@ -256,14 +258,19 @@ enum Core {
 
     private static func applySleepStages(_ staged: [String: [Int]], to s: inout Summary) {
         for i in s.nights.indices {
-            guard let sds = s.nights[i].start_ds, let stages = staged[String(sds)], !stages.isEmpty else { continue }
+            guard s.nights[i].start_ds != nil, let stages = staged[s.nights[i].stagingKey], !stages.isEmpty else { continue }
             s.nights[i].stages = stages
+            s.nights[i].stages_full = stages
+            s.nights[i].staging_source = "sleepnet"
+            s.nights[i].staging_complete = stages.allSatisfy { (1...4).contains($0) }
+            s.nights[i].staging_coverage_pct = Double(stages.filter { (1...4).contains($0) }.count) / Double(stages.count) * 100
             let total = Double(stages.count)
             let pct = { (code: Int) in (Double(stages.filter { $0 == code }.count) / total * 100).rounded() }
             s.nights[i].deep_pct = pct(1); s.nights[i].light_pct = pct(2)
             s.nights[i].rem_pct = pct(3); s.nights[i].wake_pct = pct(4)
             let asleep = total - Double(stages.filter { $0 == 4 }.count)
-            s.nights[i].efficiency = (asleep / total * 100).rounded()
+            s.nights[i].efficiency = s.nights[i].stagingComplete ? (asleep / total * 100).rounded() : nil
+            s.nights[i].sleep_score = nil // The base score describes a different hypnogram.
         }
         // Staging can be partial while model inputs are still arriving. Never replace
         // a more complete model-free debt window with a transient "0 of 5" result;

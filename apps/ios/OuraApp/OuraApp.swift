@@ -31,7 +31,7 @@ struct TodayCard: View {
                         }
                         Text("\(n.start ?? "–") → \(n.end ?? "–")")
                             .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-                        if n.hasHypnogram { Hypnogram(stages: n.stages!, height: 28) }
+                        if n.hasHypnogram { Hypnogram(stages: n.hypnogram!, height: 28) }
                         else if let e = n.efficiency {
                             Text("efficiency \(Int(e))%").font(Obs.mono(12))
                                 .foregroundStyle(e >= 85 ? Obs.good : (e < 75 ? Obs.bad : Obs.ink2))
@@ -150,7 +150,7 @@ struct AllDaysView: View {
                     }
                 }
                 if let n = night, n.hasHypnogram {
-                    Hypnogram(stages: n.stages!, height: 12)
+                    Hypnogram(stages: n.hypnogram!, height: 12)
                 } else if let n = night, let start = n.start, let end = n.end {
                     Text("\(start) → \(end)").font(Obs.mono(10)).foregroundStyle(Obs.muted)
                 }
@@ -801,6 +801,8 @@ struct RootView: View {
     @State private var vital: VitalKind?
     @State private var loadGeneration = 0
     @State private var isRefreshingSummary = false
+    @State private var automaticSyncRequested = false
+    @State private var reloadPending = false
     @StateObject private var ring = RingSync()
     @StateObject private var modelProgress = ModelProgress()
     private func f(_ v: Double?, _ fallback: String = "–") -> String {
@@ -899,7 +901,10 @@ struct RootView: View {
 
     private func requestAutomaticSync() {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        guard !automaticSyncRequested else { return }
+        automaticSyncRequested = true
         Task {
+            defer { automaticSyncRequested = false }
             _ = await ring.syncAutomaticallyIfNeeded()
             if WorkCoordinator.shared.available { load(force: true, clearCurrent: false) }
         }
@@ -915,6 +920,12 @@ struct RootView: View {
         loadGeneration += 1
         let generation = loadGeneration
         isRefreshingSummary = true
+        defer {
+            if reloadPending {
+                reloadPending = false
+                load(force: true, clearCurrent: false)
+            }
+        }
         modelProgress.begin(generation)
         let progress = modelProgress.sink(generation)
         await WorkGate.shared.acquire()
@@ -953,6 +964,9 @@ struct RootView: View {
 
     private func load(force: Bool = false, clearCurrent: Bool = false) {
         guard force || s == nil else { return }
+        // Lifecycle notifications and sync completion can request the same load.
+        // Queue one refresh instead of repeatedly cancelling its predecessor.
+        guard !isRefreshingSummary else { reloadPending = true; return }
         let run = WorkCoordinator.shared.newAnalysis()
         loadGeneration += 1
         let generation = loadGeneration
@@ -962,6 +976,14 @@ struct RootView: View {
         modelProgress.begin(generation)
         let progress = modelProgress.sink(generation)
         Task {
+            defer {
+                if reloadPending {
+                    reloadPending = false
+                    load(force: true, clearCurrent: false)
+                }
+            }
+            modelProgress.report(generation, "Waiting for ring data")
+            dlog("models", "waiting for work gate run=\(run.id)")
             await WorkGate.shared.acquire()
             guard !run.isCancelled, WorkCoordinator.shared.available else {
                 await WorkGate.shared.release()
@@ -969,6 +991,7 @@ struct RootView: View {
                 if generation == loadGeneration { isRefreshingSummary = false; modelProgress.report(generation, "Analysis paused") }
                 return
             }
+            modelProgress.report(generation, "Reading ring data")
             IdleTimerLock.acquire("models")
             dlog("models", "start run=\(run.id)")
             let started = ProcessInfo.processInfo.systemUptime
@@ -1044,7 +1067,7 @@ struct RootView: View {
                                 if ring.busy || isRefreshingSummary {
                                     ProgressView().controlSize(.mini).scaleEffect(0.68).tint(Obs.ink)
                                     // one line next to the tag: short labels, no wrapping
-                                    Text((modelProgress.label ?? "updating").lowercased()).font(Obs.mono(9, .medium))
+                                    Text((ring.busy ? "Syncing ring" : (modelProgress.label ?? "Analyzing saved data")).lowercased()).font(Obs.mono(9, .medium))
                                         .tracking(0.6).foregroundStyle(Obs.ink2)
                                         .lineLimit(1).minimumScaleFactor(0.8).truncationMode(.tail)
                                 }
