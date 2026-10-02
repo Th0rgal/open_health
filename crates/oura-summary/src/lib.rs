@@ -542,7 +542,8 @@ fn stage_code(phase: &str) -> i64 {
         "deep" => 1,
         "light" => 2,
         "rem" => 3,
-        _ => 4,
+        "awake" => 4,
+        _ => 0,
     }
 }
 
@@ -575,7 +576,7 @@ fn ring_hypnograms(
     runs: &[RingSleep],
     nights: &[Night],
     unix_s_at: impl Fn(i64, i64) -> f64,
-) -> Vec<(i64, Value)> {
+) -> Vec<((i64, i64), Value)> {
     let mut out = Vec::new();
     for night in nights {
         let span_ds = night.end_ds - night.start_ds;
@@ -618,7 +619,7 @@ fn ring_hypnograms(
         let asleep = stages.iter().filter(|&&c| (1..=3).contains(&c)).count();
         let complete = stages.iter().all(|c| (1..=4).contains(c));
         out.push((
-            night.start_ds,
+            (night.start_ds, night.captured_unix),
             json!({
                 "start_ds": night.start_ds,
                 "stages": stages,
@@ -1551,12 +1552,17 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
         sleep_ranges: &sleep_ranges,
     });
 
-    let mut hyps: std::collections::HashMap<i64, Value> = sleep_batch
+    let mut hyps: std::collections::HashMap<(i64, i64), Value> = sleep_batch
         .as_ref()
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|h| Some((h["start_ds"].as_i64()?, h.clone())))
+                .filter_map(|h| {
+                    let start = h["start_ds"].as_i64()?;
+                    let captured = h["captured_unix"].as_i64().or_else(||
+                        nights.iter().find(|nt| nt.start_ds == start).map(|nt| nt.captured_unix))?;
+                    Some(((start, captured), h.clone()))
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -1616,7 +1622,7 @@ pub fn build_summary(db: &Path, tz: i64, runner: &dyn ModelRunner) -> Result<Val
             .collect::<Vec<_>>(),
     );
     for nt in &nights {
-        let hyp = hyps.get(&nt.start_ds);
+        let hyp = hyps.get(&(nt.start_ds, nt.captured_unix));
         let raw_stages: Vec<i64> = hyp
             .and_then(|h| h["stages"].as_array())
             .map(|s| s.iter().filter_map(|x| x.as_i64()).collect())
@@ -2114,6 +2120,23 @@ mod tests {
             captured_unix: 1,
             staged: false,
         }
+    }
+
+    #[test]
+    fn identical_relative_starts_in_different_boots_keep_distinct_hypnograms() {
+        let nights = [
+            Night { start_ds: 0, end_ds: 36000, captured_unix: 1, ..Default::default() },
+            Night { start_ds: 0, end_ds: 36000, captured_unix: 86401, ..Default::default() },
+        ];
+        let runs = [
+            RingSleep { start_ds: 0, end_ds: 36000, captured_unix: 1, codes: vec![1; 120] },
+            RingSleep { start_ds: 0, end_ds: 36000, captured_unix: 86401, codes: vec![3; 120] },
+        ];
+        let hyps: std::collections::HashMap<_, _> = ring_hypnograms(&runs, &nights,
+            |ds, cu| ds as f64 / 10.0 + cu as f64).into_iter().collect();
+        assert_eq!(hyps.len(), 2);
+        assert_eq!(hyps[&(0, 1)]["stages"][0], 1);
+        assert_eq!(hyps[&(0, 86401)]["stages"][0], 3);
     }
 
     #[test]

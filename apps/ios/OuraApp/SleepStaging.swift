@@ -31,13 +31,13 @@ enum SleepStaging {
         // the raw ring boundary that the UI already corrected.
         // `nights` arrive newest-first from the summary; keep that order so the
         // night the user is looking at stages first.
-        let beds = nights.compactMap { night -> (start: Int64, end: Int64, cu: Int64)? in
+        let beds = nights.compactMap { night -> (start: Int64, end: Int64, cu: Int64, key: String)? in
             guard let start = night.start_ds, let end = night.end_ds else { return nil }
             let captured = night.captured_unix ?? events.restricted("tag=118").first { event in
                 event.tag == 0x76
                     && (event.json["bedtime_start_ds"] as? NSNumber)?.int64Value == start
             }?.cu
-            return (start, end, captured ?? events.last?.cu ?? 0)
+            return (start, end, captured ?? events.last?.cu ?? 0, night.stagingKey)
         }
 
         // A night's fingerprint covers its exact model inputs; a hit is by
@@ -71,7 +71,7 @@ enum SleepStaging {
             guard let inputs = nightInputs(start: bed.start, end: bed.end, cu: bed.cu,
                                            events: events, clock: clock) else { continue }
             guard events.error == nil else { return ([:], "event read failed") }
-            let key = String(bed.start), fp = fingerprint(inputs)
+            let key = bed.key, fp = fingerprint(inputs)
             currentKeys.insert(key)
             if !force, let entry = cache[key], entry.fp == fp {
                 if !entry.stages.isEmpty { result[key] = entry.stages }

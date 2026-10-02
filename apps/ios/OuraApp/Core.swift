@@ -76,13 +76,13 @@ enum Core {
     static func automaticSleepPlan(nights: [NightRow], previous: Summary?, revalidateLatest: Bool = false) -> (saved: [String: [Int]], pending: [NightRow]) {
         var saved: [String: [Int]] = [:]
         for night in nights {
-            guard let start = night.start_ds else { continue }
+            guard night.start_ds != nil else { continue }
             if let old = previous?.nights.first(where: {
                 $0.start_ds == start && $0.end_ds == night.end_ds
                     && $0.ymd == night.ymd && $0.start == night.start && $0.end == night.end
                     && $0.start_unix == night.start_unix && $0.end_unix == night.end_unix
             }), old.staging_source == "sleepnet", let stages = old.hypnogram, !stages.isEmpty {
-                saved[String(start)] = stages
+                saved[night.stagingKey] = stages
             }
         }
         // Pick the night you woke from most recently (absolute end time, falling
@@ -95,8 +95,8 @@ enum Core {
             if lw != rw { return lw < rw }
             return lhs.offset > rhs.offset
         }?.element
-        guard let latest, let start = latest.start_ds,
-              latest.end_ds != nil, revalidateLatest || saved[String(start)] == nil else { return (saved, []) }
+        guard let latest, latest.start_ds != nil,
+              latest.end_ds != nil, revalidateLatest || saved[latest.stagingKey] == nil else { return (saved, []) }
         return (saved, [latest])
     }
 
@@ -119,7 +119,7 @@ enum Core {
                 let result = SleepStaging.run(nights: [night], events: events, clock: clock,
                                              force: true, pruneCache: false, progress: progress)
                 if let error = result.error { throw AnalysisRefreshFailure(error) }
-                guard let stages = result.staged[String(start)], !stages.isEmpty else {
+                guard let stages = result.staged[night.stagingKey], !stages.isEmpty else {
                     return (previous, "Not enough saved sleep data to refresh this night.")
                 }
                 let previousStart = previous.night(forDay: request.day)?.start_ds
@@ -236,15 +236,6 @@ enum Core {
         cva = rCva.result; cvaErr = rCva.error
         stageFinished("cva")
 
-        // If staging failed outright, refill from the last published summary so a
-        // transient read failure can't strip hypnograms that were already on screen.
-        if sleepErr != nil, let previous = validPrevious {
-            for night in previous.nights where night.staging_source == "sleepnet" {
-                if let sds = night.start_ds, staged[String(sds)] == nil, let stages = night.hypnogram, !stages.isEmpty {
-                    staged[String(sds)] = stages
-                }
-            }
-        }
         // fold SleepNet's hypnogram + stage breakdown into each night, keyed by the exact
         // bedtime start_ds so two sleeps on one calendar day don't collide.
         applySleepStages(staged, to: &s)
@@ -267,7 +258,7 @@ enum Core {
 
     private static func applySleepStages(_ staged: [String: [Int]], to s: inout Summary) {
         for i in s.nights.indices {
-            guard let sds = s.nights[i].start_ds, let stages = staged[String(sds)], !stages.isEmpty else { continue }
+            guard s.nights[i].start_ds != nil, let stages = staged[s.nights[i].stagingKey], !stages.isEmpty else { continue }
             s.nights[i].stages = stages
             s.nights[i].stages_full = stages
             s.nights[i].staging_source = "sleepnet"

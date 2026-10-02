@@ -3,6 +3,14 @@ import SQLite3
 @testable import OuraApp
 
 final class StabilityTests: XCTestCase {
+    func testRebootedRingDoesNotReuseSleepCacheKey() {
+        var first = NightRow(start_ds: 100)
+        first.start_unix = 1000
+        var second = first
+        second.start_unix = 87400
+        XCTAssertNotEqual(first.stagingKey, second.stagingKey)
+    }
+
     func testSleepNetOutputKeepsItsOwnTimestamps() {
         XCTAssertEqual(Sleep.alignedStages(timestamps: [60000, 90000], stages: [2, 3], startMs: 0, endMs: 120000), [0, 0, 2, 3])
         XCTAssertEqual(Sleep.alignedStages(timestamps: [-30000, 0, 30000], stages: [4, 1, 2], startMs: 0, endMs: 60000), [1, 2])
@@ -123,7 +131,7 @@ final class StabilityTests: XCTestCase {
         XCTAssertEqual(firstLaunch.pending.map(\.start_ds), [200])
         let missingLatest = Core.automaticSleepPlan(nights: nights, previous: Summary(nights: [savedOlder]))
         XCTAssertEqual(missingLatest.pending.map(\.start_ds), [200])
-        XCTAssertEqual(missingLatest.saved["100"], savedOlder.stages)
+        XCTAssertEqual(missingLatest.saved[older.stagingKey], savedOlder.stages)
         let missingOlder = Core.automaticSleepPlan(nights: nights, previous: Summary(nights: [savedLatest]))
         XCTAssertTrue(missingOlder.pending.isEmpty)
         let reopen = Core.automaticSleepPlan(nights: nights, previous: Summary(nights: [savedLatest, savedOlder]))

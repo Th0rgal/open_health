@@ -50,6 +50,7 @@ struct NightRow: Codable, Identifiable {
     var staging_coverage_pct: Double? = nil
     var staging_complete: Bool? = nil
     var captured_unix: Int64? = nil
+    var stagingKey: String { "\(start_ds ?? 0):\(start_unix ?? captured_unix ?? 0)" }
     var hypnogram: [Int]? { stages_full ?? stages }
     var stagingComplete: Bool { staging_complete ?? (hypnogram?.allSatisfy { (1...4).contains($0) } ?? false) }
     var durationS: Double {

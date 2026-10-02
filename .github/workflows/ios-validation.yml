@@ -2,7 +2,7 @@ name: iOS validation
 on:
   pull_request:
   push:
-    branches: [main, fix/gen4-sleep-analysis]
+    branches: [main]
 concurrency:
   group: ios-validation-${{ github.ref }}
   cancel-in-progress: true

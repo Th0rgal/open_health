@@ -94,7 +94,7 @@ def score_window(start_ds, end_ds, captured_unix=None):
     asleep = sum(mins[k] for k in ("DEEP", "LIGHT", "REM"))
     in_bed = n * 0.5
     out = {
-        "start_ds": start_ds, "end_ds": end_ds,
+        "start_ds": start_ds, "end_ds": end_ds, "captured_unix": bed_cu,
         "start_local": hm(int(ts[0])), "end_local": hm(int(ts[-1])),
         "epochs": n, "in_bed_min": in_bed,
         "asleep_min": asleep, "efficiency_pct": round(100 * asleep / in_bed) if all(stages) else None,
