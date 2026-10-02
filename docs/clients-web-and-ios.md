@@ -338,3 +338,7 @@ Desktop Python runners have a 180-second kill/reap timeout and drain stdout conc
 
 Validation uses synthetic cases; personal exports and model weights remain local.
 A report JSON alone cannot replay Gen4 inference or prove the original bedtime.
+
+GitHub iOS validation also compiles the TORCH Swift paths against a validation-only
+C bridge and runs pure planning/alignment tests. This checks model plumbing, not
+LibTorch inference; release projects never include the stub bridge.

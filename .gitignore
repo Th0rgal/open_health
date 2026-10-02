@@ -36,3 +36,4 @@ feature_modes.json
 
 # Python research/test bytecode
 __pycache__/
+apps/ios/OuraApp/project-model-validation.yml
