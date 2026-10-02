@@ -5,7 +5,7 @@ on:
     branches: [main]
 concurrency:
   group: ios-validation-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
