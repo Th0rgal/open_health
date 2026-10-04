@@ -85,9 +85,11 @@ enum IllnessModel {
         let cacheKey = ModelCacheStore.globalKey(profile: profile)
         guard ModelCacheStore.loadDigest(ModelCacheStore.illnessFile, globalKey: cacheKey) == storeDigest else { return nil }
         let cached: [String: FingerprintedEntry<IllnessResult>] = ModelCacheStore.load(ModelCacheStore.illnessFile, globalKey: cacheKey)
-        guard let entry = cached["result"] else { return nil }
         dlog("models", "illness cache=digest-hit")
-        return (entry.value, nil)
+        // A digest-qualified empty cache is a completed, legitimate no-result
+        // (for example, there are no usable bedtime markers yet). It must be
+        // distinguishable from a cache miss so unchanged stores skip ingestion.
+        return (cached["result"]?.value, nil)
     }
 
     static func run(profile: Profile?, events: EventStore.Events,
@@ -122,7 +124,12 @@ enum IllnessModel {
                 latestWake = max(latestWake ?? .min, Int((u(en, e.cu) + tz) / self.day))
             }
         }
-        guard let latestWake else { return (nil, nil) }
+        guard let latestWake else {
+            ModelCacheStore.save(ModelCacheStore.illnessFile, globalKey: cacheKey,
+                                 entries: [String: FingerprintedEntry<IllnessResult>](),
+                                 digest: storeDigest, keepGenerations: true)
+            return (nil, nil)
+        }
         let cutoff = Double(latestWake - nDays - 2) * self.day - tz  // one extra day: activity is lagged
         // Only the tags below feed the model; letting SQLite skip the rest avoids
         // decoding two million rows of unrelated JSON.
@@ -212,7 +219,12 @@ enum IllnessModel {
                             hrv: rmssd, skinTemp: skin, dur: dur)
             if perDay[wakeDay] == nil || dur > perDay[wakeDay]!.dur { perDay[wakeDay] = n }
         }
-        guard let anchor = perDay.keys.max() else { return (nil, nil) }
+        guard let anchor = perDay.keys.max() else {
+            ModelCacheStore.save(ModelCacheStore.illnessFile, globalKey: cacheKey,
+                                 entries: [String: FingerprintedEntry<IllnessResult>](),
+                                 digest: storeDigest, keepGenerations: true)
+            return (nil, nil)
+        }
 
         // ── 30-day columns (index 0 = today) ──────────────────────────────────
         func col(_ pick: (Nightly) -> Double) -> [Float] {

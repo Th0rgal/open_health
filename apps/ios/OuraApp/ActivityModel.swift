@@ -125,7 +125,16 @@ enum ActivityModel {
             }
         }
         guard events.error == nil, !AnalysisRun.cancelled else { return ([], "analysis interrupted") }
-        guard !met.isEmpty else { return ([], onlyDay == nil ? nil : "No activity data is saved for this day.") }
+        guard !met.isEmpty else {
+            // An archive without MET rows is a complete, stable no-result—not a
+            // cache miss. Stamp it so the next unchanged foreground pass can take
+            // the digest shortcut instead of decoding the whole history again.
+            if onlyDay == nil {
+                ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: [String: ActivityDayEntry](),
+                                     digest: storeDigest, keepGenerations: true)
+            }
+            return ([], onlyDay == nil ? nil : "No activity data is saved for this day.")
+        }
 
         let stepPackets = collectStepPackets(events: events, clock: clock)
         var calendar = Calendar(identifier: .gregorian)
