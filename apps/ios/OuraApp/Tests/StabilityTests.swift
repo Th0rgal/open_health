@@ -21,8 +21,14 @@ final class StabilityTests: XCTestCase {
     }
 
     func testSleepNetOutputKeepsItsOwnTimestamps() {
-        XCTAssertEqual(Sleep.alignedStages(timestamps: [60000, 90000], stages: [2, 3], startMs: 0, endMs: 120000), [0, 0, 2, 3])
-        XCTAssertEqual(Sleep.alignedStages(timestamps: [-30000, 0, 30000], stages: [4, 1, 2], startMs: 0, endMs: 60000), [1, 2])
+        XCTAssertEqual(Sleep.alignedStages(timestamps: [90000, 120000], stages: [2, 3], startMs: 0, endMs: 120000), [0, 0, 2, 3])
+        XCTAssertEqual(Sleep.alignedStages(timestamps: [0, 30000, 60000], stages: [4, 1, 2], startMs: 0, endMs: 60000), [1, 2])
+        // SleepNet's real grid (epoch END times): a full night covers every cell,
+        // including a final partial epoch.
+        XCTAssertEqual(Sleep.alignedStages(timestamps: [30000, 60000, 90000, 120000], stages: [1, 2, 3, 4],
+                                           startMs: 0, endMs: 120000), [1, 2, 3, 4])
+        XCTAssertEqual(Sleep.alignedStages(timestamps: [30000, 60000, 90000, 120000], stages: [1, 2, 3, 4],
+                                           startMs: 0, endMs: 100000), [1, 2, 3, 4])
         XCTAssertNil(Sleep.alignedStages(timestamps: [30000, 0], stages: [1, 2], startMs: 0, endMs: 60000))
         XCTAssertNil(Sleep.alignedStages(timestamps: [0], stages: [8], startMs: 0, endMs: 60000))
     }
@@ -122,6 +128,18 @@ final class StabilityTests: XCTestCase {
         }
         let peak = await counter.peak
         XCTAssertEqual(peak, 1)
+    }
+
+    func testRawDataChartThinsLongSeriesButKeepsExtremes() {
+        let values: [Double] = (0..<10_000).map { Double($0 % 100) } + [500, -500]
+        let event = RawData.Event(name: "x", tag: 1, ringTimestamp: 0, capturedUnix: 0, unix: 1_000,
+                                  bodyLen: 0, decoded: ["v": values])
+        let points = RawData.points([event], field: "v")
+        XCTAssertLessThanOrEqual(points.count, 2_000)
+        XCTAssertEqual(points.map(\.v).max(), 500)
+        XCTAssertEqual(points.map(\.v).min(), -500)
+        XCTAssertEqual(points.map(\.t), points.map(\.t).sorted())
+        XCTAssertEqual(RawData.points([event], field: "v", maxPoints: 20_000).count, values.count)
     }
 
     #if TORCH
@@ -342,10 +360,14 @@ final class StabilityTests: XCTestCase {
         func entry(_ fp: String) -> [String: FingerprintedEntry<CvaModel.Result>] {
             ["result": FingerprintedEntry(fp: fp, value: CvaModel.Result(vascularAge: 30, pwv: 6, segments: 10))]
         }
-        ModelCacheStore.save(file, globalKey: "home", entries: entry("home"), keepGenerations: true)
+        ModelCacheStore.save(file, globalKey: "home", entries: entry("home"), digest: "home-digest",
+                             keepGenerations: true)
         ModelCacheStore.save(file, globalKey: "away", entries: entry("away"), keepGenerations: true)
         var loaded: [String: FingerprintedEntry<CvaModel.Result>] = ModelCacheStore.load(file, globalKey: "home")
         XCTAssertEqual(loaded["result"]?.fp, "home")
+        // The restored generation keeps its digest, so the fast path still applies.
+        XCTAssertEqual(ModelCacheStore.loadDigest(file, globalKey: "home"), "home-digest")
+        XCTAssertNil(ModelCacheStore.loadDigest(file, globalKey: "away"))
         loaded = ModelCacheStore.load(file, globalKey: "away")
         XCTAssertEqual(loaded["result"]?.fp, "away")
         // Only the most recent generations are kept.
@@ -362,18 +384,6 @@ final class StabilityTests: XCTestCase {
         XCTAssertTrue(loaded.isEmpty)
         XCTAssertNotEqual(ModelCacheStore.globalKey(profile: nil),
                           ModelCacheStore.globalKey(profile: nil, timezone: false))
-    }
-
-    func testRawDataChartThinsLongSeriesButKeepsExtremes() {
-        let values: [Double] = (0..<10_000).map { Double($0 % 100) } + [500, -500]
-        let event = RawData.Event(name: "x", tag: 1, ringTimestamp: 0, capturedUnix: 0, unix: 1_000,
-                                  bodyLen: 0, decoded: ["v": values])
-        let points = RawData.points([event], field: "v")
-        XCTAssertLessThanOrEqual(points.count, 2_000)
-        XCTAssertEqual(points.map(\.v).max(), 500)
-        XCTAssertEqual(points.map(\.v).min(), -500)
-        XCTAssertEqual(points.map(\.t), points.map(\.t).sorted())
-        XCTAssertEqual(RawData.points([event], field: "v", maxPoints: 20_000).count, values.count)
     }
 
     /// Parity harness: with `OURA_DUMP_DAY=YYYY-MM-DD` and `OURA_DUMP_PATH` set, writes the

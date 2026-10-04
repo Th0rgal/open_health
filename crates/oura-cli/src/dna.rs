@@ -456,7 +456,9 @@ mod tests {
     fn real_configured_dir_prefers_snp_indel_vcf_when_present() {
         let dir = PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
             .join("Documents/official/health/dna/files");
-        if !dir.exists() {
+        // Only on a machine holding real genomes, and only where they can be read
+        // (macOS denies ~/Documents to processes without that privacy grant).
+        if std::fs::read_dir(&dir).is_err() {
             return;
         }
         set_genomes_dir(Some(dir.clone()));

@@ -17,3 +17,4 @@ int oura_stepmotion(const char *path, const int64_t *ts, const float *raw,
                     int n, int64_t *out_ts, float *out, int cap) { return -1; }
 int oura_illness(const char *path, const float *series, const float *scalars,
                  double *score, int *decision, float *biomarkers) { return -1; }
+void oura_torch_release(void) {}

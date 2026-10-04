@@ -36,10 +36,16 @@ enum Sleep {
               endMs - startMs <= 48 * 3600 * 1000,
               stages.allSatisfy({ (1...4).contains($0) }),
               zip(timestamps, timestamps.dropFirst()).allSatisfy({ $0 < $1 }) else { return nil }
-        var aligned = Array(repeating: 0, count: max(1, Int((endMs - startMs) / 30000)))
+        // SleepNet stamps each epoch with its END time: the first output is start+30 s
+        // and the last lands on (or just past) the bedtime end. Epoch k covers
+        // (t-30 s, t]; reading t as the start left epoch 0 unknown and dropped the
+        // last one, so every night was reported incomplete. Mirrors
+        // tools/sleep_inputs.py.
+        let span = endMs - startMs
+        var aligned = Array(repeating: 0, count: max(1, Int((span + 29_999) / 30_000)))
         for (timestamp, stage) in zip(timestamps, stages) {
-            guard timestamp >= startMs, timestamp < endMs else { continue }
-            let index = Int((timestamp - startMs) / 30000)
+            guard timestamp > startMs else { continue }
+            let index = Int((timestamp - startMs - 1) / 30_000)
             if index < aligned.count { aligned[index] = stage }
         }
         return aligned

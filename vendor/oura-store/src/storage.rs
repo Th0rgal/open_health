@@ -127,7 +127,9 @@ impl Store {
             })?;
         }
         // Copy pages, including committed WAL content, without rebuilding every
-        // table and index as VACUUM INTO does. The caller serializes DB work.
+        // table and index as VACUUM INTO does. One step runs inside one read
+        // transaction, so a concurrent writer (a sync) cannot tear the copy: it
+        // holds exactly what was committed when the step began.
         let mut destination = Connection::open(out)?;
         {
             let backup = rusqlite::backup::Backup::new(&self.conn, &mut destination)?;
@@ -363,6 +365,30 @@ mod tests {
             body: vec![1, 2, 3],
             decoded: None,
         }
+    }
+
+    #[test]
+    fn export_runs_beside_an_open_write_transaction() {
+        let dir = std::env::temp_dir().join(format!("oura-store-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (src, dst) = (dir.join("oura.db"), dir.join("copy.db"));
+        let _ = std::fs::remove_file(&src);
+        let writer = Store::open(&src).unwrap();
+        writer.insert_event("S1", &sample_event()).unwrap();
+        // A sync mid-batch: uncommitted rows behind an open write transaction.
+        writer.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut pending = sample_event();
+        pending.timestamp = 43;
+        writer.insert_event("S1", &pending).unwrap();
+
+        Store::open_read_only(&src).unwrap().export_to(&dst).unwrap();
+        writer.conn.execute_batch("COMMIT").unwrap();
+
+        let copy = Store::open_read_only(&dst).unwrap();
+        assert_eq!(copy.integrity_check().unwrap(), "ok");
+        let rows: i64 = copy.conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "the copy holds what was committed, not the open batch");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

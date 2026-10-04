@@ -9,10 +9,15 @@ def aligned_stages(timestamps_ms, stages, start_ms, end_ms):
         raise ValueError("sleep output timestamps must increase")
     if any(code not in (1, 2, 3, 4) for code in stages):
         raise ValueError("invalid sleep stage code")
-    result = [0] * max(1, (end_ms - start_ms) // 30000)
+    # SleepNet stamps each epoch with its END time: the first output is start+30 s and
+    # the last lands on (or just past) the bedtime end. Epoch k covers (t-30 s, t], so
+    # a window that is not a whole number of epochs keeps its final partial epoch.
+    result = [0] * max(1, -(-(end_ms - start_ms) // 30000))
     for timestamp, code in zip(timestamps_ms, stages):
-        index = int((timestamp - start_ms) // 30000)
-        if 0 <= index < len(result):
+        if timestamp <= start_ms:
+            continue
+        index = int((timestamp - start_ms - 1) // 30000)
+        if index < len(result):
             result[index] = code
     return result
 

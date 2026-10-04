@@ -63,17 +63,28 @@ private struct ModelCacheFile<Entry: Codable>: Codable {
 private struct ModelCacheGeneration<Entry: Codable>: Codable {
     var globalKey: String
     var entries: [String: Entry]
+    /// The completed-run digest that generation had, so coming back to its key can
+    /// take the digest fast path too. Absent in older files.
+    var digest: String?
 }
 
 private struct ModelCacheDigest: Codable {
     var version: Int
     var globalKey: String
     var digest: String?
+    var previous: [ModelCacheGenerationDigest]?
+}
+
+private struct ModelCacheGenerationDigest: Codable {
+    var globalKey: String
+    var digest: String?
 }
 
 /// Mirrors SummaryCache: Application Support, serial queue, atomic writes.
 enum ModelCacheStore {
-    static let version = 7
+    // 8: SleepNet epochs aligned by their end time (every cached hypnogram had an
+    // unknown first epoch and was reported incomplete).
+    static let version = 8
     static let cvaFile = "cva-model-cache.json"
     static let illnessFile = "illness-model-cache.json"
     static let activityFile = "activity-model-cache.json"
@@ -119,8 +130,9 @@ enum ModelCacheStore {
         queue.sync {
             guard let data = try? Data(contentsOf: url(file)),
                   let decoded = try? JSONDecoder().decode(ModelCacheDigest.self, from: data),
-                  decoded.version == version, decoded.globalKey == globalKey else { return nil }
-            return decoded.digest
+                  decoded.version == version else { return nil }
+            if decoded.globalKey == globalKey { return decoded.digest }
+            return decoded.previous?.first(where: { $0.globalKey == globalKey })?.digest
         }
     }
 
@@ -143,7 +155,8 @@ enum ModelCacheStore {
                old.version == version {
                 var previous = old.previous ?? []
                 if old.globalKey != globalKey {
-                    previous.insert(ModelCacheGeneration(globalKey: old.globalKey, entries: old.entries), at: 0)
+                    previous.insert(ModelCacheGeneration(globalKey: old.globalKey, entries: old.entries,
+                                                         digest: old.digest), at: 0)
                 }
                 previous = Array(previous.filter { $0.globalKey != globalKey }.prefix(previousGenerations))
                 payload.previous = previous.isEmpty ? nil : previous

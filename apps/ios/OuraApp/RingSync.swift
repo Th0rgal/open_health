@@ -442,14 +442,13 @@ final class RingSync: ObservableObject {
     func exportRawDatabase() async -> URL? {
         guard exportStatus == nil else { return nil }
         let started = Date()
-        exportStatus = "Waiting for sync and analysis…"
         defer { exportStatus = nil }
-        await WorkGate.shared.acquire()
-        defer { Task { await WorkGate.shared.release() } }
         guard WorkCoordinator.shared.available else { return nil }
-        let waited = Date().timeIntervalSince(started)
+        // No WorkGate: a sync or analysis pass can hold it for minutes. The export is
+        // a one-step SQLite backup on its own read-only connection, which in WAL mode
+        // copies a consistent snapshot of everything committed so far, so it can run
+        // alongside them (a sync in progress simply isn't in this copy yet).
         exportStatus = "Preparing database…"
-        dlog("db", "export gate wait=\(String(format: "%.2f", waited))s")
         let source = DB.readPath()
         let stamp = { () -> String in
             let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmm"; return f.string(from: Date())
@@ -464,7 +463,7 @@ final class RingSync: ObservableObject {
             status = "Export failed: \(result)"; dlog("db", status); return nil
         }
         let size = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? Int) ?? 0
-        dlog("db", "export copy=\(String(format: "%.2f", Date().timeIntervalSince(started) - waited))s")
+        dlog("db", "export copy=\(String(format: "%.2f", Date().timeIntervalSince(started)))s")
         dlog("db", "exported \(out.lastPathComponent) (\(size) bytes) from \(source)")
         return out
     }
