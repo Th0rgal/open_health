@@ -686,15 +686,15 @@ final class StabilityTests: XCTestCase {
         let rawHR: [[Double]] = [
             [Double(startUnix) + firstOffset, 60],
             [Double(startUnix) + firstOffset + 300, 62],
-            // 45-minute missing interval (> 15m laneGapSeconds)
+            // >15m missing interval (> laneGapSeconds), followed by another 5m pair
             [Double(startUnix) + 6 * 3600, 50],
-            [Double(startUnix) + 7 * 3600, 52],
+            [Double(startUnix) + 6 * 3600 + 300, 52],
         ]
         let rawHRV: [[Double]] = [
             [Double(startUnix) + firstOffset, 40],
             [Double(startUnix) + firstOffset + 300, 44],
             [Double(startUnix) + 6 * 3600, 80],
-            [Double(startUnix) + 7 * 3600, 84],
+            [Double(startUnix) + 6 * 3600 + 300, 84],
         ]
         let samples = try XCTUnwrap(Sleep.timedSamples(rawHR, startUnix: startUnix, endUnix: endUnix))
         XCTAssertEqual(samples.count, 4)
