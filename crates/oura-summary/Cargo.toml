@@ -12,3 +12,6 @@ oura-store = { git = "https://github.com/Th0rgal/open_oura", rev = "99e0f4c4b329
 oura-analysis = { git = "https://github.com/Th0rgal/open_oura", rev = "99e0f4c4b3293772c16447708acfc3623cf3810f" }
 serde_json = "1"
 anyhow = "1"
+
+[dev-dependencies]
+rusqlite = "0.31"

@@ -40,6 +40,29 @@
 
 use serde_json::{json, Value};
 
+/// Minimum number of strictly preceding eligible main-sleep nights required before
+/// scoring nocturnal physiology (RHR / HRV) against a personal baseline.
+pub const MIN_BASELINE_NIGHTS: usize = 3;
+
+/// Minimum sleep window duration (3 hours in deciseconds) for a session to count as
+/// a main sleep rather than a nap when building personal physiology baselines.
+pub const MIN_BASELINE_SLEEP_DS: i64 = 3 * 60 * 60 * 10;
+
+/// Compute `(mean, sd)` from strictly preceding eligible nights in resolved
+/// chronological order. Returns `None` when fewer than [`MIN_BASELINE_NIGHTS`]
+/// finite observations are available, causing [`score_night`] to omit the
+/// physiology component and renormalize the remaining weights.
+pub fn causal_baseline(prior_values: &[f64]) -> Option<(f64, f64)> {
+    if prior_values.len() < MIN_BASELINE_NIGHTS {
+        return None;
+    }
+    let n = prior_values.len() as f64;
+    let mean = prior_values.iter().sum::<f64>() / n;
+    let variance = prior_values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+    let sd = variance.sqrt();
+    Some((mean, if sd > 1e-6 { sd } else { 1.0 }))
+}
+
 /// What a night needs to supply to be scored. Everything is optional: components with
 /// no input drop out of the weighting rather than scoring zero.
 #[derive(Default, Clone, Copy)]

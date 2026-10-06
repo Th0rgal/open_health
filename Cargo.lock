@@ -1384,6 +1384,7 @@ dependencies = [
  "oura-analysis",
  "oura-protocol",
  "oura-store",
+ "rusqlite",
  "serde_json",
 ]
 

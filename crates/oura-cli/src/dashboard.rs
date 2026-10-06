@@ -241,15 +241,17 @@ struct SummaryCache {
     value: Arc<Value>,
 }
 
-type CacheToken = (Option<SystemTime>, Option<SystemTime>, Option<SystemTime>);
+type CacheToken = (Option<SystemTime>, Option<SystemTime>, Option<SystemTime>, i64);
 
-/// mtimes of every input the summary depends on — any change rebuilds it. Covers a
-/// sync (oura.db), a profile edit (profile.json), and a feature toggle (feature_modes.json).
+/// mtimes of every input the summary depends on plus the store decoder version — any
+/// change rebuilds it. Covers a sync (oura.db), a profile edit (profile.json), a
+/// feature toggle (feature_modes.json), and historical decode migrations.
 fn summary_token(db: &Path) -> CacheToken {
     (
         mtime(db),
         mtime(&profile_path(db)),
         mtime(&feature_modes_path(db)),
+        oura_store::storage::DECODER_VERSION,
     )
 }
 
@@ -265,6 +267,7 @@ fn mtime(p: &Path) -> Option<SystemTime> {
 /// Cached `build_summary`: recompute only when oura.db, profile.json, or
 /// feature_modes.json changes.
 fn cached_summary(db: &Path, tz: f64) -> Result<Arc<Value>> {
+    let _ = oura_store::storage::Store::migrate_if_writable(db);
     let token = summary_token(db);
     if let Some(c) = summary_cache().lock().unwrap().as_ref() {
         if c.db == db && c.tz == tz && c.token == token {

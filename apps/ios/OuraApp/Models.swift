@@ -31,6 +31,14 @@ struct NightSeries: Codable {
     var temp_span: [Double]? = nil
     var motion: [Double] = []
 }
+// Timestamped `[unix_s, value]` pairs per signal from `build_summary` (`series_t`).
+struct NightTimedSeries: Codable {
+    var hr: [[Double]] = []
+    var hrv: [[Double]] = []
+    var spo2: [[Double]] = []
+    var temp: [[Double]] = []
+    var motion: [[Double]] = []
+}
 struct NightRow: Codable, Identifiable {
     var date: String?; var ymd: String?; var start_ds: Int64?; var end_ds: Int64?
     var raw_start_ds: Int64?; var raw_end_ds: Int64?; var bedtime_adjusted: Bool?
@@ -58,6 +66,8 @@ struct NightRow: Codable, Identifiable {
         return (in_bed_h ?? 0) * 3600
     }
     var series: NightSeries? = nil
+    var series_t: NightTimedSeries? = nil
+    var autonomic: StageAutonomic? = nil
     /// Nightly respiratory rate (breaths/min), the ring's own per-window estimate.
     var breath_rate: Double? = nil
     var sleep_score: SleepScore? = nil
@@ -164,7 +174,10 @@ struct SleepDebtSummary: Codable {
 struct Device: Codable {
     var serial: String?; var firmware: String?
     var battery_pct: Int?
-    var days_of_data: Double?; var nights: Int?
+    var days_of_data: Double?; var elapsed_days: Double?
+    var observed_days: Int?; var observed_coverage_days: Double?
+    var nights: Int?
+    var total_events: Int?; var raw_events: Int?; var decoded_events: Int?
     var synced: String?; var synced_hm: String?
 }
 // Symptom Radar (on-device illness detection). Mirrors the web summary's `illness`
@@ -198,10 +211,13 @@ struct ClockEpoch: Codable {
 struct ClockDiag: Codable {
     var epochs: [ClockEpoch] = []
     var warnings: [String] = []
+    var undated_reasons: [String: Int]? = nil
     var undated_nights: [UndatedNight] = []
 }
 struct UndatedNight: Codable {
-    var start_ds: Int64?; var end_ds: Int64?; var in_bed_h: Double?; var captured_unix: Int64?; var source: String?
+    var start_ds: Int64?; var end_ds: Int64?; var in_bed_h: Double?
+    var captured_unix: Int64?; var source: String?
+    var reason: String?; var recoverable: Bool?
 }
 struct Summary: Codable {
     var analysis_digest: String? = nil
@@ -228,7 +244,7 @@ struct Summary: Codable {
     // out of decoding.
     enum CodingKeys: String, CodingKey {
         case analysis_digest, analysis_version
-        case digest, device, nights, vitals, activity_profile, activity_daily, profile, cardio, fitness, error
+        case digest, device, nights, clock, vitals, activity_profile, activity_daily, profile, cardio, fitness, error
         case symptoms
         case sleepDebt = "sleep_debt"
     }
@@ -244,6 +260,7 @@ struct Summary: Codable {
         digest = try c.decodeIfPresent(String.self, forKey: .digest)
         device = try c.decodeIfPresent(Device.self, forKey: .device)
         nights = try c.decodeIfPresent([NightRow].self, forKey: .nights) ?? []
+        clock = try c.decodeIfPresent(ClockDiag.self, forKey: .clock)
         vitals = try c.decodeIfPresent(Vitals.self, forKey: .vitals) ?? Vitals()
         activity_profile = try c.decodeIfPresent([String: [Double]].self, forKey: .activity_profile) ?? [:]
         activity_daily = try c.decodeIfPresent([String: DailyStat].self, forKey: .activity_daily) ?? [:]

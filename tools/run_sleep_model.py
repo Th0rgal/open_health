@@ -39,15 +39,17 @@ if len(rest) > 1:
 DB = resolve_db(db_arg, REPO)
 
 con = sqlite3.connect(str(DB))
-rows = con.execute("SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events "
-                   "WHERE decoded_json IS NOT NULL ORDER BY captured_unix, id").fetchall()
+rows = con.execute("SELECT ring_timestamp, tag, COALESCE(decoded_json, '{}'), captured_unix FROM events "
+                   "WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14) "
+                   "ORDER BY captured_unix, id").fetchall()
 # Anchor ring deciseconds to wall-clock per boot epoch (ds resets on reboot; a single
 # global anchor mis-dates older epochs — see epoch_time / crates/oura-summary).
-from epoch_time import build_epochs, make_unix_s
+from epoch_time import build_epochs, is_dated, make_unix_s
 _epochs = build_epochs(rows)
 _unix_s = make_unix_s(_epochs)
 def ms(ds, cu=None):  # device deciseconds -> absolute epoch ms (int64), consistent across signals
-    return int(_unix_s(ds, cu) * 1000)
+    u = _unix_s(ds, cu)
+    return int(u * 1000) if u is not None else int(ds * 100)
 def hm(ms_):
     return datetime.datetime.utcfromtimestamp(ms_/1000 + TZ*3600).strftime("%H:%M")
 
@@ -59,6 +61,8 @@ def score_window(start_ds, end_ds, captured_unix=None):
     """Score one bedtime window. Returns (out_dict, ts, stages) or (err_str, None, None)."""
     bed_cu = captured_unix if captured_unix is not None else next((cu for ds, tag, js, cu in reversed(rows) if tag == 0x76 and
                    json.loads(js).get("bedtime_start_ds") == start_ds), None)
+    if bed_cu is not None and (not is_dated(_epochs, start_ds, bed_cu) or not is_dated(_epochs, end_ds, bed_cu)):
+        return "sleep window clock is undated or ambiguous", None, None
     decoded_rows = ((ds, tag, json.loads(js), cu) for ds, tag, js, cu in rows)
     beats, acm, temp = collect_inputs(decoded_rows, start_ds, end_ds, bed_cu, ms)
     if not beats or not any(b[3] == 1 for b in beats):

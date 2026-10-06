@@ -603,6 +603,93 @@ final class StabilityTests: XCTestCase {
         XCTAssertEqual(clock.resolve(9000, capturedUnix: 1700100000).unix, 1700099900)
     }
 
+    func testUndecodedRawRingStartParticipatesInMultiRebootStallAmbiguity() throws {
+        // Audited stall interval: anchor 47893458 (1787733221) -> anchor 61076535 (1789195418)
+        // with undecoded raw ring_start at 49912254 and decoded ring_start at 57660709.
+        let url = try fixture()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        let sql = """
+        DELETE FROM events;
+        INSERT INTO events VALUES (1,47893458,133,'{"unix_time":1787733221}',1789200000,NULL);
+        INSERT INTO events VALUES (2,49912254,65,NULL,1789200000,X'0400000038020114010001020100');
+        INSERT INTO events VALUES (3,53000000,118,'{"bedtime_start_ds":52700000}',1789200000,NULL);
+        INSERT INTO events VALUES (4,57660709,65,'{"firmware":"2.1.20"}',1789200000,X'0400000038020114010001020100');
+        INSERT INTO events VALUES (5,61076535,133,'{"unix_time":1789195418}',1789200000,NULL);
+        """
+        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        let events = try EventStore.decodedEvents(dbPath: url.path)
+        let clock = EventStore.RingClock(events: events)
+        // Middle epoch [49912254..57660709] is isolated by both reboots and withheld as undated.
+        XCTAssertEqual(clock.resolve(53_000_000, capturedUnix: 1_789_200_000).source, .undated)
+        XCTAssertNil(clock.datedUnixSeconds(53_000_000, capturedUnix: 1_789_200_000))
+        // Before first reboot and after second reboot remain anchored.
+        XCTAssertEqual(clock.resolve(48_000_000, capturedUnix: 1_789_200_000).source, .anchor)
+        XCTAssertEqual(clock.resolve(58_000_000, capturedUnix: 1_789_200_000).source, .anchor)
+    }
+
+    func testTimestampedSignalsPreserveDelayedStartGapsAndStageAutonomicParity() throws {
+        let startUnix: Int64 = 1_791_068_400
+        let endUnix: Int64 = startUnix + 8 * 3600 // 28,800s night
+        let firstOffset = 47.23 * 60.0 // 2833.8s after bedtime
+        let rawHR: [[Double]] = [
+            [Double(startUnix) + firstOffset, 60],
+            [Double(startUnix) + firstOffset + 300, 62],
+            // 45-minute missing interval (> 15m laneGapSeconds)
+            [Double(startUnix) + 6 * 3600, 50],
+            [Double(startUnix) + 7 * 3600, 52],
+        ]
+        let rawHRV: [[Double]] = [
+            [Double(startUnix) + firstOffset, 40],
+            [Double(startUnix) + firstOffset + 300, 44],
+            [Double(startUnix) + 6 * 3600, 80],
+            [Double(startUnix) + 7 * 3600, 84],
+        ]
+        let samples = try XCTUnwrap(Sleep.timedSamples(rawHR, startUnix: startUnix, endUnix: endUnix))
+        XCTAssertEqual(samples.count, 4)
+        // First sample is at 47.23 min (~0.0984 of the night), never at bedtime (0.0).
+        XCTAssertEqual(samples[0].fraction, firstOffset / 28_800.0, accuracy: 1e-6)
+        XCTAssertGreaterThan(samples[0].fraction, 0.09)
+        // Scrubbing at bedtime (f = 0) or in the middle of the 45m gap returns nil.
+        XCTAssertNil(Sleep.sampleAt(fraction: 0.0, in: samples, durationSeconds: 28_800))
+        XCTAssertNil(Sleep.sampleAt(fraction: 0.4, in: samples, durationSeconds: 28_800))
+        XCTAssertEqual(Sleep.sampleAt(fraction: samples[0].fraction, in: samples, durationSeconds: 28_800), 60)
+        // Contiguous segments split across the >15m gap.
+        let segments = Sleep.contiguousSegments(samples)
+        XCTAssertEqual(segments.count, 2)
+        XCTAssertEqual(segments[0].map(\.value), [60, 62])
+        XCTAssertEqual(segments[1].map(\.value), [50, 52])
+
+        // Stage-specific averages assign samples by actual timestamp:
+        // First half (0..<4h): Light (2); second half (4..<8h): REM (3).
+        // Under index-fraction (0, 1/3, 2/3, 1), sample[2] at 6h sits at 2/3 (REM),
+        // but if 4 samples all occurred in the second half (e.g. after a 4h gap), index-fraction
+        // would falsely assign the first two to Light (2). Timestamped autonomic assigns all to REM (3).
+        let stages = [2, 2, 3, 3]
+        let lateHR: [[Double]] = [
+            [Double(startUnix) + 5 * 3600, 50],
+            [Double(startUnix) + 5.5 * 3600, 52],
+            [Double(startUnix) + 6.5 * 3600, 54],
+            [Double(startUnix) + 7.5 * 3600, 56],
+        ]
+        let lateHRV: [[Double]] = [
+            [Double(startUnix) + 5 * 3600, 70],
+            [Double(startUnix) + 5.5 * 3600, 74],
+            [Double(startUnix) + 6.5 * 3600, 78],
+            [Double(startUnix) + 7.5 * 3600, 82],
+        ]
+        var night = NightRow(start_unix: startUnix, end_unix: endUnix)
+        night.series = NightSeries(hr: [50, 52, 54, 56], hrv: [70, 74, 78, 82])
+        night.series_t = NightTimedSeries(hr: lateHR, hrv: lateHRV)
+        let auto = Sleep.autonomic(night: night, stages: stages)
+        XCTAssertNil(auto.hrLight)
+        XCTAssertNil(auto.hrvLight)
+        XCTAssertEqual(auto.hrRem, 53)
+        XCTAssertEqual(auto.hrvRem, 76)
+    }
+
     func testPhoneAnchorDatesANewBoot() throws {
         // The sync wrote a phone-time anchor at the newest drained ds: 23:00→08:00 UTC+2.
         let url = try fixture()

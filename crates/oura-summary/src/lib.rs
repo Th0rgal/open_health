@@ -1370,6 +1370,7 @@ pub fn build_summary(
     });
     let db = db_abs.as_path();
     let demo = read_profile(db);
+    let _ = Store::migrate_if_writable(db);
     let store = Store::open_read_only(db).context("opening DB")?;
     let events = store.decoded_events().context("reading events")?;
     if events.is_empty() {
@@ -1378,7 +1379,11 @@ pub fn build_summary(
             db.display()
         ));
     }
+    let (raw_events_total, decoded_events_total) = store
+        .event_totals()
+        .unwrap_or((events.len(), events.len()));
     let clock = RingClock::from_events(&events);
+    let history_stats = clock.trusted_history_stats(&events, tz);
     let unix_s_at = |ds: i64, captured_unix: i64| clock.unix_s(ds, captured_unix);
     // An event whose boot clock cannot be trusted has no calendar day; feeding it to
     // the aggregations would scatter it over fabricated dates (a fresh ring's first
@@ -1510,10 +1515,12 @@ pub fn build_summary(
         &ring_sleep_state,
         unix_s_at,
     );
-    // A night whose boot has no time anchor cannot be placed on the calendar. Showing
-    // it dated to the download would put a 23:00→08:00 sleep at 07:00→15:00 on the
-    // wrong day, so it is withheld and reported instead; the next sync anchors it.
+    // A night whose boot clock is untrustworthy cannot be placed on the calendar.
+    // Record the specific clock reason (`missing_anchor`, `accelerated_counter`, or
+    // `ambiguous_reboot_stall`) and whether a future sync can recover it.
     let mut undated_nights: Vec<Value> = Vec::new();
+    let mut undated_reason_counts: std::collections::BTreeMap<(ring_time::UndatedReason, bool), usize> =
+        std::collections::BTreeMap::new();
     let beds: Vec<BedPeriod> = beds
         .into_iter()
         .filter(|bed| {
@@ -1522,12 +1529,22 @@ pub fn build_summary(
             if start.source.is_dated() && end.source.is_dated() {
                 return true;
             }
+            let reason = end
+                .undated_reason
+                .or(start.undated_reason)
+                .unwrap_or(ring_time::UndatedReason::MissingAnchor);
+            let is_latest_unanchored =
+                clock.is_in_latest_unanchored_epoch(bed.end_ds, bed.captured_unix);
+            let recoverable = reason.is_recoverable_by_sync(is_latest_unanchored);
+            *undated_reason_counts.entry((reason, recoverable)).or_default() += 1;
             undated_nights.push(json!({
                 "start_ds": bed.start_ds,
                 "end_ds": bed.end_ds,
                 "in_bed_h": ((bed.end_ds - bed.start_ds) as f64 / 36_000.0 * 10.0).round() / 10.0,
                 "captured_unix": bed.captured_unix,
                 "source": end.source.label(),
+                "reason": reason.code(),
+                "recoverable": recoverable,
             }));
             false
         })
@@ -1699,8 +1716,11 @@ pub fn build_summary(
 
     nights.sort_by(|a, b| {
         unix_s_at(a.start_ds, a.captured_unix)
-            .partial_cmp(&unix_s_at(b.start_ds, b.captured_unix))
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&unix_s_at(b.start_ds, b.captured_unix))
+            .then_with(|| {
+                unix_s_at(a.end_ds, a.captured_unix)
+                    .total_cmp(&unix_s_at(b.end_ds, b.captured_unix))
+            })
     });
 
     // downsample a raw signal to ≤N points (bucket mean) then round for a compact
@@ -1721,32 +1741,14 @@ pub fn build_summary(
     let mut incomplete_sleep_days = std::collections::BTreeSet::new();
     // (wake date, biomarkers) per night, oldest first — the Symptom Radar input.
     let mut nightly_biomarkers: Vec<(String, symptoms::NightBiomarkers)> = Vec::new();
-    // Personal baselines for the sleep score's physiology component: mean and SD of
-    // every night BEFORE the newest, so tonight is judged against your normal rather
-    // than against itself.
-    let history_stats = |values: &[f64]| -> Option<(f64, f64)> {
-        if values.len() < 3 {
-            return None;
-        }
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
-        Some((mean, variance.sqrt().max(f64::EPSILON)))
-    };
-    let rhr_baseline = history_stats(
-        &nights
-            .iter()
-            .filter_map(|nt| {
-                let lowest = nt.hr.iter().cloned().fold(f64::INFINITY, f64::min);
-                lowest.is_finite().then_some(lowest)
-            })
-            .collect::<Vec<_>>(),
-    );
-    let hrv_baseline = history_stats(
-        &nights
-            .iter()
-            .filter_map(|nt| mean(&nt.rmssd))
-            .collect::<Vec<_>>(),
-    );
+    // Causal personal baselines for the sleep score's physiology component: for each
+    // main sleep (>= MIN_BASELINE_SLEEP_DS), only strictly preceding main-sleep nights
+    // (`end_unix <= start_unix`) in resolved chronological order may contribute. Naps
+    // and undated/ambiguous windows are excluded, and fewer than MIN_BASELINE_NIGHTS
+    // prior observations yields `None` so `score_night` explicitly renormalizes without
+    // self-inclusion or future-data leakage.
+    let mut prior_main_rhr: Vec<(f64, f64)> = Vec::new();
+    let mut prior_main_hrv: Vec<(f64, f64)> = Vec::new();
     for nt in &nights {
         let hyp = hyps.get(&(nt.start_ds, nt.captured_unix));
         let raw_stages: Vec<i64> = hyp
@@ -1791,12 +1793,35 @@ pub fn build_summary(
             let wake_day = (end_unix as i64 + offset_seconds(tz)).div_euclid(86_400);
             *asleep_by_day.entry(wake_day).or_default() += asleep_s;
         }
-        let night_rhr = {
+        let raw_lowest_hr = {
             let lowest = nt.hr.iter().cloned().fold(f64::INFINITY, f64::min);
-            lowest.is_finite().then(|| lowest.round())
+            lowest.is_finite().then_some(lowest)
         };
-        let night_hrv = mean(&nt.rmssd).map(|x| x.round());
+        let raw_mean_hrv = mean(&nt.rmssd);
+        let night_rhr = raw_lowest_hr.map(|x| x.round());
+        let night_hrv = raw_mean_hrv.map(|x| x.round());
         let night_breath = median_of(&nt.breath);
+        let is_main_sleep = (nt.end_ds - nt.start_ds) >= sleep_score::MIN_BASELINE_SLEEP_DS;
+        let rhr_baseline = if is_main_sleep {
+            let priors: Vec<f64> = prior_main_rhr
+                .iter()
+                .filter(|&&(prev_end, _)| prev_end <= start_unix)
+                .map(|&(_, v)| v)
+                .collect();
+            sleep_score::causal_baseline(&priors)
+        } else {
+            None
+        };
+        let hrv_baseline = if is_main_sleep {
+            let priors: Vec<f64> = prior_main_hrv
+                .iter()
+                .filter(|&&(prev_end, _)| prev_end <= start_unix)
+                .map(|&(_, v)| v)
+                .collect();
+            sleep_score::causal_baseline(&priors)
+        } else {
+            None
+        };
         let wake_ymd = Some(ymd_label(end_unix, tz));
         nights_json.push(json!({
             "date": date_label(start_unix, tz),
@@ -1868,13 +1893,21 @@ pub fn build_summary(
                 deep_pct: hyp.and_then(|h| h["deep_pct"].as_f64()),
                 rem_pct: hyp.and_then(|h| h["rem_pct"].as_f64()),
                 rhr: night_rhr,
-                rhr_baseline: rhr_baseline,
+                rhr_baseline,
                 hrv_ms: night_hrv,
-                hrv_baseline: hrv_baseline,
+                hrv_baseline,
                 age: demo.age,
             }) } else { Value::Null },
             "breath_rate": night_breath.map(|b| (b * 10.0).round() / 10.0),
         }));
+        if is_main_sleep {
+            if let Some(lowest) = raw_lowest_hr {
+                prior_main_rhr.push((end_unix, lowest));
+            }
+            if let Some(hrv_mean) = raw_mean_hrv {
+                prior_main_hrv.push((end_unix, hrv_mean));
+            }
+        }
         if let Some(day) = wake_ymd.clone() {
             nightly_biomarkers.push((
                 day,
@@ -2169,8 +2202,13 @@ pub fn build_summary(
         "synced": synced_unix.map(|s| date_label(s, tz)),
         "synced_hm": synced_unix.map(|s| hm(s, tz)),
         "fresh_hours": synced_unix.map(|s| ((now - s) / 3600.0 * 10.0).round() / 10.0),
-        "days_of_data": ((clock.total_span_ds() as f64 / 10.0 / 86400.0) * 10.0).round() / 10.0,
-        "total_events": events.len(),
+        "days_of_data": history_stats.elapsed_days,
+        "elapsed_days": history_stats.elapsed_days,
+        "observed_days": history_stats.observed_days,
+        "observed_coverage_days": history_stats.observed_coverage_days,
+        "total_events": raw_events_total,
+        "raw_events": raw_events_total,
+        "decoded_events": decoded_events_total,
         "nights": nights.len(),
         "battery_pct": battery.map(|b| b.0),
         "battery_v": battery.map(|b| (b.1 as f64 / 1000.0 * 100.0).round() / 100.0),
@@ -2188,38 +2226,78 @@ pub fn build_summary(
     let mut clock_diag = clock.diagnostics();
     clock_diag["undated_nights"] = json!(undated_nights);
     let mut clock_warnings: Vec<String> = Vec::new();
-    if !undated_nights.is_empty() {
-        clock_warnings.push(format!(
-            "{} night(s) could not be placed in time because the ring's clock was not \
-             synced for that period. They are hidden until the next sync anchors them.",
-            undated_nights.len()
-        ));
+    let mut undated_reasons_json: Vec<Value> = Vec::new();
+    for ((reason, recoverable), count) in &undated_reason_counts {
+        let message = reason.warning_message(*count, *recoverable);
+        clock_warnings.push(message.clone());
+        undated_reasons_json.push(json!({
+            "reason": reason.code(),
+            "count": count,
+            "recoverable": recoverable,
+            "message": message,
+        }));
     }
     // A Gen 3 barely declares bedtime periods, so an unanchored boot can hide every
     // night without producing a single undated one above. Say so from the clock
     // itself: whole days of history with no time anchor at all.
-    let unanchored_h: f64 = clock_diag["epochs"]
-        .as_array()
-        .map(|epochs| {
-            epochs
-                .iter()
-                .filter(|e| e["anchors"].as_u64() == Some(0))
-                .filter_map(|e| e["span_h"].as_f64())
-                .filter(|&h| h >= UNANCHORED_WARN_H)
-                .sum()
-        })
-        .unwrap_or(0.0);
-    if unanchored_h > 0.0 && undated_nights.is_empty() {
-        clock_warnings.push(format!(
-            "About {} of ring history has no time anchor, so it cannot be placed on the \
-             calendar. Sync again (the sync sets the ring's clock) to date it.",
-            if unanchored_h >= 48.0 {
-                format!("{:.0} days", unanchored_h / 24.0)
-            } else {
-                format!("{unanchored_h:.0} hours")
+    if undated_nights.is_empty() {
+        if let Some(epochs_arr) = clock_diag["epochs"].as_array() {
+            let last_idx = epochs_arr.len().saturating_sub(1);
+            let mut latest_unanchored_h = 0.0;
+            let mut prior_unanchored_h = 0.0;
+            for (idx, e) in epochs_arr.iter().enumerate() {
+                if e["anchors"].as_u64() == Some(0) {
+                    if let Some(h) = e["span_h"].as_f64().filter(|&h| h >= UNANCHORED_WARN_H) {
+                        if idx == last_idx {
+                            latest_unanchored_h += h;
+                        } else {
+                            prior_unanchored_h += h;
+                        }
+                    }
+                }
             }
-        ));
+            let fmt_span = |h: f64| {
+                if h >= 48.0 {
+                    format!("{:.0} days", h / 24.0)
+                } else {
+                    format!("{h:.0} hours")
+                }
+            };
+            if latest_unanchored_h > 0.0 {
+                let msg = format!(
+                    "About {} of current-boot ring history [missing_anchor] has no time anchor \
+                     yet, so it cannot be placed on the calendar. Syncing while the ring remains \
+                     in this boot epoch can anchor it.",
+                    fmt_span(latest_unanchored_h)
+                );
+                clock_warnings.push(msg.clone());
+                undated_reasons_json.push(json!({
+                    "reason": ring_time::UndatedReason::MissingAnchor.code(),
+                    "count": 0,
+                    "span_h": (latest_unanchored_h * 10.0).round() / 10.0,
+                    "recoverable": true,
+                    "message": msg,
+                }));
+            }
+            if prior_unanchored_h > 0.0 {
+                let msg = format!(
+                    "About {} of earlier-boot ring history [missing_anchor] was recorded before \
+                     a reboot without a time anchor. Recovery is not possible from current \
+                     evidence, and syncing again cannot retroactively anchor a prior boot.",
+                    fmt_span(prior_unanchored_h)
+                );
+                clock_warnings.push(msg.clone());
+                undated_reasons_json.push(json!({
+                    "reason": ring_time::UndatedReason::MissingAnchor.code(),
+                    "count": 0,
+                    "span_h": (prior_unanchored_h * 10.0).round() / 10.0,
+                    "recoverable": false,
+                    "message": msg,
+                }));
+            }
+        }
     }
+    clock_diag["undated_reasons"] = json!(undated_reasons_json);
     clock_diag["warnings"] = json!(clock_warnings);
 
     Ok(json!({
@@ -2639,5 +2717,339 @@ mod tests {
         let periods = vec![bed(0, 30 * 60 * 10), bed(4 * 3600 * 10, 11 * 3600 * 10)];
         let got = normalize_bed_periods(periods.clone(), &[], &[], &[], |ds, _| ds as f64 / 10.0);
         assert_eq!(got, periods);
+    }
+
+    fn hex_bytes(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn raw_historical_ring_starts_withhold_ambiguous_stalled_nights_and_explain_why() {
+        // Synthetic regression fixture reproducing the audited database's 7 raw
+        // `ring_start` rows (decoded_json = NULL), 2 decoded `ring_start` rows, and the
+        // stalled-anchor interval `47_893_458..61_076_535` (`1_787_733_221..1_789_195_418`)
+        // containing both `49_912_254` (raw) and `57_660_709` (decoded).
+        let dir = std::env::temp_dir().join(format!("oura-sum-reboot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("audit_reboots.db");
+        let _ = std::fs::remove_file(&db);
+
+        {
+            let store = Store::open(&db).unwrap();
+            drop(store);
+        }
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        // Reset decoder_version to 0 to simulate pre-migration database state.
+        conn.execute("DELETE FROM store_meta", []).unwrap();
+
+        let cap = 1_789_195_500_i64;
+        // Anchor 1: ring_ds=47_893_458, unix_time=1_787_733_221
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 47893458, X'A538106A', '{\"unix_time\":1787733221}', ?1)",
+            rusqlite::params![1_787_733_300_i64],
+        )
+        .unwrap();
+
+        // Raw historical reboot at 49_912_254 with decoded_json = NULL!
+        let raw_reboot_49m = hex_bytes("0400000038020114010001020100");
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 65, 'ring_start', 49912254, ?1, NULL, ?2)",
+            rusqlite::params![raw_reboot_49m, cap],
+        )
+        .unwrap();
+
+        // Already-decoded reboot at 57_660_709.
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 65, 'ring_start', 57660709, ?1, '{\"reason\":4,\"firmware_version\":\"2.1.20\"}', ?2)",
+            rusqlite::params![raw_reboot_49m, cap],
+        )
+        .unwrap();
+
+        // Anchor 2: ring_ds=61_076_535, unix_time=1_789_195_418
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 61076535, X'9A88266A', '{\"unix_time\":1789195418}', ?1)",
+            rusqlite::params![cap],
+        )
+        .unwrap();
+
+        // Three bedtime periods:
+        // 1) Before first reboot (48_100_000..48_388_000) -> dated!
+        // 2) Inside [49_912_254, 57_660_709] (52_000_000..52_288_000) -> withheld as ambiguous!
+        // 3) After second reboot (58_500_000..58_788_000) -> dated!
+        for (s, e) in [
+            (48_100_000_i64, 48_388_000_i64),
+            (52_000_000_i64, 52_288_000_i64),
+            (58_500_000_i64, 58_788_000_i64),
+        ] {
+            let mut body = (s as u32).to_le_bytes().to_vec();
+            body.extend_from_slice(&(e as u32).to_le_bytes());
+            conn.execute(
+                "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+                 VALUES ('S1', 118, 'bedtime_period', ?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    e,
+                    body,
+                    format!(
+                        "{{\"bedtime_start_ds\":{s},\"bedtime_end_ds\":{e},\"duration_hours\":8.0}}"
+                    ),
+                    cap,
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let summary = build_summary(&db, 0.0, &NoModelRunner).unwrap();
+        let dated = summary["nights"].as_array().unwrap();
+        let undated = summary["clock"]["undated_nights"].as_array().unwrap();
+        assert_eq!(dated.len(), 2, "only the pre-first-reboot and post-second-reboot windows are dated");
+        assert_eq!(undated.len(), 1, "the window between the two reboots is withheld as ambiguous");
+        assert_eq!(undated[0]["start_ds"], 52_000_000);
+        assert_eq!(undated[0]["reason"], "ambiguous_reboot_stall");
+        assert_eq!(undated[0]["recoverable"], false);
+
+        let warnings = summary["clock"]["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        let warn_text = warnings[0].as_str().unwrap();
+        assert!(warn_text.contains("ambiguous_reboot_stall"), "{warn_text}");
+        assert!(warn_text.contains("syncing again will not resolve"), "{warn_text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_duration_and_event_totals_exclude_counter_jumps_and_distinguish_raw_counts() {
+        let dir = std::env::temp_dir().join(format!("oura-sum-hist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("history_jump.db");
+        let _ = std::fs::remove_file(&db);
+
+        {
+            let _ = Store::open(&db).unwrap();
+        }
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let jul3 = 1_783_000_000_i64;
+        let jul5 = jul3 + 2 * 86_400;
+
+        // Initial erratic epoch: min_ds=20700, max_ds=184190173 (5115.8h raw counter jump)
+        // while wall time only advances 1 hour on July 3, with a bedtime window inside the
+        // erratic bracket.
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 20700, X'00000000', ?1, ?2)",
+            rusqlite::params![format!("{{\"unix_time\":{jul3}}}"), jul3],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 118, 'bedtime_period', 90288000, X'0102030405060708',
+                     '{\"bedtime_start_ds\":90000000,\"bedtime_end_ds\":90288000,\"duration_hours\":8.0}', ?1)",
+            rusqlite::params![jul3 + 1800],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 184190173, X'01000000', ?1, ?2)",
+            rusqlite::params![format!("{{\"unix_time\":{}}}", jul3 + 3600), jul3 + 3600],
+        )
+        .unwrap();
+
+        // Reboot to a clean boot spanning 2 days (July 3+1h to July 5) with 1 dated night
+        // and 2 raw undecoded `raw_acm_event` (0x5f) rows.
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 1000, X'02000000', ?1, ?2)",
+            rusqlite::params![format!("{{\"unix_time\":{}}}", jul3 + 7200), jul3 + 7200],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 118, 'bedtime_period', 300000, X'1112131415161718',
+                     '{\"bedtime_start_ds\":12000,\"bedtime_end_ds\":300000,\"duration_hours\":8.0}', ?1)",
+            rusqlite::params![jul5],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 1657000, X'03000000', ?1, ?2)",
+            rusqlite::params![format!("{{\"unix_time\":{jul5}}}"), jul5],
+        )
+        .unwrap();
+        // Raw undecoded events (tag 0x5f = 95, decoded_json = NULL)
+        for i in 0..2 {
+            conn.execute(
+                "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+                 VALUES ('S1', 95, 'raw_acm_event', ?1, ?2, NULL, ?3)",
+                rusqlite::params![1657100 + i, vec![i as u8; 8], jul5],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let summary = build_summary(&db, 0.0, &NoModelRunner).unwrap();
+        // Elapsed wall time is jul3..jul5 = 2.0 days (NOT 213.2 + 2.0 = 215.2 days!).
+        assert_eq!(summary["device"]["days_of_data"], 2.0);
+        assert_eq!(summary["device"]["elapsed_days"], 2.0);
+        assert_eq!(summary["device"]["observed_days"], 3);
+        // 8 raw rows total, 6 decoded rows.
+        assert_eq!(summary["device"]["total_events"], 8);
+        assert_eq!(summary["device"]["raw_events"], 8);
+        assert_eq!(summary["device"]["decoded_events"], 6);
+
+        let undated = summary["clock"]["undated_nights"].as_array().unwrap();
+        assert_eq!(undated.len(), 1);
+        assert_eq!(undated[0]["reason"], "accelerated_counter");
+        assert_eq!(undated[0]["recoverable"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sleep_score_baselines_are_causal_exclude_naps_and_never_leak_future_nights() {
+        struct FakeRunner;
+        impl ModelRunner for FakeRunner {
+            fn run(&self, input: ModelInputs) -> ModelOutputs {
+                let arr: Vec<Value> = input
+                    .sleep_ranges
+                    .iter()
+                    .map(|&[s, e, cu]| {
+                        let epochs = ((e - s) / 300).max(1) as usize;
+                        // All light sleep (code 2) for deterministic staging
+                        json!({
+                            "start_ds": s,
+                            "end_ds": e,
+                            "captured_unix": cu,
+                            "stages": vec![2; epochs],
+                            "deep_pct": 20.0,
+                            "light_pct": 55.0,
+                            "rem_pct": 25.0,
+                            "wake_pct": 0.0,
+                            "efficiency_pct": 95.0,
+                            "source": "model",
+                        })
+                    })
+                    .collect();
+                ModelOutputs {
+                    sleep_batch: Some(Value::Array(arr)),
+                    ..Default::default()
+                }
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("oura-sum-causal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("causal.db");
+        let _ = std::fs::remove_file(&db);
+
+        {
+            let _ = Store::open(&db).unwrap();
+        }
+        let base_unix = 1_785_000_000_i64;
+        let day_ds = 864_000_i64;
+        let insert_session = |conn: &rusqlite::Connection,
+                              idx: i64,
+                              start_ds: i64,
+                              dur_ds: i64,
+                              hr: u8,
+                              rmssd: u8| {
+            let end_ds = start_ds + dur_ds;
+            let cap = base_unix + (idx + 1) * 86_400;
+            let mut bed_body = (start_ds as u32).to_le_bytes().to_vec();
+            bed_body.extend_from_slice(&(end_ds as u32).to_le_bytes());
+            conn.execute(
+                "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+                 VALUES ('S1', 93, 'hrv_event', ?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    start_ds + 3000,
+                    vec![hr, rmssd],
+                    format!("{{\"hr_bpm\":[{hr}],\"rmssd_ms\":[{rmssd}],\"interval_min\":5}}"),
+                    cap,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+                 VALUES ('S1', 118, 'bedtime_period', ?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    end_ds,
+                    bed_body,
+                    format!(
+                        "{{\"bedtime_start_ds\":{start_ds},\"bedtime_end_ds\":{end_ds},\"duration_hours\":{}}}",
+                        dur_ds as f64 / 36_000.0
+                    ),
+                    cap,
+                ],
+            )
+            .unwrap();
+        };
+
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 1000, X'00000000', ?1, ?2)",
+            rusqlite::params![format!("{{\"unix_time\":{base_unix}}}"), base_unix],
+        )
+        .unwrap();
+
+        // Main nights 0, 1, 2 (8h each) + a 90-minute nap before night 2 + Main night 3 (8h).
+        insert_session(&conn, 0, 10_000, 8 * 36_000, 50, 60);
+        insert_session(&conn, 1, 10_000 + day_ds, 8 * 36_000, 52, 58);
+        // Daytime nap (1.5h < 3h MIN_BASELINE_SLEEP_DS) with extreme HR=90, HRV=15: must be ignored by baseline!
+        insert_session(&conn, 1, 10_000 + day_ds + 12 * 36_000, 90 * 600, 90, 15);
+        insert_session(&conn, 2, 10_000 + 2 * day_ds, 8 * 36_000, 48, 62);
+        insert_session(&conn, 3, 10_000 + 3 * day_ds, 8 * 36_000, 54, 50);
+        drop(conn);
+
+        let sum_before = build_summary(&db, 0.0, &FakeRunner).unwrap();
+        // `nights` in summary JSON is newest-first:
+        // index 0 = Night 3 (4th main night, has 3 prior main nights -> physiology component present!)
+        // index 1 = Night 2 (3rd main night, has only 2 prior main nights because nap is excluded -> NO physiology component!)
+        let nights_before = sum_before["nights"].as_array().unwrap();
+        assert_eq!(nights_before.len(), 5);
+        let night3_before = &nights_before[0]["sleep_score"];
+        let night2_before = &nights_before[1]["sleep_score"];
+
+        let has_physiology = |score: &Value| {
+            score["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["key"] == "physiology")
+        };
+        assert!(
+            has_physiology(night3_before),
+            "4th main night has 3 prior main nights and must include physiology"
+        );
+        assert!(
+            !has_physiology(night2_before),
+            "3rd main night has only 2 prior main nights (nap excluded) and must omit physiology"
+        );
+
+        // Now append a future Night 4 with extreme RHR (99 bpm) and HRV (8 ms) and verify
+        // earlier nights' sleep scores and physiology components are 100% unchanged.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        insert_session(&conn, 4, 10_000 + 4 * day_ds, 8 * 36_000, 99, 8);
+        drop(conn);
+
+        let sum_after = build_summary(&db, 0.0, &FakeRunner).unwrap();
+        let nights_after = sum_after["nights"].as_array().unwrap();
+        assert_eq!(nights_after.len(), 6);
+        // nights_after[1..] correspond to nights_before[0..]
+        for i in 0..nights_before.len() {
+            assert_eq!(
+                nights_after[i + 1]["sleep_score"],
+                nights_before[i]["sleep_score"],
+                "future night leaked into historical night at offset {i}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

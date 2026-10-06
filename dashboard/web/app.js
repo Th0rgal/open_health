@@ -327,10 +327,11 @@ function renderDay(d) {
   const box = $("day");
   box.innerHTML = "";
   const days = dayKeys(d);
-  // Nights the shared brain withheld because the ring clock was not anchored for
-  // that boot (same notice as the iOS home). They come back once a sync anchors them.
+  // Nights the shared brain withheld because the ring clock could not be resolved
+  // unambiguously (missing anchor, accelerated counter, or multi-reboot stall).
   const clockWarnings = d.clock?.warnings || [];
   const unanchored = (d.clock?.epochs || []).some((e) => !e.anchors);
+  const canSyncFix = unanchored || (d.clock?.undated_nights || []).some((n) => n.recoverable);
   const clockNote = () => {
     if (!clockWarnings.length && !unanchored) return null;
     const note = el("div", "clock-note");
@@ -338,14 +339,16 @@ function renderDay(d) {
     for (const w of clockWarnings) note.append(el("p", null, esc(w)));
     if (unanchored && !clockWarnings.length) {
       note.append(el("p", null, "Part of the ring's history has no time anchor, so it cannot be placed on the calendar yet."));
+      note.append(el("p", "clock-note-fix", "Run <code>oura sync</code> while the ring is still on its current boot to anchor it."));
     }
-    note.append(el("p", "clock-note-fix", "Run <code>oura sync</code> again (it now sets the ring's clock) to date it."));
     return note;
   };
   if (!days.length) {
-    box.append(el("div", "error", unanchored || clockWarnings.length
-      ? "No dated days yet: the ring's clock hasn't been synced for this data."
-      : "No days yet. Wear the ring and sync."));
+    box.append(el("div", "error", canSyncFix
+      ? "No dated days yet: the ring's clock hasn't been anchored for this data."
+      : clockWarnings.length
+        ? "No dated days yet: recorded nights could not be dated unambiguously."
+        : "No days yet. Wear the ring and sync."));
     const note = clockNote();
     if (note) box.append(note);
     $("sleep-legend").hidden = true;
@@ -1462,7 +1465,7 @@ function renderDevice(d) {
   const fresh = dev.fresh_hours != null ? (dev.fresh_hours < 1 ? "<1" : Math.round(dev.fresh_hours)) : "—";
   stats.append(stat("Last sync", fresh, " h ago"));
   stats.append(stat("History", num(dev.days_of_data), " days"));
-  stats.append(stat("Events", (dev.total_events || 0).toLocaleString()));
+  stats.append(stat("Events", (dev.raw_events ?? dev.total_events ?? 0).toLocaleString()));
   box.append(stats);
   const battery = batteryChart(dev.battery_history || []);
   if (battery) box.append(battery);
@@ -1517,6 +1520,11 @@ function renderDevice(d) {
   ab.append(el("p", "subhead", "Device"));
   const kv = el("div", "adv-kv");
   const kvItem = (k, v) => `<div><i>${k}</i><b>${v}</b></div>`;
+  const rawTotal = dev.raw_events ?? dev.total_events ?? 0;
+  const decodedTotal = dev.decoded_events ?? dev.total_events ?? 0;
+  const historyDetail = `${num(dev.days_of_data)} days elapsed` +
+    (dev.observed_days != null ? ` · ${dev.observed_days} days observed` : "") +
+    (dev.observed_coverage_days != null ? ` (${num(dev.observed_coverage_days)} d active)` : "");
   kv.innerHTML =
     kvItem("Ring ID", esc(dev.serial || "—")) +
     kvItem("Firmware", esc(dev.firmware || "—")) +
@@ -1526,7 +1534,8 @@ function renderDevice(d) {
     kvItem("Battery", dev.battery_v != null ? dev.battery_v + " V" : "—") +
     kvItem("Last sync", `${esc(dev.synced || "—")} ${esc(dev.synced_hm || "")}`) +
     kvItem("Sync cursor", dev.next_cursor != null ? dev.next_cursor.toLocaleString() : "—") +
-    kvItem("History", `${num(dev.days_of_data)} days`);
+    kvItem("History", historyDetail) +
+    kvItem("Events", `${rawTotal.toLocaleString()} raw · ${decodedTotal.toLocaleString()} decoded`);
   ab.append(kv);
 
   // local auth key portability

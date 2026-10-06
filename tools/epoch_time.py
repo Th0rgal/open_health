@@ -111,28 +111,28 @@ def make_unix_s(epochs):
                 return predicted
             if kind == "erratic":
                 return predicted  # undated; callers check is_dated()
-        if captured_unix is not None:
-            # Only borrow a boot's clock when this ds continues that boot's counter;
-            # a rebooted ring restarts near zero and must not be projected through an
-            # older boot that only ran at higher counts.
-            plausible = [unix + (ds - anchor_ds) / 10.0
-                         for epoch in epochs for anchor_ds, unix in epoch[5]
-                         if unix + (ds - anchor_ds) / 10.0 <= captured_unix + FUTURE_SLACK_S
-                         and ds >= epoch[0] - EPOCH_RESET_SLACK_DS]
-            if plausible:
-                return max(plausible)
+            if captured_unix is not None:
+                # Only borrow a boot's clock when this ds continues that boot's counter;
+                # a rebooted ring restarts near zero and must not be projected through an
+                # older boot that only ran at higher counts.
+                plausible = [unix + (ds - anchor_ds) / 10.0
+                             for epoch in epochs for anchor_ds, unix in epoch[5]
+                             if unix + (ds - anchor_ds) / 10.0 <= captured_unix + FUTURE_SLACK_S
+                             and epoch[0] - EPOCH_RESET_SLACK_DS <= ds <= epoch[1] + EPOCH_RESET_SLACK_DS]
+                if plausible:
+                    return max(plausible)
         fallback = e[2] - (e[1] - ds) / 10.0
         return min(fallback, captured_unix + FUTURE_SLACK_S) if captured_unix is not None else fallback
     return unix_s
 
 
-def is_dated(epochs, ds, captured_unix):
-    """False when the boot holding `ds` has no anchor and was downloaded in one go
-    (so the only available time is the download time). Mirrors `ClockSource::is_dated`."""
+def undated_reason(epochs, ds, captured_unix):
+    """Return `None` when `(ds, captured_unix)` is dated, or one of
+    `'missing_anchor'`, `'accelerated_counter'`, `'ambiguous_reboot_stall'`."""
     candidates = [e for e in epochs
                   if e[0] - EPOCH_RESET_SLACK_DS <= ds <= e[1] + EPOCH_RESET_SLACK_DS]
     if not candidates:
-        return False
+        return "missing_anchor"
     def capture_distance(e):
         if captured_unix < e[3]:
             return e[3] - captured_unix
@@ -141,19 +141,30 @@ def is_dated(epochs, ds, captured_unix):
         return 0
     e = min(candidates, key=capture_distance)
     if e[5]:
-        kind, _ = bracket(e[5], ds)
+        kind, pair = bracket(e[5], ds)
         if kind == "erratic":
-            return False
+            return "accelerated_counter"
         if kind == "stalled":
-            return True
+            before, after = pair
+            boots = [b for b in e[6] if before[0] < b <= after[0]]
+            if boots and min(boots) <= ds < max(boots):
+                return "ambiguous_reboot_stall"
+            return None
         anchor_ds, anchor_unix = min(e[5], key=lambda a: abs(a[0] - ds))
         if anchor_unix + (ds - anchor_ds) / 10.0 <= captured_unix + FUTURE_SLACK_S:
-            return True
-    if any(unix + (ds - anchor_ds) / 10.0 <= captured_unix + FUTURE_SLACK_S
-           and ds >= epoch[0] - EPOCH_RESET_SLACK_DS
-           for epoch in epochs for anchor_ds, unix in epoch[5]):
-        return True
-    return False
+            return None
+        if any(unix + (ds - anchor_ds) / 10.0 <= captured_unix + FUTURE_SLACK_S
+               and epoch[0] - EPOCH_RESET_SLACK_DS <= ds <= epoch[1] + EPOCH_RESET_SLACK_DS
+               for epoch in epochs for anchor_ds, unix in epoch[5]):
+            return None
+        return "accelerated_counter"
+    return "missing_anchor"
+
+
+def is_dated(epochs, ds, captured_unix):
+    """False when the boot holding `ds` has no anchor and was downloaded in one go
+    (so the only available time is the download time). Mirrors `ClockSource::is_dated`."""
+    return undated_reason(epochs, ds, captured_unix) is None
 
 
 def latest_unix(epochs):

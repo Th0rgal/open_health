@@ -1547,7 +1547,8 @@ async fn cmd_events(cli: &Cli) -> Result<()> {
         return Ok(());
     }
     for serial in serials {
-        println!("Device {serial}:");
+        let (raw, decoded) = store.serial_event_totals(&serial)?;
+        println!("Device {serial} ({raw} raw, {decoded} decoded):");
         for (name, count) in store.event_counts(&serial)? {
             println!("  {count:>6}  {name}");
         }

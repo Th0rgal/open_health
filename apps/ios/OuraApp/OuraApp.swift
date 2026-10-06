@@ -1153,8 +1153,9 @@ struct RootView: View {
                             }.buttonStyle(.plain)
                         }
 
-                        // nights the shared brain withheld because the ring clock was not
-                        // anchored for that boot (fixed by the next sync)
+                        // nights the shared brain withheld because the ring clock could not
+                        // be resolved unambiguously (missing anchor, accelerated counter, or
+                        // multi-reboot stall)
                         if let warnings = s.clock?.warnings, !warnings.isEmpty {
                             ObsTag("ring clock", icon: "clock.badge.exclamationmark")
                             VStack(alignment: .leading, spacing: 6) {
@@ -1186,11 +1187,16 @@ struct RootView: View {
                             ObsStat(label: "battery",
                                     value: s.device?.battery_pct.map { "\($0)%" } ?? "–",
                                     accent: (s.device?.battery_pct ?? 100) < 20 ? Obs.bad : Obs.ink)
+                            if let raw = s.device?.raw_events ?? s.device?.total_events {
+                                ObsStat(label: "events",
+                                        value: s.device?.decoded_events.map { "\(raw) raw · \($0) decoded" } ?? "\(raw)")
+                            }
                             ObsStat(label: "synced",
                                     value: s.device.flatMap { d in d.synced.map { "\($0) \(d.synced_hm ?? "")" } } ?? "–")
                         }
-                        BuildStamp(prefix: s.device?.days_of_data.map {
-                            "\(String(format: "%.0f", $0)) days · \(s.device?.nights ?? s.nights.count) nights"
+                        BuildStamp(prefix: s.device?.days_of_data.map { span in
+                            let obs = s.device?.observed_days.map { " (\($0) observed)" } ?? ""
+                            return "\(String(format: "%.0f", span)) days\(obs) · \(s.device?.nights ?? s.nights.count) nights"
                         })
                     }
                 }

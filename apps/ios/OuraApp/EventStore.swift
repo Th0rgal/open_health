@@ -47,22 +47,23 @@ enum EventStore {
         var isEmpty: Bool { makeIterator().next() == nil }
 
         /// Cheap identity of the store's contents for cache early-exits: row count and
-        /// last id of decoded events, plus the same for clock anchors (a new anchor can
-        /// re-date old rows, so it must invalidate day-bucketed caches too).
+        /// last id of decoded events, plus the same for clock anchors and `ring_start`
+        /// reboots (a new anchor or newly decoded reboot can re-date old rows, so it
+        /// must invalidate day-bucketed caches too).
         func digest() -> String? {
             var db: OpaquePointer?
             guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { sqlite3_close(db); return nil }
             defer { sqlite3_close(db) }
             sqlite3_busy_timeout(db, 5000)
             var statement: OpaquePointer?
-            let sql = "SELECT COUNT(*), IFNULL(MAX(id),0), SUM(tag IN (66,133)), IFNULL(MAX(CASE WHEN tag IN (66,133) THEN id END),0) FROM events WHERE decoded_json IS NOT NULL"
+            let sql = "SELECT COUNT(*), IFNULL(MAX(id),0), SUM(tag IN (66,133)), IFNULL(MAX(CASE WHEN tag IN (66,133) THEN id END),0), SUM(tag = 65), IFNULL(MAX(CASE WHEN tag = 65 THEN id END),0) FROM events WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14)"
             guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
             defer { sqlite3_finalize(statement) }
             guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-            return (0..<4).map { String(sqlite3_column_int64(statement, Int32($0))) }.joined(separator: ":")
+            return (0..<6).map { String(sqlite3_column_int64(statement, Int32($0))) }.joined(separator: ":")
         }
         var last: Ev? {
-            restricted("id=(SELECT id FROM events WHERE decoded_json IS NOT NULL ORDER BY captured_unix DESC,id DESC LIMIT 1)").makeIterator().next()
+            restricted("id=(SELECT id FROM events WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14) ORDER BY captured_unix DESC,id DESC LIMIT 1)").makeIterator().next()
         }
         func makeIterator() -> Iterator { Iterator(self) }
         final class Iterator: IteratorProtocol {
@@ -76,9 +77,9 @@ enum EventStore {
                     source.fail(ReadError.open(message())); finished = true; return
                 }
                 sqlite3_busy_timeout(db, 5000)
-                let json = source.metadata ? "CASE WHEN tag IN (66,133) THEN decoded_json ELSE '{}' END" : "decoded_json"
+                let json = source.metadata ? "CASE WHEN tag IN (66,133) THEN COALESCE(decoded_json, '{}') ELSE '{}' END" : "COALESCE(decoded_json, '{}')"
                 let body = source.metadata ? "NULL" : "CASE WHEN tag IN (126,127) THEN body ELSE NULL END"
-                let sql = "SELECT ring_timestamp,tag,\(json),captured_unix,\(body) FROM events WHERE decoded_json IS NOT NULL AND \(source.predicate) ORDER BY captured_unix,id"
+                let sql = "SELECT ring_timestamp,tag,\(json),captured_unix,\(body) FROM events WHERE (decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14)) AND (\(source.predicate)) ORDER BY captured_unix,id"
                 guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
                     source.fail(ReadError.prepare(message())); finished = true; return
                 }
@@ -275,10 +276,16 @@ enum EventStore {
                     || predicted <= Double(capturedUnix! + Self.futureSlackSeconds) {
                     return (predicted, .anchor)
                 }
-            }
-            if let capturedUnix,
-               let predicted = latestPlausibleProjection(ds, capturedUnix: capturedUnix) {
-                return (predicted, .projected)
+                if let capturedUnix,
+                   let projected = latestPlausibleProjection(ds, capturedUnix: capturedUnix) {
+                    return (projected, .projected)
+                }
+                let fallback = Double(epoch.fallbackAnchorUnix)
+                    - Double(epoch.maxDs - ds) / 10.0
+                let unix = capturedUnix.map {
+                    min(fallback, Double($0 + Self.futureSlackSeconds))
+                } ?? fallback
+                return (unix, .undated)
             }
             // Download-time arithmetic only when the phone kept up with the ring (capture
             // span comparable to the ds span). A boot downloaded in one go would be dated
@@ -319,11 +326,13 @@ enum EventStore {
             }
             // Borrowing another boot's clock is only legitimate when this ds continues
             // that boot's counter: a new boot restarts near zero and must never be
-            // projected through an older boot that only ran at higher counts.
+            // projected through an older boot that only ran at higher counts, and a
+            // counter jump far beyond an older boot's maxDs must not borrow it either.
             var index = low - 1
             while index >= 0 {
                 let candidate = anchorOffsetsDs[index]
-                if ds >= epochs[candidate.epoch].minDs - Self.epochResetSlackDs {
+                let ep = epochs[candidate.epoch]
+                if ds >= ep.minDs - Self.epochResetSlackDs && ds <= ep.maxDs + Self.epochResetSlackDs {
                     return Double(ds + candidate.offset) / 10.0
                 }
                 index -= 1

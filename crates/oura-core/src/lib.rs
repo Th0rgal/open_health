@@ -186,13 +186,16 @@ fn raw_events(db_path: &str, name_filter: &str, limit: u32) -> Result<serde_json
 }
 
 /// `Store::decoded_events` order and shape, with JSON only for the time anchors
-/// (`0x42` time_sync, `0x85` RTC beacon) — the only bodies `RingClock` parses.
+/// (`0x42` time_sync, `0x85` RTC beacon) — the only bodies `RingClock` parses —
+/// plus raw `0x41` (`ring_start`, 14 bytes) rows whose `decoded_json` is NULL.
 fn clock_rows(conn: &rusqlite::Connection) -> Result<Vec<(i64, u8, String, i64)>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT ring_timestamp, tag, \
-                    CASE WHEN tag IN (66, 133) THEN decoded_json ELSE '' END, captured_unix \
-             FROM events WHERE decoded_json IS NOT NULL ORDER BY captured_unix, id",
+                    CASE WHEN tag IN (66, 133) THEN COALESCE(decoded_json, '') ELSE '' END, captured_unix \
+             FROM events \
+             WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14) \
+             ORDER BY captured_unix, id",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -211,7 +214,7 @@ fn clock_rows(conn: &rusqlite::Connection) -> Result<Vec<(i64, u8, String, i64)>
 }
 
 /// A lightweight, model-free summary (device + data-health only) — kept as a fast
-/// path / fallback. Returns `{ serials, device, event_counts, decoded_events }`.
+/// path / fallback. Returns `{ serials, device, event_counts, total_events, raw_events, decoded_events }`.
 #[uniffi::export]
 pub fn quick_summary_json(db_path: String) -> String {
     match quick_summary(&db_path) {
@@ -221,6 +224,7 @@ pub fn quick_summary_json(db_path: String) -> String {
 }
 
 fn quick_summary(db_path: &str) -> Result<serde_json::Value, String> {
+    let _ = oura_store::storage::Store::migrate_if_writable(db_path);
     let store = oura_store::storage::Store::open_read_only(db_path).map_err(|e| e.to_string())?;
     let serials = store.device_serials().map_err(|e| e.to_string())?;
     let primary = serials.first().cloned().unwrap_or_default();
@@ -249,12 +253,14 @@ fn quick_summary(db_path: &str) -> Result<serde_json::Value, String> {
         .map(|(kind, n)| json!({ "kind": kind, "count": n }))
         .collect();
 
-    let decoded = store.decoded_events().map_err(|e| e.to_string())?.len();
+    let (raw_events, decoded) = store.event_totals().map_err(|e| e.to_string())?;
 
     Ok(json!({
         "serials": serials,
         "device": device,
         "event_counts": event_counts,
+        "total_events": raw_events,
+        "raw_events": raw_events,
         "decoded_events": decoded,
     }))
 }
@@ -1056,6 +1062,13 @@ mod raw_event_tests {
             )
             .unwrap();
         }
+        // Also insert a historical raw `ring_start` (0x41 = 65) with NULL decoded_json and 14-byte body.
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix) \
+             VALUES ('S1', 65, 'ring_start', 5000, X'0400000038020114010001020100', NULL, 1783100020)",
+            [],
+        )
+        .unwrap();
         let full = oura_store::storage::Store::open_read_only(db.to_str().unwrap())
             .unwrap()
             .decoded_events()
@@ -1071,7 +1084,7 @@ mod raw_event_tests {
         // The type list alone (limit 0) returns counts without any rows.
         let out = events_json(db.to_str().unwrap().into(), String::new(), 0);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["counts"].as_array().unwrap().len(), 4, "{out}");
+        assert_eq!(v["counts"].as_array().unwrap().len(), 5, "{out}");
         assert_eq!(v["events"].as_array().unwrap().len(), 0, "{out}");
         let out = events_json(db.to_str().unwrap().into(), "temp_event".into(), 10);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -1092,5 +1105,165 @@ mod raw_event_tests {
         assert_eq!(v["counts"].as_array().unwrap().len(), 0, "{out}");
         assert_eq!(v["events"].as_array().unwrap().len(), 0, "{out}");
         let _ = std::fs::remove_file(&db);
+    }
+
+    fn event_frame(tag: u8, ts: u32, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag, (4 + payload.len()) as u8];
+        out.extend_from_slice(&ts.to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn summary_frame(events_received: u8, bytes_left: u32) -> Vec<u8> {
+        let mut out = vec![0x11, 0x06, events_received, 0x00];
+        out.extend_from_slice(&bytes_left.to_le_bytes());
+        out
+    }
+
+    #[tokio::test]
+    async fn drain_into_store_terminates_on_replayed_legacy_tail_and_withholds_cursor_on_batch_error() {
+        struct NoProgress;
+        impl SyncProgressListener for NoProgress {
+            fn on_progress(&self, _: String, _: u64, _: u32) {}
+        }
+        struct ScriptedWriter {
+            tx: broadcast::Sender<Vec<u8>>,
+            step: AtomicU32,
+        }
+        impl BleWriter for ScriptedWriter {
+            fn write(&self, data: Vec<u8>) {
+                let tx = self.tx.clone();
+                match data.first().copied() {
+                    Some(0x28) => {
+                        let _ = tx.send(vec![0x29, 0x01, 0x00]);
+                    }
+                    Some(0x2f) => {
+                        // Unsupported ExtGetEvent -> fall back to legacy GetEvent (0x10)
+                        let _ = tx.send(vec![0x2f, 0x02, 0x00, 0x41]);
+                    }
+                    Some(0x10) => {
+                        let s = self.step.fetch_add(1, Ordering::SeqCst);
+                        match s {
+                            0 => {
+                                // Batch 1: two events at ts=100, 101, bytes_left=16
+                                let _ = tx.send(event_frame(0x43, 100, &[90, 10]));
+                                let _ = tx.send(event_frame(0x43, 101, &[89, 10]));
+                                let _ = tx.send(summary_frame(2, 16));
+                            }
+                            1 => {
+                                // Batch 2: replayed identical tail (ts=100, 101) with bytes_left=0
+                                // — must terminate cleanly without looping forever!
+                                let _ = tx.send(event_frame(0x43, 100, &[90, 10]));
+                                let _ = tx.send(event_frame(0x43, 101, &[89, 10]));
+                                let _ = tx.send(summary_frame(2, 0));
+                            }
+                            _ => {
+                                let _ = tx.send(summary_frame(0, 0));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let (tx, _) = broadcast::channel(64);
+        let writer = Arc::new(ScriptedWriter {
+            tx: tx.clone(),
+            step: AtomicU32::new(0),
+        });
+        let client = OuraClient::new(FfiTransport {
+            tx: tx.clone(),
+            writer: writer.clone(),
+        })
+        .with_quiet(std::time::Duration::from_millis(20));
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().upsert_device("S1", None, None).unwrap();
+        let inserted = AtomicU32::new(0);
+        let db_err = Mutex::new(None);
+        let progress = NoProgress;
+
+        let outcome = drain_into_store(&client, 0, "S1", &store, &inserted, &db_err, &progress)
+            .await
+            .unwrap();
+        assert_eq!(outcome.events_synced, 2);
+        assert_eq!(outcome.next_cursor, 102);
+        assert_eq!(inserted.load(Ordering::Relaxed), 2);
+        assert_eq!(store.lock().unwrap().cursor("S1").unwrap(), 102);
+
+        // Now test that a database commit failure on batch 2 preserves batch 1's checkpoint (202)
+        // and never advances the cursor to batch 2's cursor (204).
+        struct FailingSecondBatchWriter {
+            tx: broadcast::Sender<Vec<u8>>,
+            step: AtomicU32,
+        }
+        impl BleWriter for FailingSecondBatchWriter {
+            fn write(&self, data: Vec<u8>) {
+                let tx = self.tx.clone();
+                match data.first().copied() {
+                    Some(0x28) => {
+                        let _ = tx.send(vec![0x29, 0x01, 0x00]);
+                    }
+                    Some(0x2f) => {
+                        let _ = tx.send(vec![0x2f, 0x02, 0x00, 0x41]);
+                    }
+                    Some(0x10) => {
+                        let s = self.step.fetch_add(1, Ordering::SeqCst);
+                        match s {
+                            0 => {
+                                let _ = tx.send(event_frame(0x43, 200, &[88, 10]));
+                                let _ = tx.send(event_frame(0x43, 201, &[87, 10]));
+                                let _ = tx.send(summary_frame(2, 16));
+                            }
+                            1 => {
+                                let _ = tx.send(event_frame(0x43, 202, &[86, 10]));
+                                let _ = tx.send(event_frame(0x43, 203, &[85, 10]));
+                                let _ = tx.send(summary_frame(2, 0));
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("oura-core-batch-err-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("batch.db");
+        let _ = std::fs::remove_file(&db_path);
+        let store2 = Mutex::new(Store::open(&db_path).unwrap());
+        store2.lock().unwrap().upsert_device("S1", None, None).unwrap();
+        // Install a SQLite trigger that aborts when ring_timestamp >= 202 so batch 1 (200..201)
+        // commits cleanly at cursor 202 while batch 2 (202..203) rolls back.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_batch_2 BEFORE INSERT ON events \
+                 WHEN NEW.ring_timestamp >= 202 BEGIN \
+                     SELECT RAISE(ABORT, 'simulated disk error on batch 2'); \
+                 END;",
+            )
+            .unwrap();
+        }
+        let (tx2, _) = broadcast::channel(64);
+        let writer2 = Arc::new(FailingSecondBatchWriter {
+            tx: tx2.clone(),
+            step: AtomicU32::new(0),
+        });
+        let client2 = OuraClient::new(FfiTransport {
+            tx: tx2,
+            writer: writer2,
+        })
+        .with_quiet(std::time::Duration::from_millis(20));
+        let inserted2 = AtomicU32::new(0);
+        let db_err2 = Mutex::new(None);
+        let err = drain_into_store(&client2, 200, "S1", &store2, &inserted2, &db_err2, &progress)
+            .await
+            .expect_err("second batch must fail");
+        assert!(matches!(err, SyncError::Storage { checkpoint: 202, .. }), "{err:?}");
+        // Cursor in SQLite must still be 202 (batch 1), NOT 204 (batch 2)!
+        assert_eq!(store2.lock().unwrap().cursor("S1").unwrap(), 202);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

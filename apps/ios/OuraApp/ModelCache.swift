@@ -84,7 +84,9 @@ private struct ModelCacheGenerationDigest: Codable {
 enum ModelCacheStore {
     // 8: SleepNet epochs aligned by their end time (every cached hypnogram had an
     // unknown first epoch and was reported incomplete).
-    static let version = 8
+    // 9: Historical raw `ring_start` (0x41) events and decoder migration invalidate
+    // ambiguous multi-reboot stall intervals.
+    static let version = 9
     static let cvaFile = "cva-model-cache.json"
     static let illnessFile = "illness-model-cache.json"
     static let activityFile = "activity-model-cache.json"

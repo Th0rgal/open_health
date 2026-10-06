@@ -32,6 +32,83 @@ const ANCHOR_AGREEMENT_FRACTION: f64 = 0.02;
 // pre-reboot high ds value to fabricate weeks of future data.
 const FUTURE_SLACK_S: f64 = 6.0 * 3600.0;
 
+/// Why an event or sleep window could not be placed on the calendar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UndatedReason {
+    /// The boot epoch has no `time_sync` or `rtc_beacon` anchor (and was not
+    /// incrementally drained across syncs).
+    MissingAnchor,
+    /// Two anchors in the same boot epoch disagree because the decisecond
+    /// counter advanced faster than wall-clock time between them, or the counter
+    /// jumped ahead of capture time relative to its anchor.
+    AcceleratedCounter,
+    /// Multiple `ring_start` reboots occurred inside a stalled-anchor interval
+    /// where wall time exceeded counter time, so lost time cannot be partitioned.
+    AmbiguousRebootStall,
+}
+
+impl UndatedReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            UndatedReason::MissingAnchor => "missing_anchor",
+            UndatedReason::AcceleratedCounter => "accelerated_counter",
+            UndatedReason::AmbiguousRebootStall => "ambiguous_reboot_stall",
+        }
+    }
+
+    pub fn is_recoverable_by_sync(self, is_latest_unanchored_epoch: bool) -> bool {
+        match self {
+            UndatedReason::MissingAnchor => is_latest_unanchored_epoch,
+            UndatedReason::AcceleratedCounter | UndatedReason::AmbiguousRebootStall => false,
+        }
+    }
+
+    pub fn warning_message(self, count: usize, recoverable_by_sync: bool) -> String {
+        let noun = if count == 1 { "night" } else { "nights" };
+        let pronoun = if count == 1 { "it" } else { "them" };
+        match self {
+            UndatedReason::MissingAnchor if recoverable_by_sync => format!(
+                "{count} {noun} [missing_anchor] could not be placed in time because the \
+                 current boot epoch has no time-sync or RTC anchor yet. Syncing while the \
+                 ring remains in this boot epoch can anchor {pronoun}."
+            ),
+            UndatedReason::MissingAnchor => format!(
+                "{count} {noun} [missing_anchor] came from an earlier boot epoch that \
+                 ended before any time-sync or RTC anchor was recorded. Recovery is not \
+                 possible from current evidence, and syncing again cannot retroactively \
+                 anchor a prior boot."
+            ),
+            UndatedReason::AcceleratedCounter => format!(
+                "{count} {noun} [accelerated_counter] fell in an interval where the ring \
+                 counter advanced faster than wall-clock time between anchors. Recovery \
+                 is not possible from current evidence, and syncing again will not repair \
+                 historical counter jumps."
+            ),
+            UndatedReason::AmbiguousRebootStall => format!(
+                "{count} {noun} [ambiguous_reboot_stall] fell between multiple ring \
+                 reboots inside a stalled-clock interval where wall time exceeded counter \
+                 time. Lost time cannot be partitioned across multiple reboots from \
+                 current evidence, and syncing again will not resolve {pronoun}."
+            ),
+        }
+    }
+}
+
+/// Trustworthy wall-clock history metrics derived from resolved dated observations.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HistoryStats {
+    /// Elapsed wall-clock span `(max_unix - min_unix) / 86_400` across trustworthy
+    /// dated observations (`Anchor` / `Projected`), rounded to 0.1 days.
+    pub elapsed_days: f64,
+    /// Active observed wall-clock coverage in days (merging dated observations
+    /// separated by at most 24 hours so multi-day gaps or replayed ranges do not
+    /// inflate active coverage), rounded to 0.1 days.
+    pub observed_coverage_days: f64,
+    /// Count of distinct calendar days (in the requested UTC offset) that contain at
+    /// least one trustworthy dated observation.
+    pub observed_days: usize,
+}
+
 /// How an event's wall-clock time was obtained. Only `Anchor` and `Projected` are
 /// trustworthy to the minute; `Fallback` is download-time arithmetic (off by up to
 /// one sync gap) and `Undated` means nothing ties this boot to real time.
@@ -72,6 +149,7 @@ enum Bracket {
 pub(crate) struct Resolved {
     pub(crate) unix: f64,
     pub(crate) source: ClockSource,
+    pub(crate) undated_reason: Option<UndatedReason>,
 }
 
 /// Maps the ring's rebooting relative clock onto UTC.
@@ -159,13 +237,22 @@ impl RingClock {
         self.resolve(ds, captured_unix).unix
     }
 
+    pub(crate) fn is_in_latest_unanchored_epoch(&self, ds: i64, captured_unix: i64) -> bool {
+        let Some(last) = self.epochs.last() else {
+            return false;
+        };
+        last.anchors.is_empty() && std::ptr::eq(self.epoch_for(ds, captured_unix), last)
+    }
+
     pub(crate) fn resolve(&self, ds: i64, captured_unix: i64) -> Resolved {
         let epoch = self.epoch_for(ds, captured_unix);
+        let mut had_in_epoch_anchor = false;
         if let Some((anchor_ds, anchor_unix)) = epoch
             .anchors
             .iter()
             .min_by_key(|(a, _)| (*a as i128 - ds as i128).unsigned_abs())
         {
+            had_in_epoch_anchor = true;
             let predicted = *anchor_unix as f64 + (ds - *anchor_ds) as f64 / 10.0;
             match Self::bracket(&epoch.anchors, ds) {
                 Bracket::Erratic => {
@@ -173,6 +260,7 @@ impl RingClock {
                     return Resolved {
                         unix: predicted,
                         source: ClockSource::Undated,
+                        undated_reason: Some(UndatedReason::AcceleratedCounter),
                     };
                 }
                 Bracket::Stalled { before, after } => {
@@ -197,6 +285,7 @@ impl RingClock {
                         return Resolved {
                             unix: predicted,
                             source: ClockSource::Undated,
+                            undated_reason: Some(UndatedReason::AmbiguousRebootStall),
                         };
                     }
                     let unix = match boot {
@@ -208,6 +297,7 @@ impl RingClock {
                     return Resolved {
                         unix,
                         source: ClockSource::Anchor,
+                        undated_reason: None,
                     };
                 }
                 Bracket::Consistent => {}
@@ -216,19 +306,30 @@ impl RingClock {
                 return Resolved {
                     unix: predicted,
                     source: ClockSource::Anchor,
+                    undated_reason: None,
                 };
             }
         }
 
-        // A cursor rebase can replay an old boot after the newer boot was already
-        // stored. Duplicate anchors are ignored by SQLite, while previously unseen
-        // high-ds events are appended at today's capture time and can look like a
-        // continuation of the new boot. If that epoch predicts the future, select the
-        // most recent globally plausible time-sync projection instead.
-        if let Some(predicted) = self.latest_plausible_projection(ds, captured_unix) {
+        if had_in_epoch_anchor {
+            // A cursor rebase can replay an old boot after the newer boot was already
+            // stored. Duplicate anchors are ignored by SQLite, while previously unseen
+            // high-ds events are appended at today's capture time and can look like a
+            // continuation of the new boot. If that epoch predicts the future, select the
+            // most recent globally plausible time-sync projection instead.
+            if let Some(predicted) = self.latest_plausible_projection(ds, captured_unix) {
+                return Resolved {
+                    unix: predicted,
+                    source: ClockSource::Projected,
+                    undated_reason: None,
+                };
+            }
+            let unix = (epoch.fallback_anchor_unix as f64 - (epoch.max_ds - ds) as f64 / 10.0)
+                .min(captured_unix as f64 + FUTURE_SLACK_S);
             return Resolved {
-                unix: predicted,
-                source: ClockSource::Projected,
+                unix,
+                source: ClockSource::Undated,
+                undated_reason: Some(UndatedReason::AcceleratedCounter),
             };
         }
 
@@ -249,6 +350,7 @@ impl RingClock {
             } else {
                 ClockSource::Undated
             },
+            undated_reason: (!incremental).then_some(UndatedReason::MissingAnchor),
         }
     }
 
@@ -266,8 +368,61 @@ impl RingClock {
             })
     }
 
-    pub(crate) fn total_span_ds(&self) -> i64 {
-        self.epochs.iter().map(|e| e.max_ds - e.min_ds).sum()
+    /// Compute trustworthy wall-clock history metrics from dated observations
+    /// (`ClockSource::Anchor` / `ClockSource::Projected`), excluding undated epochs,
+    /// accelerated counter jumps, and ambiguous reboot stalls while deduplicating
+    /// replayed ranges.
+    pub fn trusted_history_stats(
+        &self,
+        events: &[(i64, u8, String, i64)],
+        tz_offset_hours: f64,
+    ) -> HistoryStats {
+        let tz_s = (tz_offset_hours * 3600.0).round() as i64;
+        let mut dated_unix: Vec<f64> = Vec::new();
+        let mut days = std::collections::BTreeSet::new();
+
+        for (ds, _tag, _json, captured) in events {
+            let r = self.resolve(*ds, *captured);
+            if !r.source.is_dated() || !r.unix.is_finite() || r.unix <= 0.0 {
+                continue;
+            }
+            dated_unix.push(r.unix);
+            days.insert((r.unix as i64 + tz_s).div_euclid(86_400));
+        }
+
+        if dated_unix.is_empty() {
+            return HistoryStats::default();
+        }
+
+        dated_unix.sort_by(f64::total_cmp);
+        let min_u = dated_unix[0];
+        let max_u = *dated_unix.last().unwrap();
+        let elapsed_days = (((max_u - min_u).max(0.0) / 86_400.0) * 10.0).round() / 10.0;
+
+        // Merge consecutive dated observations separated by at most 24 hours so
+        // multi-day gaps when the ring was off do not inflate active coverage and
+        // replayed ranges are never double-counted.
+        const MAX_ACTIVE_GAP_S: f64 = 86_400.0;
+        let mut active_s = 0.0_f64;
+        let mut seg_start = dated_unix[0];
+        let mut seg_end = dated_unix[0];
+        for &u in &dated_unix[1..] {
+            if u - seg_end <= MAX_ACTIVE_GAP_S {
+                seg_end = seg_end.max(u);
+            } else {
+                active_s += (seg_end - seg_start).max(0.0);
+                seg_start = u;
+                seg_end = u;
+            }
+        }
+        active_s += (seg_end - seg_start).max(0.0);
+        let observed_coverage_days = ((active_s / 86_400.0) * 10.0).round() / 10.0;
+
+        HistoryStats {
+            elapsed_days,
+            observed_coverage_days,
+            observed_days: days.len(),
+        }
     }
 
     /// Per-boot diagnostics for support exports and the apps' technical reports.
@@ -287,6 +442,7 @@ impl RingClock {
                     "capture_max": e.capture_max,
                     "anchors": e.anchors.len(),
                     "anchor_sources": sources,
+                    "boots": e.boots.len(),
                     "latest_anchor_unix": e.anchors.iter().map(|(_, u)| *u).max(),
                 })
             })
@@ -348,11 +504,15 @@ impl RingClock {
         // Borrowing another boot's clock is only legitimate when this ds continues
         // that boot's counter. A new boot restarts near zero, so a low ds must never
         // be projected through an older boot that only ever ran at higher counts —
-        // that is how a fresh night lands days in the past.
+        // and a counter jump far beyond an older boot's max_ds must not borrow that
+        // older boot either.
         self.anchor_offsets_ds[..end]
             .iter()
             .rev()
-            .find(|(_, idx)| ds >= self.epochs[*idx].min_ds - RESET_SLACK_DS)
+            .find(|(_, idx)| {
+                let ep = &self.epochs[*idx];
+                ds >= ep.min_ds - RESET_SLACK_DS && ds <= ep.max_ds + RESET_SLACK_DS
+            })
             .map(|(offset, _)| ds.saturating_add(*offset) as f64 / 10.0)
     }
 }
@@ -681,5 +841,87 @@ mod tests {
         assert_eq!(end.unix, 1_789_020_000.0);
         let diag = clock.diagnostics();
         assert_eq!(diag["epochs"][1]["anchor_sources"][0], "phone");
+    }
+
+    #[test]
+    fn audited_stalled_interval_with_hidden_and_decoded_reboots_marks_middle_ambiguous() {
+        // Exact audited anchor bracket and reboot counters:
+        // Anchor 1: ring_ds=47_893_458, unix_time=1_787_733_221
+        // Reboot A (previously NULL decoded_json): 49_912_254
+        // Reboot B (already decoded): 57_660_709
+        // Anchor 2: ring_ds=61_076_535, unix_time=1_789_195_418
+        // Wall time (406.166 h) exceeds counter time (366.197 h) by ~39.969 h.
+        let cap = 1_789_195_500;
+        let clock = RingClock::from_events(&[
+            event(47_893_458, 0x42, r#"{"unix_time":1787733221}"#, 1_787_733_300),
+            event(49_912_254, 0x41, r#"{"reason":4,"firmware_version":"2.1.20"}"#, cap),
+            event(53_000_000, 0x76, "{}", cap),
+            event(57_660_709, 0x41, r#"{"reason":4,"firmware_version":"2.1.20"}"#, cap),
+            event(61_076_535, 0x42, r#"{"unix_time":1789195418}"#, cap),
+        ]);
+
+        // Before the first reboot (47_893_458..49_912_254): anchored to the earlier anchor.
+        let before_first = clock.resolve(48_500_000, cap);
+        assert_eq!(before_first.source, ClockSource::Anchor);
+        assert!(before_first.undated_reason.is_none());
+
+        // Between the two reboots (49_912_254..57_660_709): ambiguous multiple-reboot stall.
+        let middle = clock.resolve(53_000_000, cap);
+        assert_eq!(middle.source, ClockSource::Undated);
+        assert_eq!(middle.undated_reason, Some(UndatedReason::AmbiguousRebootStall));
+        assert_eq!(middle.undated_reason.unwrap().code(), "ambiguous_reboot_stall");
+        assert!(!middle.undated_reason.unwrap().is_recoverable_by_sync(true));
+
+        // After the second reboot (57_660_709..61_076_535): anchored to the later anchor.
+        let after_second = clock.resolve(59_000_000, cap);
+        assert_eq!(after_second.source, ClockSource::Anchor);
+        assert!(after_second.undated_reason.is_none());
+    }
+
+    #[test]
+    fn trusted_history_stats_ignores_erratic_counter_jump_undated_epochs_and_replays() {
+        // Epoch 0: initial erratic epoch matching audited export (`min_ds=20700`,
+        // `max_ds=184190173`, apparent raw span = 5115.8 h = 213.2 days), while wall
+        // time between its anchors only advances 1 hour on July 3, 2026.
+        // Epoch 1: 3 days of normal dated history (July 4–7, 2026) + a replayed copy.
+        // Epoch 2: unanchored full-drain epoch spanning 50 hours of raw ds.
+        let jul3 = 1_783_000_000_i64;
+        let jul4 = 1_783_086_400_i64;
+        let jul7 = jul4 + 3 * 86_400;
+        let events = vec![
+            // Epoch 0 (erratic counter jump: 20,700 -> 184,190,173 ds in 1 wall-clock hour)
+            event(20_700, 0x42, &format!(r#"{{"unix_time":{jul3}}}"#), jul3),
+            event(90_000_000, 1, "{}", jul3 + 1_800),
+            event(
+                184_190_173,
+                0x42,
+                &format!(r#"{{"unix_time":{}}}"#, jul3 + 3_600),
+                jul3 + 3_600,
+            ),
+            // Epoch 1 (reboot to low ds, 3 days of trusted observations across 4 calendar days)
+            event(10_000, 0x42, &format!(r#"{{"unix_time":{jul4}}}"#), jul4),
+            event(10_000 + 864_000, 1, "{}", jul4 + 86_400),
+            event(10_000 + 2 * 864_000, 1, "{}", jul4 + 2 * 86_400),
+            event(10_000 + 3 * 864_000, 0x42, &format!(r#"{{"unix_time":{jul7}}}"#), jul7),
+            // Replayed event from Epoch 1 captured later: must not double-count coverage.
+            event(10_000 + 2 * 864_000, 1, "{}", jul7 + 3_600),
+            // Epoch 2 (reboot to 100, unanchored full drain of 50 hours of ds)
+            event(100, 1, "{}", jul7 + 7_200),
+            event(1_800_100, 1, "{}", jul7 + 7_200),
+        ];
+
+        let clock = RingClock::from_events(&events);
+        let stats = clock.trusted_history_stats(&events, 0.0);
+        // True wall-clock span is jul3..jul7 = 4.0 days (NOT 213.2 + 3 + 2 = 218+ days!).
+        assert_eq!(stats.elapsed_days, 4.0);
+        assert_eq!(stats.observed_coverage_days, 4.0);
+        assert!(stats.observed_days <= 5);
+
+        // Verify undated reasons for the erratic middle event and the unanchored final epoch.
+        let erratic = clock.resolve(90_000_000, jul3 + 1_800);
+        assert_eq!(erratic.undated_reason, Some(UndatedReason::AcceleratedCounter));
+        let unanchored = clock.resolve(1_800_100, jul7 + 7_200);
+        assert_eq!(unanchored.undated_reason, Some(UndatedReason::MissingAnchor));
+        assert!(clock.is_in_latest_unanchored_epoch(1_800_100, jul7 + 7_200));
     }
 }
