@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/Th0rgal/open_oura"
 
 [dependencies]
-oura-protocol = { git = "https://github.com/Th0rgal/open_oura", rev = "0a703728ca5071c10addf0f680a4293c8a0f193e" }
+oura-protocol = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
 rusqlite = { version = "0.31", features = ["backup"] }
 serde_json = "1"
 thiserror = "1"

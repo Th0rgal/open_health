@@ -11,9 +11,9 @@ name = "oura"
 path = "src/main.rs"
 
 [dependencies]
-oura-protocol = { git = "https://github.com/Th0rgal/open_oura", rev = "0a703728ca5071c10addf0f680a4293c8a0f193e" }
-oura-link = { git = "https://github.com/Th0rgal/open_oura", rev = "0a703728ca5071c10addf0f680a4293c8a0f193e" }
-oura-store = { git = "https://github.com/Th0rgal/open_oura", rev = "0a703728ca5071c10addf0f680a4293c8a0f193e" }
+oura-protocol = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
+oura-link = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
+oura-store = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
 oura-summary = { path = "../oura-summary" }
 oura-dna = { path = "../oura-dna" }
 clap = { version = "4", features = ["derive", "env"] }
@@ -31,6 +31,7 @@ sha2 = "0.10"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+getrandom = "0.3"
 tch = { version = "=0.22.0", optional = true } # pinned to libtorch 2.9.0 (repo venv)
 
 [features]

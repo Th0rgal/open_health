@@ -1272,7 +1272,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "oura-analysis"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?rev=0a703728ca5071c10addf0f680a4293c8a0f193e#0a703728ca5071c10addf0f680a4293c8a0f193e"
+source = "git+https://github.com/Th0rgal/open_oura?rev=4f7957d3304c4084f0e1e703f3d84606bf10b781#4f7957d3304c4084f0e1e703f3d84606bf10b781"
 dependencies = [
  "oura-protocol",
  "serde",
@@ -1285,6 +1285,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "getrandom 0.3.4",
  "hex",
  "libc",
  "oura-dna",
@@ -1341,7 +1342,7 @@ dependencies = [
 [[package]]
 name = "oura-link"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?rev=0a703728ca5071c10addf0f680a4293c8a0f193e#0a703728ca5071c10addf0f680a4293c8a0f193e"
+source = "git+https://github.com/Th0rgal/open_oura?rev=4f7957d3304c4084f0e1e703f3d84606bf10b781#4f7957d3304c4084f0e1e703f3d84606bf10b781"
 dependencies = [
  "async-trait",
  "btleplug",
@@ -1357,7 +1358,7 @@ dependencies = [
 [[package]]
 name = "oura-protocol"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?rev=0a703728ca5071c10addf0f680a4293c8a0f193e#0a703728ca5071c10addf0f680a4293c8a0f193e"
+source = "git+https://github.com/Th0rgal/open_oura?rev=4f7957d3304c4084f0e1e703f3d84606bf10b781#4f7957d3304c4084f0e1e703f3d84606bf10b781"
 dependencies = [
  "aes",
  "hex",
