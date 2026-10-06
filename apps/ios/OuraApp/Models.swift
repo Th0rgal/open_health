@@ -523,10 +523,10 @@ private func clockLabel(_ hour: Double) -> String {
 /// `oura.db` so `oura-summary` (FFI) reads the exact same format on iOS and desktop.
 enum BedtimeOverrideStore {
     struct Entry: Codable, Equatable {
-        var raw_start_ds: Int64
-        var captured_unix: Int64
         var start_ds: Int64
         var end_ds: Int64
+        var start: String? = nil
+        var end: String? = nil
     }
 
     static func fileURL(for dbPath: String? = nil) -> URL {
@@ -535,24 +535,21 @@ enum BedtimeOverrideStore {
         return dir.appendingPathComponent("bedtime_overrides.json")
     }
 
-    static func load(dbPath: String? = nil) -> [Entry] {
+    static func load(dbPath: String? = nil) -> [String: Entry] {
         let url = fileURL(for: dbPath)
         guard let data = try? Data(contentsOf: url),
-              let entries = try? JSONDecoder().decode([Entry].self, from: data) else {
-            return []
+              let entries = try? JSONDecoder().decode([String: Entry].self, from: data) else {
+            return [:]
         }
         return entries
     }
 
-    static func save(rawStartDs: Int64, capturedUnix: Int64, bounds: (startDs: Int64, endDs: Int64)?, dbPath: String? = nil) {
-        var list = load(dbPath: dbPath)
-        list.removeAll { $0.raw_start_ds == rawStartDs && ($0.captured_unix == capturedUnix || $0.captured_unix == 0 || capturedUnix == 0) }
-        if let bounds, bounds.endDs > bounds.startDs {
-            list.append(Entry(raw_start_ds: rawStartDs, captured_unix: capturedUnix, start_ds: bounds.startDs, end_ds: bounds.endDs))
-        }
-        guard let data = try? JSONEncoder().encode(list) else { return }
+    private static func write(_ map: [String: Entry], dbPath: String? = nil) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(map)
         let primary = fileURL(for: dbPath)
-        try? data.write(to: primary, options: .atomic)
+        try data.write(to: primary, options: .atomic)
         if dbPath == nil {
             let writable = DB.url.deletingLastPathComponent().appendingPathComponent("bedtime_overrides.json")
             if writable != primary {
@@ -560,5 +557,46 @@ enum BedtimeOverrideStore {
             }
         }
     }
+
+    private static func hmMinutes(_ hm: String?) -> Int {
+        let parts = (hm ?? "00:00").split(separator: ":").compactMap { Int($0) }
+        return (parts.first ?? 0) * 60 + (parts.count > 1 ? parts[1] : 0)
+    }
+
+    static func set(startHM: String, endHM: String, forNightKey key: String, night: NightRow? = nil, dbPath: String? = nil) throws {
+        var map = load(dbPath: dbPath)
+        let baseStartDs = night?.raw_start_ds ?? night?.start_ds ?? 10_000
+        let baseStartMin = hmMinutes(night?.raw_start ?? night?.start ?? "00:00")
+        let newStartMin = hmMinutes(startHM)
+        let newEndMin = hmMinutes(endHM)
+        var deltaStartMin = (newStartMin - baseStartMin) % 1440
+        if deltaStartMin > 720 { deltaStartMin -= 1440 }
+        if deltaStartMin < -720 { deltaStartMin += 1440 }
+        let spanMin = newEndMin > newStartMin ? (newEndMin - newStartMin) : (newEndMin + 1440 - newStartMin)
+        let startDs = baseStartDs + Int64(deltaStartMin) * 600
+        let endDs = startDs + Int64(max(30, min(1200, spanMin))) * 600
+        let entry = Entry(start_ds: startDs, end_ds: endDs, start: startHM, end: endHM)
+        map[key] = entry
+        if let rawStart = night?.raw_start_ds ?? night?.start_ds {
+            map["\(rawStart)"] = entry
+            if let cu = night?.captured_unix {
+                map["\(rawStart):\(cu)"] = entry
+            }
+        }
+        try write(map, dbPath: dbPath)
+    }
+
+    static func clear(forNightKey key: String, night: NightRow? = nil, dbPath: String? = nil) throws {
+        var map = load(dbPath: dbPath)
+        map.removeValue(forKey: key)
+        if let rawStart = night?.raw_start_ds ?? night?.start_ds {
+            map.removeValue(forKey: "\(rawStart)")
+            if let cu = night?.captured_unix {
+                map.removeValue(forKey: "\(rawStart):\(cu)")
+            }
+        }
+        try write(map, dbPath: dbPath)
+    }
 }
+
 

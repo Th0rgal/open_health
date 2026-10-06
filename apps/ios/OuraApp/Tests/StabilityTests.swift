@@ -630,6 +630,55 @@ final class StabilityTests: XCTestCase {
         XCTAssertEqual(clock.resolve(58_000_000, capturedUnix: 1_789_200_000).source, .anchor)
     }
 
+    func testPhoneAnchorDatesANewBoot() throws {
+        // The sync wrote a phone-time anchor at the newest drained ds: 23:00→08:00 UTC+2.
+        let url = try fixture()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        let sql = """
+        DELETE FROM events;
+        INSERT INTO events VALUES (1,5000000,66,'{"unix_time":1788800000}',1788800000,NULL);
+        INSERT INTO events VALUES (2,10,1,'{}',1789056420,NULL);
+        INSERT INTO events VALUES (3,705000,66,'{"unix_time":1789056420,"source":"phone"}',1789056420,NULL);
+        """
+        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        let events = try EventStore.decodedEvents(dbPath: url.path)
+        let clock = EventStore.RingClock(events: events)
+        let startDs: Int64 = 705000 - (1789056420 - 1789002000) * 10
+        let endDs: Int64 = 705000 - (1789056420 - 1789020000) * 10
+        XCTAssertEqual(clock.resolve(startDs, capturedUnix: 1789056420).source, .anchor)
+        XCTAssertEqual(clock.unixSeconds(startDs, capturedUnix: 1789056420), 1789002000)
+        XCTAssertEqual(clock.unixSeconds(endDs, capturedUnix: 1789056420), 1789020000)
+        try events.validate()
+    }
+
+    func testStreamIsRepeatableAndKeepsRebootOrder() throws {
+        let url = try fixture(); defer { try? FileManager.default.removeItem(at: url) }
+        let events = try EventStore.decodedEvents(dbPath: url.path)
+        XCTAssertEqual(events.map(\.ds), [5000000,5000010,10,20])
+        XCTAssertEqual(events.restricted("tag=96").map(\.ds), [5000010,20])
+        let clock = EventStore.RingClock(events: events)
+        XCTAssertEqual(clock.unixSeconds(20, capturedUnix: 1700100001), 1700100001)
+        XCTAssertEqual(events.map(\.ds).count, 4)
+        try events.validate()
+    }
+    func testStreamCancellationAndReadFailureAreNotEmptySuccess() throws {
+        let url = try fixture(); defer { try? FileManager.default.removeItem(at: url) }
+        let events = try EventStore.decodedEvents(dbPath: url.path)
+        let run = AnalysisRun()
+        run.perform {
+            let iterator = events.makeIterator()
+            XCTAssertNotNil(iterator.next())
+            run.cancel()
+            XCTAssertNil(iterator.next())
+            do { try events.validate(); XCTFail("partial stream accepted") } catch {}
+        }
+        XCTAssertThrowsError(try EventStore.decodedEvents(dbPath: url.path + ".missing"))
+    }
+    #endif
+
     func testTimestampedSignalsPreserveDelayedStartGapsAndStageAutonomicParity() throws {
         let startUnix: Int64 = 1_791_068_400
         let endUnix: Int64 = startUnix + 8 * 3600 // 28,800s night
@@ -690,54 +739,6 @@ final class StabilityTests: XCTestCase {
         XCTAssertEqual(auto.hrvRem, 76)
     }
 
-    func testPhoneAnchorDatesANewBoot() throws {
-        // The sync wrote a phone-time anchor at the newest drained ds: 23:00→08:00 UTC+2.
-        let url = try fixture()
-        defer { try? FileManager.default.removeItem(at: url) }
-        var db: OpaquePointer?
-        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
-        let sql = """
-        DELETE FROM events;
-        INSERT INTO events VALUES (1,5000000,66,'{"unix_time":1788800000}',1788800000,NULL);
-        INSERT INTO events VALUES (2,10,1,'{}',1789056420,NULL);
-        INSERT INTO events VALUES (3,705000,66,'{"unix_time":1789056420,"source":"phone"}',1789056420,NULL);
-        """
-        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
-        sqlite3_close(db)
-        let events = try EventStore.decodedEvents(dbPath: url.path)
-        let clock = EventStore.RingClock(events: events)
-        let startDs: Int64 = 705000 - (1789056420 - 1789002000) * 10
-        let endDs: Int64 = 705000 - (1789056420 - 1789020000) * 10
-        XCTAssertEqual(clock.resolve(startDs, capturedUnix: 1789056420).source, .anchor)
-        XCTAssertEqual(clock.unixSeconds(startDs, capturedUnix: 1789056420), 1789002000)
-        XCTAssertEqual(clock.unixSeconds(endDs, capturedUnix: 1789056420), 1789020000)
-        try events.validate()
-    }
-
-    func testStreamIsRepeatableAndKeepsRebootOrder() throws {
-        let url = try fixture(); defer { try? FileManager.default.removeItem(at: url) }
-        let events = try EventStore.decodedEvents(dbPath: url.path)
-        XCTAssertEqual(events.map(\.ds), [5000000,5000010,10,20])
-        XCTAssertEqual(events.restricted("tag=96").map(\.ds), [5000010,20])
-        let clock = EventStore.RingClock(events: events)
-        XCTAssertEqual(clock.unixSeconds(20, capturedUnix: 1700100001), 1700100001)
-        XCTAssertEqual(events.map(\.ds).count, 4)
-        try events.validate()
-    }
-    func testStreamCancellationAndReadFailureAreNotEmptySuccess() throws {
-        let url = try fixture(); defer { try? FileManager.default.removeItem(at: url) }
-        let events = try EventStore.decodedEvents(dbPath: url.path)
-        let run = AnalysisRun()
-        run.perform {
-            let iterator = events.makeIterator()
-            XCTAssertNotNil(iterator.next())
-            run.cancel()
-            XCTAssertNil(iterator.next())
-            do { try events.validate(); XCTFail("partial stream accepted") } catch {}
-        }
-        XCTAssertThrowsError(try EventStore.decodedEvents(dbPath: url.path + ".missing"))
-    }
-
     func testRefineDeepStagesAndEstimateStagesAndBedtimeOverrides() throws {
         let startUnix: Int64 = 1_791_151_863
         let endUnix: Int64 = 1_791_181_563
@@ -785,6 +786,5 @@ final class StabilityTests: XCTestCase {
         try BedtimeOverrideStore.clear(forNightKey: "2026-10-05", dbPath: dbPath)
         XCTAssertNil(BedtimeOverrideStore.load(dbPath: dbPath)["2026-10-05"])
     }
-    #endif
 }
 

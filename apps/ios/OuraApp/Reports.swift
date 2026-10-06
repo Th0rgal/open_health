@@ -1511,7 +1511,7 @@ struct SleepReport: View {
                     let endHM = Self.hmFromDate(wakeupDate)
                     savingBedtime = true
                     Task {
-                        try? BedtimeOverrideStore.set(startHM: startHM, endHM: endHM, forNightKey: nightKey)
+                        try? BedtimeOverrideStore.set(startHM: startHM, endHM: endHM, forNightKey: nightKey, night: n)
                         _ = await analysis?.refresh(DayAnalysisRequest(day: day, kind: .sleep))
                         savingBedtime = false
                         editingBedtime = false
@@ -1530,7 +1530,7 @@ struct SleepReport: View {
                     Button {
                         savingBedtime = true
                         Task {
-                            try? BedtimeOverrideStore.clear(forNightKey: nightKey)
+                            try? BedtimeOverrideStore.clear(forNightKey: nightKey, night: n)
                             _ = await analysis?.refresh(DayAnalysisRequest(day: day, kind: .sleep))
                             savingBedtime = false
                             editingBedtime = false
