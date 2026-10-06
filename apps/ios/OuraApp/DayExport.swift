@@ -73,8 +73,8 @@ struct DayExport: Encodable {
                 Sleep.metrics(Sleep.smooth(st, 5), inBedS: n.durationS)
             }
             var autonomic: Autonomic?
-            if let st = n.hypnogram, let series = n.series {
-                let a = Sleep.autonomic(hr: series.hr, hrv: series.hrv, stages: st)
+            if let st = n.hypnogram {
+                let a = Sleep.autonomic(night: n, stages: Sleep.smooth(st, 5))
                 if a.any { autonomic = Autonomic(a) }
             }
             sleep = SleepSection(night: n, metrics: metrics.map(Metrics.init),

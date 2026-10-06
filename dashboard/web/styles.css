@@ -971,3 +971,38 @@ body.page-open { overflow: hidden; }
 .clock-note-title { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--warn); display: flex; gap: 6px; align-items: center; }
 .clock-note p { font-size: 13px; color: var(--muted); line-height: 1.45; margin: 6px 0 0; }
 .clock-note code { font-family: var(--mono); font-size: 12px; }
+
+/* subtle inline bedtime & wake-up adjustment */
+.bedtime-edit-btn {
+  margin-left: auto; border: 1px solid var(--line-soft); border-radius: 999px;
+  background: transparent; color: var(--muted); font-family: var(--mono);
+  font-size: 11px; padding: 4px 10px; cursor: pointer; transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.bedtime-edit-btn:hover, .bedtime-edit-btn.active {
+  color: var(--text); border-color: var(--line); background: var(--surface-2);
+}
+.ss.ss-interactive { cursor: pointer; transition: border-color 0.15s ease; }
+.ss.ss-interactive:hover { border-color: var(--line); }
+.bedtime-editor {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  margin: 10px 0 6px; padding: 10px 14px; border-radius: var(--radius-sm);
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+}
+.bedtime-editor[hidden] { display: none !important; }
+.be-field { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.be-field span { text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; color: var(--faint); }
+.be-field input[type="time"] {
+  font-family: var(--mono); font-size: 13px; color: var(--text);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+  padding: 4px 8px;
+}
+.be-sep { color: var(--faint); font-family: var(--mono); font-size: 12px; }
+.be-actions { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.be-save, .be-reset, .be-cancel {
+  border-radius: 6px; font-size: 12px; padding: 5px 11px; cursor: pointer;
+}
+.be-save { background: var(--accent); color: #fff; border: 1px solid transparent; font-weight: 500; }
+.be-reset { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.be-cancel { background: transparent; color: var(--faint); border: 1px solid transparent; }
+.be-reset:hover, .be-cancel:hover { color: var(--text); }
+

@@ -576,7 +576,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1272,7 +1272,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "oura-analysis"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?rev=99e0f4c4b3293772c16447708acfc3623cf3810f#99e0f4c4b3293772c16447708acfc3623cf3810f"
+source = "git+https://github.com/Th0rgal/open_oura?rev=0a703728ca5071c10addf0f680a4293c8a0f193e#0a703728ca5071c10addf0f680a4293c8a0f193e"
 dependencies = [
  "oura-protocol",
  "serde",
@@ -1341,7 +1341,7 @@ dependencies = [
 [[package]]
 name = "oura-link"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?rev=99e0f4c4b3293772c16447708acfc3623cf3810f#99e0f4c4b3293772c16447708acfc3623cf3810f"
+source = "git+https://github.com/Th0rgal/open_oura?rev=0a703728ca5071c10addf0f680a4293c8a0f193e#0a703728ca5071c10addf0f680a4293c8a0f193e"
 dependencies = [
  "async-trait",
  "btleplug",
@@ -1357,7 +1357,7 @@ dependencies = [
 [[package]]
 name = "oura-protocol"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?rev=99e0f4c4b3293772c16447708acfc3623cf3810f#99e0f4c4b3293772c16447708acfc3623cf3810f"
+source = "git+https://github.com/Th0rgal/open_oura?rev=0a703728ca5071c10addf0f680a4293c8a0f193e#0a703728ca5071c10addf0f680a4293c8a0f193e"
 dependencies = [
  "aes",
  "hex",
@@ -2465,7 +2465,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

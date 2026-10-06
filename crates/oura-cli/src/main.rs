@@ -42,7 +42,18 @@ fn local_tz_offset_hours() -> f64 {
     }
     #[cfg(not(unix))]
     {
-        0.0
+        rusqlite::Connection::open_in_memory()
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT round((julianday('now', 'localtime') - julianday('now')) * 96.0) / 4.0",
+                    [],
+                    |row| row.get::<_, f64>(0),
+                )
+                .ok()
+            })
+            .filter(|h| h.is_finite() && (-24.0..=24.0).contains(h))
+            .unwrap_or(0.0)
     }
 }
 

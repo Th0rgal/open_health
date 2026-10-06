@@ -249,6 +249,217 @@ enum Sleep {
         let epochS = inBedS / Double(n)
         return Int(Double(stages.filter { (1...3).contains($0) }.count) * epochS)
     }
+
+    private static func percentile(_ values: [Double], _ q: Double) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let pos = min(max(q, 0), 1) * Double(sorted.count - 1)
+        let lo = Int(pos.rounded(.down)), hi = Int(pos.rounded(.up))
+        return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - Double(lo))
+    }
+
+    private static func epochSignalGrid(night: NightRow, count n: Int) -> (hr: [Double?], hrv: [Double?], motion: [Double])? {
+        guard n >= 20 else { return nil }
+        let startS = Double(night.start_unix ?? 0)
+        let endS = Double(night.end_unix ?? Int64(night.durationS.rounded()))
+        let spanS = endS > startS ? (endS - startS) : max(night.durationS, Double(n * 30))
+        guard spanS > 0 else { return nil }
+        let stepS = spanS / Double(n)
+
+        func interpolate(_ pts: [[Double]], fallback: [Double], maxHoldS: Double) -> [Double?] {
+            var pairs: [(Double, Double)] = pts.compactMap { p in
+                guard p.count >= 2, p[0].isFinite, p[1].isFinite, p[1] > 0 else { return nil }
+                return (p[0], p[1])
+            }
+            if pairs.isEmpty, fallback.count > 1 {
+                pairs = fallback.enumerated().compactMap { i, v in
+                    guard v.isFinite, v > 0 else { return nil }
+                    let t = startS + spanS * Double(i) / Double(fallback.count - 1)
+                    return (t, v)
+                }
+            }
+            guard !pairs.isEmpty else { return Array(repeating: nil, count: n) }
+            pairs.sort { $0.0 < $1.0 }
+            var out = Array(repeating: Double?.none, count: n)
+            var cursor = 0
+            for idx in 0..<n {
+                let center = startS + (Double(idx) + 0.5) * stepS
+                while cursor + 1 < pairs.count && pairs[cursor + 1].0 <= center {
+                    cursor += 1
+                }
+                var best = pairs[cursor]
+                if cursor + 1 < pairs.count, abs(pairs[cursor + 1].0 - center) < abs(best.0 - center) {
+                    best = pairs[cursor + 1]
+                }
+                if abs(best.0 - center) <= maxHoldS {
+                    out[idx] = best.1
+                }
+            }
+            return out
+        }
+
+        let hr = interpolate(night.series_t?.hr ?? [], fallback: night.series?.hr ?? [], maxHoldS: 450)
+        let hrv = interpolate(night.series_t?.hrv ?? [], fallback: night.series?.hrv ?? [], maxHoldS: 450)
+        var motion = Array(repeating: 0.0, count: n)
+        if let timedMotion = night.series_t?.motion, !timedMotion.isEmpty {
+            for p in timedMotion where p.count >= 2 && p[0].isFinite && p[1].isFinite {
+                let f = (p[0] - startS) / spanS
+                guard f >= -1e-6 && f <= 1 + 1e-6 else { continue }
+                let idx = min(max(Int(f * Double(n)), 0), n - 1)
+                if p[1] > motion[idx] { motion[idx] = p[1] }
+            }
+        } else if let mVals = night.series?.motion, !mVals.isEmpty {
+            let mTimes = night.series?.motion_time
+            for (i, v) in mVals.enumerated() where v.isFinite {
+                let f: Double
+                if let mTimes, i < mTimes.count { f = mTimes[i] }
+                else { f = Double(i) / Double(max(1, mVals.count - 1)) }
+                let idx = min(max(Int(f * Double(n)), 0), n - 1)
+                if v > motion[idx] { motion[idx] = v }
+            }
+        }
+        return (hr, hrv, motion)
+    }
+
+    /// Recover physiological N3 (Deep) bouts when Oura Gen 4 sparse IBI streams cause
+    /// SleepNet to collapse N3 into N2 (0% Deep across a full night). Mirrors
+    /// `oura-summary::refine_deep_stages`.
+    static func refineDeepStages(stages: [Int], night: NightRow) -> [Int] {
+        let n = stages.count
+        guard n >= 40,
+              stages.allSatisfy({ (1...4).contains($0) }),
+              !stages.contains(1),
+              stages.filter({ $0 == 2 }).count >= 20,
+              let grid = epochSignalGrid(night: night, count: n) else {
+            return stages
+        }
+        let hrValid = grid.hr.compactMap { $0 }
+        guard hrValid.count >= 6 else { return stages }
+        let hrQ35 = percentile(hrValid, 0.35)
+        let hrQ50 = percentile(hrValid, 0.50)
+        let hrvValid = grid.hrv.compactMap { $0 }
+        let hrvQ45 = hrvValid.count >= 4 ? percentile(hrvValid, 0.45) : 0.0
+        let posMotion = grid.motion.filter { $0 > 0 }
+        let quietMotion = posMotion.isEmpty ? 2.0 : max(2.0, min(6.0, percentile(posMotion, 0.35)))
+
+        let candidates: [Bool] = (0..<n).map { idx in
+            guard stages[idx] == 2 else { return false }
+            let frac = Double(idx) / Double(max(1, n - 1))
+            guard frac <= 0.78, grid.motion[idx] <= quietMotion else { return false }
+            let lo = max(0, idx - 3), hi = min(n, idx + 4)
+            guard !(lo..<hi).contains(where: { stages[$0] == 4 || stages[$0] == 3 }),
+                  let h = grid.hr[idx] else { return false }
+            let hCap = frac <= 0.55 ? hrQ50 : hrQ35
+            guard h <= hCap + 0.5 else { return false }
+            let hrs = (lo..<hi).compactMap { grid.hr[$0] }
+            if hrs.count >= 3 {
+                let mean = hrs.reduce(0, +) / Double(hrs.count)
+                let variance = hrs.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(hrs.count)
+                if variance.squareRoot() > 3.2 { return false }
+            }
+            if hrvQ45 > 0, let v = grid.hrv[idx], v < hrvQ45 * 0.75 && h > hrQ35 {
+                return false
+            }
+            return true
+        }
+
+        var smoothed = candidates
+        if n >= 3 {
+            for idx in 1..<(n - 1) {
+                if !smoothed[idx] && candidates[idx - 1] && candidates[idx + 1] && stages[idx] == 2 {
+                    smoothed[idx] = true
+                }
+            }
+        }
+        var refined = stages
+        let maxDeep = max(8, Int((Double(n) * 0.24).rounded()))
+        var assigned = 0
+        var idx = 0
+        while idx < n {
+            if smoothed[idx] {
+                var end = idx + 1
+                while end < n && smoothed[end] { end += 1 }
+                if end - idx >= 6 {
+                    for j in idx..<end where assigned < maxDeep {
+                        refined[j] = 1
+                        assigned += 1
+                    }
+                }
+                idx = end
+            } else {
+                idx += 1
+            }
+        }
+        return refined
+    }
+
+    /// Physiological 4-stage hypnogram estimator when Torch SleepNet cannot run on a night
+    /// (e.g. Gen 4 nights with sparse raw PPG beats or model failure) yet valid overnight
+    /// HR/HRV/temp/motion series are present. Mirrors `oura-summary::stage_night_from_signals`.
+    static func estimateStages(night: NightRow) -> [Int]? {
+        let spanS: Double
+        if let s = night.start_unix, let e = night.end_unix, e > s {
+            spanS = Double(e - s)
+        } else {
+            spanS = night.durationS
+        }
+        let n = Int((spanS / 30.0).rounded())
+        guard (40...1920).contains(n),
+              let grid = epochSignalGrid(night: night, count: n) else { return nil }
+        let hrValid = grid.hr.compactMap { $0 }
+        let hrvValid = grid.hrv.compactMap { $0 }
+        guard hrValid.count >= 6 || hrvValid.count >= 6 else { return nil }
+
+        let hrQ35 = hrValid.isEmpty ? 58.0 : percentile(hrValid, 0.35)
+        let hrQ65 = hrValid.isEmpty ? 64.0 : percentile(hrValid, 0.65)
+        let hrQ85 = hrValid.isEmpty ? 70.0 : percentile(hrValid, 0.85)
+        let hrvQ35 = hrvValid.isEmpty ? 30.0 : percentile(hrvValid, 0.35)
+        let hrvQ65 = hrvValid.isEmpty ? 50.0 : percentile(hrvValid, 0.65)
+        let posMotion = grid.motion.filter { $0 > 0 }
+        let wakeMotion = posMotion.isEmpty ? 12.0 : max(8.0, percentile(posMotion, 0.85))
+        let quietMotion = posMotion.isEmpty ? 2.0 : max(2.0, min(5.0, percentile(posMotion, 0.30)))
+
+        var rawStages = Array(repeating: 2, count: n)
+        for idx in 0..<n {
+            let frac = Double(idx) / Double(max(1, n - 1))
+            let m = grid.motion[idx]
+            let h = grid.hr[idx]
+            let v = grid.hrv[idx]
+            let edge = idx < 6 || idx + 6 >= n
+
+            let lo = max(0, idx - 3), hi = min(n, idx + 4)
+            let hrs = (lo..<hi).compactMap { grid.hr[$0] }
+            let hrStd: Double = {
+                guard hrs.count >= 3 else { return 1.5 }
+                let mean = hrs.reduce(0, +) / Double(hrs.count)
+                return (hrs.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(hrs.count)).squareRoot()
+            }()
+
+            if m >= wakeMotion || (edge && m > quietMotion) || ((h ?? 0) >= hrQ85 + 2.0 && m > quietMotion) {
+                rawStages[idx] = 4
+                continue
+            }
+            let cyclePhase = sin(2.0 * .pi * (spanS * frac / 5400.0 - 0.25))
+            if frac >= 0.12 && m <= quietMotion * 1.5 && (hrStd >= 2.0 || (cyclePhase > 0.35 && (h ?? hrQ65) >= hrQ35)) {
+                if let v, v >= hrvQ65 && (h ?? hrQ65) > hrQ35 {
+                    rawStages[idx] = 3
+                    continue
+                } else if hrStd >= 2.2 && frac >= 0.20 {
+                    rawStages[idx] = 3
+                    continue
+                }
+            }
+            if frac <= 0.72 && m <= quietMotion && (h ?? (hrQ35 + 1.0)) <= hrQ35 + 0.5 && hrStd <= 2.5 {
+                if (v ?? hrvQ35) >= hrvQ35 * 0.85 {
+                    rawStages[idx] = 1
+                    continue
+                }
+            }
+            rawStages[idx] = 2
+        }
+        let smoothed = smooth(rawStages, 5)
+        return refineDeepStages(stages: smoothed, night: night)
+    }
 }
 
 extension Summary {
@@ -1033,6 +1244,7 @@ struct DayReportView: View {
     @State private var refreshMessages: [String: String] = [:]
     @State private var exportFile: URL?
     @State private var exportNote: String?
+    @State private var autoRefreshedDays: Set<String> = []
     typealias Tab = DayAnalysisKind
 
     var body: some View {
@@ -1079,6 +1291,21 @@ struct DayReportView: View {
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: Binding(get: { exportFile != nil }, set: { if !$0 { exportFile = nil } })) {
             if let exportFile { DiagnosticsShare(url: exportFile) }
+        }
+        .task(id: "\(day)-\(tab.rawValue)") {
+            guard tab == .sleep,
+                  !autoRefreshedDays.contains(day),
+                  let analysis,
+                  !analysis.isBusy,
+                  refreshing == nil,
+                  let n = (analysis.summary ?? s).night(forDay: day),
+                  !n.hasHypnogram,
+                  n.hasSignals else { return }
+            autoRefreshedDays.insert(day)
+            refreshing = .sleep
+            let error = await analysis.refresh(DayAnalysisRequest(day: day, kind: .sleep))
+            if let error { refreshMessages[Tab.sleep.rawValue] = error }
+            refreshing = nil
         }
     }
 
@@ -1167,6 +1394,25 @@ struct DayReportView: View {
 struct SleepReport: View {
     let s: Summary
     let day: String
+    @Environment(\.dayAnalysis) private var analysis
+    @State private var editingBedtime = false
+    @State private var bedtimeDate = Date()
+    @State private var wakeupDate = Date()
+    @State private var savingBedtime = false
+
+    private static func dateFromHM(_ hm: String?) -> Date {
+        let parts = (hm ?? "23:00").split(separator: ":").compactMap { Int($0) }
+        var comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        comps.hour = parts.first ?? 23
+        comps.minute = parts.count > 1 ? parts[1] : 0
+        return Calendar.current.date(from: comps) ?? Date()
+    }
+
+    private static func hmFromDate(_ date: Date) -> String {
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return String(format: "%02d:%02d", comps.hour ?? 0, comps.minute ?? 0)
+    }
+
     var body: some View {
         if let n = s.night(forDay: day) {
             let metrics = (n.hypnogram.flatMap { st in Sleep.metrics(Sleep.smooth(st, 5), inBedS: n.durationS) })
@@ -1177,7 +1423,21 @@ struct SleepReport: View {
                 Readout(value: n.in_bed_h.map { String(format: "%.1f h", $0) } ?? "–", caption: "in bed")
                 Readout(value: asleepH.map { String(format: "%.1f h", $0) } ?? "–", caption: "asleep")
                 Readout(value: n.efficiency.map { "\(Int($0))%" } ?? "–", caption: "efficiency")
-                Readout(value: "\(n.start ?? "–")–\(n.end ?? "–")", caption: "bedtime")
+                Button {
+                    bedtimeDate = Self.dateFromHM(n.start)
+                    wakeupDate = Self.dateFromHM(n.end)
+                    editingBedtime.toggle()
+                } label: {
+                    Readout(value: "\(n.start ?? "–")–\(n.end ?? "–")",
+                            caption: n.isBedtimeManual ? "bedtime · edited" : "bedtime · adjust",
+                            accent: editingBedtime ? Obs.chart : Obs.ink)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Adjust bedtime and wake-up time")
+            }
+
+            if editingBedtime {
+                bedtimeEditor(n)
             }
 
             if let score = n.sleep_score {
@@ -1225,6 +1485,79 @@ struct SleepReport: View {
         } else {
             Text("No sleep recorded for this night.").font(Obs.mono(13)).foregroundStyle(Obs.ink2)
         }
+    }
+
+    @ViewBuilder private func bedtimeEditor(_ n: NightRow) -> some View {
+        let nightKey = n.date ?? day
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 16) {
+                HStack(spacing: 6) {
+                    Text("BEDTIME").font(Obs.mono(9)).tracking(1.1).foregroundStyle(Obs.ink2)
+                    DatePicker("Bedtime", selection: $bedtimeDate, displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                        .disabled(savingBedtime)
+                }
+                HStack(spacing: 6) {
+                    Text("WAKE-UP").font(Obs.mono(9)).tracking(1.1).foregroundStyle(Obs.ink2)
+                    DatePicker("Wake-up", selection: $wakeupDate, displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                        .disabled(savingBedtime)
+                }
+                Spacer(minLength: 0)
+            }
+            HStack(spacing: 12) {
+                Button {
+                    let startHM = Self.hmFromDate(bedtimeDate)
+                    let endHM = Self.hmFromDate(wakeupDate)
+                    savingBedtime = true
+                    Task {
+                        try? BedtimeOverrideStore.set(startHM: startHM, endHM: endHM, forNightKey: nightKey)
+                        _ = await analysis?.refresh(DayAnalysisRequest(day: day, kind: .sleep))
+                        savingBedtime = false
+                        editingBedtime = false
+                    }
+                } label: {
+                    Text(savingBedtime ? "saving…" : "apply")
+                        .font(Obs.mono(11, .medium))
+                        .foregroundStyle(Obs.paper)
+                        .padding(.horizontal, 12).padding(.vertical, 5)
+                        .background(Obs.ink, in: RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.plain)
+                .disabled(savingBedtime)
+
+                if n.isBedtimeManual || n.raw_start != nil {
+                    Button {
+                        savingBedtime = true
+                        Task {
+                            try? BedtimeOverrideStore.clear(forNightKey: nightKey)
+                            _ = await analysis?.refresh(DayAnalysisRequest(day: day, kind: .sleep))
+                            savingBedtime = false
+                            editingBedtime = false
+                        }
+                    } label: {
+                        Text("reset\(n.raw_start.map { " (\($0)–\(n.raw_end ?? ""))" } ?? "")")
+                            .font(Obs.mono(11))
+                            .foregroundStyle(Obs.ink2)
+                            .padding(.horizontal, 10).padding(.vertical, 5)
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Obs.trace.opacity(0.6), lineWidth: 0.8))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(savingBedtime)
+                }
+
+                Button {
+                    editingBedtime = false
+                } label: {
+                    Text("cancel").font(Obs.mono(11)).foregroundStyle(Obs.muted)
+                }
+                .buttonStyle(.plain)
+                .disabled(savingBedtime)
+            }
+        }
+        .padding(12)
+        .background(Obs.paper.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Obs.trace.opacity(0.45), lineWidth: 0.6))
     }
 
     private var stageLegend: some View {

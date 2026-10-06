@@ -31,9 +31,15 @@ const motion = [...w.document.querySelectorAll('.tl-row')].find(row => row.textC
 // A sparse motion measurement must remain visible and must not become a smooth curve.
 assert(motion, 'motion lane missing');
 assert(!motion.querySelector('path'));
-const absent = { ...data, nights: [{ ...night, stages_full: [] }] };
+const absent = { ...data, nights: [{ ...night, start_ds: 10000, end_ds: 298000, stages_full: [] }] };
 w.openDayPage(absent, '2026-09-26');
 assert(w.document.querySelector('#sec-sleep').textContent.includes('stages are unavailable'));
+assert(!w.document.querySelector('#sec-sleep').textContent.includes('Incomplete sleep analysis'));
+const editBtn = w.document.querySelector('.bedtime-edit-btn');
+const editorForm = w.document.querySelector('.bedtime-editor');
+assert(editBtn && editorForm && editorForm.hidden);
+editBtn.click();
+assert(!editorForm.hidden);
 setImmediate(async () => {
   assert(w.document.querySelector('#sec-heart').textContent.includes('No heart-rate readings'));
   assert(requests.some(url => url.includes('/api/hourly-hr')));

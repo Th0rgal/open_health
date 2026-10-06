@@ -17,7 +17,10 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use oura_summary::{feature_modes_path, profile_path, ModelInputs, ModelOutputs, ModelRunner};
+use oura_summary::{
+    bedtime_overrides_path, feature_modes_path, profile_path, write_bedtime_override, ModelInputs,
+    ModelOutputs, ModelRunner,
+};
 // Re-exported so `dashboard::Demographics` (main.rs) and the profile/feature
 // handlers keep working after the summary logic moved into `oura-summary`.
 pub use oura_summary::{read_profile, write_feature_mode, write_profile, Demographics};
@@ -156,7 +159,8 @@ fn run_py_json_stdin_optional(
 }
 
 /// The web dashboard's [`ModelRunner`]: shells out to the Python torch runners,
-/// exactly as before. The native client supplies an on-device `.ptl` runner.
+/// exactly as before, and falls back to Rust signal-based sleep staging when the
+/// Python environment or private `.pt` model file is unavailable on a user's PC.
 struct PythonRunner;
 impl ModelRunner for PythonRunner {
     fn run(&self, input: ModelInputs) -> ModelOutputs {
@@ -197,7 +201,7 @@ impl ModelRunner for PythonRunner {
         ];
         let illness_args = vec![db.display().to_string(), tz.to_string(), "--json".into()];
 
-        let (sleep_batch, cva, activity, illness) = match (root.as_deref(), py.as_deref()) {
+        let (mut sleep_batch, cva, activity, illness) = match (root.as_deref(), py.as_deref()) {
             (Some(r), Some(p)) => std::thread::scope(|s| {
                 let sh = s.spawn(|| {
                     run_py_json_stdin(r, p, "tools/run_sleep_model.py", &sleep_args, &sleep_stdin)
@@ -214,6 +218,13 @@ impl ModelRunner for PythonRunner {
             }),
             _ => (None, None, None, None),
         };
+        let needs_fallback = sleep_batch
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .is_none_or(|a| a.is_empty());
+        if needs_fallback && !sleep_ranges.is_empty() {
+            sleep_batch = oura_summary::stage_nights_from_signals(db, sleep_ranges);
+        }
         ModelOutputs {
             sleep_batch,
             cva,
@@ -237,20 +248,28 @@ fn build_summary(db: &Path, tz: f64) -> Result<Value> {
 struct SummaryCache {
     db: PathBuf,
     tz: f64,
-    token: CacheToken, // (db, profile.json, feature_modes.json) mtimes
+    token: CacheToken, // (db, profile.json, feature_modes.json, bedtime_overrides.json) mtimes
     value: Arc<Value>,
 }
 
-type CacheToken = (Option<SystemTime>, Option<SystemTime>, Option<SystemTime>, i64);
+type CacheToken = (
+    Option<SystemTime>,
+    Option<SystemTime>,
+    Option<SystemTime>,
+    Option<SystemTime>,
+    i64,
+);
 
 /// mtimes of every input the summary depends on plus the store decoder version — any
 /// change rebuilds it. Covers a sync (oura.db), a profile edit (profile.json), a
-/// feature toggle (feature_modes.json), and historical decode migrations.
+/// feature toggle (feature_modes.json), a manual bedtime adjustment
+/// (bedtime_overrides.json), and historical decode migrations.
 fn summary_token(db: &Path) -> CacheToken {
     (
         mtime(db),
         mtime(&profile_path(db)),
         mtime(&feature_modes_path(db)),
+        mtime(&bedtime_overrides_path(db)),
         oura_store::storage::DECODER_VERSION,
     )
 }
@@ -450,6 +469,7 @@ async fn handle(
     let forbid = matches!(
         (method, path),
         ("POST", "/api/profile")
+            | ("POST", "/api/bedtime")
             | ("POST", "/api/sync")
             | ("POST", "/api/live-hr")
             | ("POST", "/api/feature")
@@ -481,6 +501,14 @@ async fn handle(
         }
     } else {
         None
+    };
+    let effective_tz = if tz == 0.0 {
+        query_param(query, "tz")
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|h| h.is_finite() && (-24.0..=24.0).contains(h))
+            .unwrap_or(tz)
+    } else {
+        tz
     };
     match (method, path) {
         (_, "/") | (_, "/index.html") => {
@@ -623,7 +651,7 @@ async fn handle(
         ("GET", "/api/summary") => {
             // building the summary shells out to torch models → off the async
             // executor; cached so only the first load (or post-sync/edit) pays for it.
-            let body = tokio::task::spawn_blocking(move || cached_summary(&db, tz))
+            let body = tokio::task::spawn_blocking(move || cached_summary(&db, effective_tz))
                 .await
                 .map_err(|e| anyhow!(e))?;
             match body {
@@ -641,7 +669,7 @@ async fn handle(
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60);
             let body = tokio::task::spawn_blocking(move || {
-                oura_summary::hourly_hr::hr_bins(&db, tz, days, minutes)
+                oura_summary::hourly_hr::hr_bins(&db, effective_tz, days, minutes)
             })
             .await
             .map_err(|e| anyhow!(e))?;
@@ -658,6 +686,40 @@ async fn handle(
                     Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
                 },
                 Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
+            }
+        }
+        ("POST", "/api/bedtime") => {
+            let req =
+                serde_json::from_str::<Value>(body.trim_end_matches('\0')).unwrap_or(Value::Null);
+            let raw_start_ds = req["raw_start_ds"].as_i64();
+            let captured_unix = req["captured_unix"].as_i64();
+            let reset = req["reset"].as_bool().unwrap_or(false);
+            let (start_ds, end_ds) = if reset {
+                (None, None)
+            } else {
+                match (req["start_ds"].as_i64(), req["end_ds"].as_i64()) {
+                    (Some(s), Some(e)) => (Some(s), Some(e)),
+                    _ => {
+                        return json_resp(
+                            &mut sock,
+                            &json!({ "ok": false, "error": "start_ds and end_ds are required" }),
+                        )
+                        .await;
+                    }
+                }
+            };
+            let Some(raw_start_ds) = raw_start_ds else {
+                return json_resp(
+                    &mut sock,
+                    &json!({ "ok": false, "error": "raw_start_ds is required" }),
+                )
+                .await;
+            };
+            match write_bedtime_override(&db, raw_start_ds, captured_unix, start_ds, end_ds) {
+                Ok(v) => json_resp(&mut sock, &v).await,
+                Err(e) => {
+                    json_resp(&mut sock, &json!({ "ok": false, "error": e.to_string() })).await
+                }
             }
         }
         ("GET", "/api/ring-key") => match read_ring_key(key_file.as_deref()) {

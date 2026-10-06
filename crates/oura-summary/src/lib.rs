@@ -162,6 +162,85 @@ pub fn write_feature_mode(db: &Path, feature: &str, mode_int: i64) {
     write_feature_modes(db, modes);
 }
 
+/// User-adjusted bedtime/wake-up bounds (in ring deciseconds) for a specific night,
+/// keyed by `"{raw_start_ds}:{captured_unix}"` (with fallback to `"{raw_start_ds}"`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BedtimeOverride {
+    pub start_ds: i64,
+    pub end_ds: i64,
+}
+
+pub fn bedtime_overrides_path(db: &Path) -> PathBuf {
+    db.parent()
+        .unwrap_or(Path::new("."))
+        .join("bedtime_overrides.json")
+}
+
+pub fn read_bedtime_overrides(db: &Path) -> std::collections::HashMap<String, BedtimeOverride> {
+    let mut out = std::collections::HashMap::new();
+    let Some(Value::Object(map)) = std::fs::read_to_string(bedtime_overrides_path(db))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    else {
+        return out;
+    };
+    for (k, v) in map {
+        if let (Some(s), Some(e)) = (v["start_ds"].as_i64(), v["end_ds"].as_i64()) {
+            if e > s && e - s <= 24 * 36_000 {
+                out.insert(
+                    k,
+                    BedtimeOverride {
+                        start_ds: s,
+                        end_ds: e,
+                    },
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Set or clear (`start_ds = None` or `end_ds = None`) a manual bedtime override for a night.
+pub fn write_bedtime_override(
+    db: &Path,
+    raw_start_ds: i64,
+    captured_unix: Option<i64>,
+    start_ds: Option<i64>,
+    end_ds: Option<i64>,
+) -> Result<Value> {
+    let path = bedtime_overrides_path(db);
+    let mut map = match std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    {
+        Some(Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    let key = match captured_unix {
+        Some(cu) => format!("{raw_start_ds}:{cu}"),
+        None => format!("{raw_start_ds}"),
+    };
+    let legacy_key = format!("{raw_start_ds}");
+    match (start_ds, end_ds) {
+        (Some(s), Some(e)) => {
+            if e <= s || e - s < 18_000 || e - s > 20 * 36_000 {
+                return Err(anyhow!(
+                    "bedtime duration must be between 30 minutes and 20 hours"
+                ));
+            }
+            map.insert(key, json!({ "start_ds": s, "end_ds": e }));
+        }
+        _ => {
+            map.remove(&key);
+            map.remove(&legacy_key);
+        }
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&Value::Object(map))?)
+        .context("writing bedtime_overrides.json")?;
+    Ok(json!({ "ok": true }))
+}
+
+
 // ── small date helpers (no chrono dep) ────────────────────────────────────────
 /// Howard Hinnant's civil_from_days: days since 1970-01-01 → (year, month, day).
 pub fn civil(days: i64) -> (i64, u32, u32) {
@@ -400,6 +479,7 @@ struct Night {
     raw_start_ds: i64,
     raw_end_ds: i64,
     captured_unix: i64,
+    manual_bedtime: bool,
     rmssd: Vec<f64>,
     hr: Vec<f64>,
     temp: Vec<f64>,
@@ -668,6 +748,288 @@ fn ring_hypnograms(
         ));
     }
     out
+}
+
+/// When SleepNet runs on a night whose IBI stream lacks PPG pulse amplitude (e.g. Oura
+/// Ring 4 `green_ibi_quality_event` `0x80`), it distinguishes WAKE (4), REM (3), and
+/// NREM (2) but collapses slow-wave N3 into LIGHT (2), yielding 0 DEEP (1) epochs.
+/// Recover consolidated N3 bouts inside LIGHT (2) using nocturnal HR, HRV, and motion:
+/// contiguous motionless NREM runs (>= 6 min) with low HR weighted by homeostatic
+/// Process S (stronger in the first two-thirds of the sleep period).
+pub fn refine_deep_stages(
+    stages: &[i64],
+    hr_t: &[(i64, f64)],
+    motion_t: &[(i64, f64)],
+    start_ds: i64,
+    end_ds: i64,
+) -> Vec<i64> {
+    let n = stages.len();
+    if n < 120 || stages.contains(&1) || hr_t.len() < 12 || end_ds <= start_ds {
+        return stages.to_vec();
+    }
+    let light_indices: Vec<usize> = stages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &c)| (c == 2).then_some(i))
+        .collect();
+    if light_indices.len() < 60 {
+        return stages.to_vec();
+    }
+    let span_ds = (end_ds - start_ds).max(1) as f64;
+    let hr_vals: Vec<f64> = hr_t.iter().map(|&(_, v)| v).collect();
+    let sample_hr = |idx: usize| -> f64 {
+        let pos = idx as f64 / (n.saturating_sub(1).max(1) as f64)
+            * (hr_vals.len().saturating_sub(1) as f64);
+        let lo = (pos.floor() as usize).min(hr_vals.len() - 1);
+        let hi = (lo + 1).min(hr_vals.len() - 1);
+        let frac = pos - lo as f64;
+        hr_vals[lo] * (1.0 - frac) + hr_vals[hi] * frac
+    };
+    let mut epoch_mo = vec![0.0f64; n];
+    for &(ds, val) in motion_t {
+        let f = ((ds - start_ds) as f64 / span_ds).clamp(0.0, 0.999_999);
+        let idx = ((f * n as f64) as isize).clamp(0, n as isize - 1);
+        for d in -1..=1 {
+            let k = idx + d;
+            if (0..n as isize).contains(&k) {
+                let ku = k as usize;
+                epoch_mo[ku] = epoch_mo[ku].max(val);
+            }
+        }
+    }
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        if stages[i] == 2 && epoch_mo[i] <= 1.0 {
+            let mut j = i;
+            while j < n && stages[j] == 2 && epoch_mo[j] <= 1.0 {
+                j += 1;
+            }
+            if j - i >= 12 {
+                runs.push((i, j));
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    if runs.is_empty() {
+        return stages.to_vec();
+    }
+    let mut nrem_hrs: Vec<f64> = light_indices.iter().map(|&idx| sample_hr(idx)).collect();
+    nrem_hrs.sort_by(|a, b| a.total_cmp(b));
+    let hr_p25 = nrem_hrs[nrem_hrs.len() / 4];
+    let hr_med = nrem_hrs[nrem_hrs.len() / 2];
+    let hr_span = (nrem_hrs[3 * nrem_hrs.len() / 4] - hr_p25).max(2.0);
+
+    let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
+    for (r_start, r_end) in runs {
+        let mut cur = r_start;
+        while cur + 10 <= r_end {
+            let mut w_end = (cur + 20).min(r_end);
+            if r_end - w_end < 10 {
+                w_end = r_end;
+            }
+            let mean_hr: f64 =
+                (cur..w_end).map(&sample_hr).sum::<f64>() / ((w_end - cur).max(1) as f64);
+            let mid_frac = ((cur + w_end) as f64 / 2.0) / (n as f64);
+            let homeo = 1.0 - 0.55 * mid_frac;
+            let hr_score = (hr_med - mean_hr) / hr_span;
+            let score = hr_score * 0.65 + homeo * 0.55;
+            candidates.push((score, cur, w_end));
+            cur = w_end;
+        }
+    }
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let asleep_epochs = stages.iter().filter(|&&c| (1..=3).contains(&c)).count();
+    let target_deep = ((asleep_epochs as f64) * 0.18).round() as usize;
+    let min_deep = ((asleep_epochs as f64) * 0.10).round() as usize;
+    let mut out = stages.to_vec();
+    let mut deep_count = 0usize;
+    for (score, s_idx, e_idx) in candidates {
+        if deep_count >= target_deep {
+            break;
+        }
+        if score < 0.05 && deep_count >= min_deep {
+            break;
+        }
+        for cell in &mut out[s_idx..e_idx] {
+            *cell = 1;
+        }
+        deep_count += e_idx - s_idx;
+    }
+    out
+}
+
+/// Estimate 30-second sleep stages (`1=DEEP, 2=LIGHT, 3=REM, 4=WAKE`) from a night's
+/// physiological streams (`hr_t`, `hrv_t`, `motion_t`) when neither the proprietary
+/// Torch model nor ring-side `sleep_phase_data` is available.
+pub fn stage_night_from_signals(
+    start_ds: i64,
+    end_ds: i64,
+    hr_t: &[(i64, f64)],
+    hrv_t: &[(i64, f64)],
+    motion_t: &[(i64, f64)],
+) -> Vec<i64> {
+    if end_ds <= start_ds || hr_t.len() < 12 {
+        return Vec::new();
+    }
+    let epochs = ((end_ds - start_ds) / 300).max(1) as usize;
+    if epochs < 120 {
+        return Vec::new();
+    }
+    let span_ds = (end_ds - start_ds).max(1) as f64;
+    let hr_vals: Vec<f64> = hr_t.iter().map(|&(_, v)| v).collect();
+    let interp_hr = |idx: usize| -> f64 {
+        let pos = idx as f64 / (epochs.saturating_sub(1).max(1) as f64)
+            * (hr_vals.len().saturating_sub(1) as f64);
+        let lo = (pos.floor() as usize).min(hr_vals.len() - 1);
+        let hi = (lo + 1).min(hr_vals.len() - 1);
+        let frac = pos - lo as f64;
+        hr_vals[lo] * (1.0 - frac) + hr_vals[hi] * frac
+    };
+    let mut epoch_mo = vec![0.0f64; epochs];
+    for &(ds, val) in motion_t {
+        let f = ((ds - start_ds) as f64 / span_ds).clamp(0.0, 0.999_999);
+        let idx = ((f * epochs as f64) as isize).clamp(0, epochs as isize - 1);
+        for d in -1..=1 {
+            let k = idx + d;
+            if (0..epochs as isize).contains(&k) {
+                let ku = k as usize;
+                epoch_mo[ku] = epoch_mo[ku].max(val);
+            }
+        }
+    }
+    let mut sorted_hr = hr_vals.clone();
+    sorted_hr.sort_by(|a, b| a.total_cmp(b));
+    let hr_med = sorted_hr[sorted_hr.len() / 2];
+    let hr_p75 = sorted_hr[3 * sorted_hr.len() / 4];
+
+    let mut stages = vec![2i64; epochs];
+    let mut onset = 0usize;
+    let max_onset = (epochs / 4).min(120);
+    for i in 0..max_onset {
+        let end_chk = (i + 12).min(epochs);
+        if (i..end_chk).all(|k| epoch_mo[k] <= 2.0) {
+            onset = i;
+            break;
+        }
+    }
+    for cell in &mut stages[..onset] {
+        *cell = 4;
+    }
+    let mut wake_end = epochs;
+    let min_wake_end = onset.max(epochs.saturating_sub(60));
+    for i in (min_wake_end..epochs).rev() {
+        if epoch_mo[i] >= 3.0 || interp_hr(i) > hr_p75 {
+            wake_end = i;
+        } else {
+            break;
+        }
+    }
+    for cell in &mut stages[wake_end..epochs] {
+        *cell = 4;
+    }
+    for i in onset..wake_end {
+        if epoch_mo[i] >= 8.0 || (epoch_mo[i] >= 5.0 && interp_hr(i) >= hr_p75) {
+            let lo = i.saturating_sub(2).max(onset);
+            let hi = (i + 3).min(wake_end);
+            for cell in &mut stages[lo..hi] {
+                *cell = 4;
+            }
+        }
+    }
+    let rem_start = (onset + 120).min(wake_end);
+    let rem_end = wake_end.saturating_sub(10).max(rem_start);
+    let sleep_span = (wake_end.saturating_sub(onset)).max(1) as f64;
+    for i in rem_start..rem_end {
+        if stages[i] != 2 || epoch_mo[i] > 3.0 {
+            continue;
+        }
+        let frac = (i - onset) as f64 / sleep_span;
+        let cycle_pos = ((i - onset) % 180) as f64 / 180.0;
+        let in_rem_phase = (0.62..=0.92).contains(&cycle_pos);
+        if in_rem_phase && (frac >= 0.35 || interp_hr(i) >= hr_med - 0.5) && epoch_mo[i] <= 2.0 {
+            stages[i] = 3;
+        }
+    }
+    let _ = hrv_t;
+    let refined = refine_deep_stages(&stages, hr_t, motion_t, start_ds, end_ds);
+    smooth_stages(&refined, 5)
+}
+
+/// Fallback batch stager for desktop/CLI runs when the proprietary `.pt` model is
+/// unavailable on the machine. Reads nocturnal `hrv_event` (`0x5d`) and `motion_event`
+/// (`0x47`) streams from `db` and returns the same JSON batch shape as `run_sleep_model.py`.
+pub fn stage_nights_from_signals(db: &Path, sleep_ranges: &[[i64; 3]]) -> Option<Value> {
+    if sleep_ranges.is_empty() {
+        return Some(Value::Array(Vec::new()));
+    }
+    let store = Store::open_read_only(db).ok()?;
+    let events = store.decoded_events().ok()?;
+    let mut results = Vec::with_capacity(sleep_ranges.len());
+    for &[start_ds, end_ds, captured_unix] in sleep_ranges {
+        let mut hr_t = Vec::new();
+        let mut hrv_t = Vec::new();
+        let mut motion_t = Vec::new();
+        for (ds, tag, jstr, _cu) in &events {
+            if *ds < start_ds - 600 || *ds > end_ds + 600 {
+                continue;
+            }
+            if *tag == 0x5d {
+                if let Ok(v) = serde_json::from_str::<Value>(jstr) {
+                    let step_ds = v["interval_min"].as_i64().unwrap_or(5).max(1) * 600;
+                    if let Some(a) = v["hr_bpm"].as_array() {
+                        for (i, x) in a.iter().enumerate() {
+                            if let Some(val) = x.as_f64().filter(|&v| v > 0.0) {
+                                hr_t.push((*ds + i as i64 * step_ds, val));
+                            }
+                        }
+                    }
+                    if let Some(a) = v["rmssd_ms"].as_array() {
+                        for (i, x) in a.iter().enumerate() {
+                            if let Some(val) = x.as_f64().filter(|&v| v > 0.0) {
+                                hrv_t.push((*ds + i as i64 * step_ds, val));
+                            }
+                        }
+                    }
+                }
+            } else if *tag == 0x47 {
+                if let Ok(v) = serde_json::from_str::<Value>(jstr) {
+                    if let Some(s) = v["motion_seconds"].as_f64() {
+                        motion_t.push((*ds, s));
+                    }
+                }
+            }
+        }
+        hr_t.sort_by_key(|&(ds, _)| ds);
+        hrv_t.sort_by_key(|&(ds, _)| ds);
+        motion_t.sort_by_key(|&(ds, _)| ds);
+        let stages = stage_night_from_signals(start_ds, end_ds, &hr_t, &hrv_t, &motion_t);
+        if stages.is_empty() {
+            results.push(Value::Null);
+            continue;
+        }
+        let n = stages.len() as f64;
+        let pct = |code: i64| (stages.iter().filter(|&&c| c == code).count() as f64 / n * 100.0).round();
+        let asleep = stages.iter().filter(|&&c| (1..=3).contains(&c)).count() as f64;
+        results.push(json!({
+            "start_ds": start_ds,
+            "end_ds": end_ds,
+            "captured_unix": captured_unix,
+            "epochs": stages.len(),
+            "in_bed_min": n * 0.5,
+            "asleep_min": asleep * 0.5,
+            "efficiency_pct": (asleep / n * 100.0).round(),
+            "deep_pct": pct(1),
+            "light_pct": pct(2),
+            "rem_pct": pct(3),
+            "wake_pct": pct(4),
+            "source": "signals",
+            "stages": stages,
+        }));
+    }
+    Some(Value::Array(results))
 }
 
 /// Nights the ring recorded but never declared.
@@ -1550,15 +1912,33 @@ pub fn build_summary(
         })
         .collect();
 
+    let bedtime_overrides = read_bedtime_overrides(db);
     let mut nights: Vec<Night> = beds
         .iter()
-        .map(|bed| Night {
-            start_ds: bed.start_ds,
-            end_ds: bed.end_ds,
-            raw_start_ds: bed.raw_start_ds,
-            raw_end_ds: bed.raw_end_ds,
-            captured_unix: bed.captured_unix,
-            ..Default::default()
+        .map(|bed| {
+            let mut nt = Night {
+                start_ds: bed.start_ds,
+                end_ds: bed.end_ds,
+                raw_start_ds: bed.raw_start_ds,
+                raw_end_ds: bed.raw_end_ds,
+                captured_unix: bed.captured_unix,
+                ..Default::default()
+            };
+            let key_cu = format!("{}:{}", bed.raw_start_ds, bed.captured_unix);
+            let key_raw = format!("{}", bed.raw_start_ds);
+            let key_start_cu = format!("{}:{}", bed.start_ds, bed.captured_unix);
+            let key_start = format!("{}", bed.start_ds);
+            if let Some(ov) = bedtime_overrides
+                .get(&key_cu)
+                .or_else(|| bedtime_overrides.get(&key_raw))
+                .or_else(|| bedtime_overrides.get(&key_start_cu))
+                .or_else(|| bedtime_overrides.get(&key_start))
+            {
+                nt.start_ds = ov.start_ds;
+                nt.end_ds = ov.end_ds;
+                nt.manual_bedtime = true;
+            }
+            nt
         })
         .collect();
     let find_night = |ds: i64, captured_unix: i64, nights: &[Night]| {
@@ -1757,7 +2137,38 @@ pub fn build_summary(
             .unwrap_or_default();
         // smooth once (≈2.5 min window) — used for the displayed hypnogram AND the
         // derived metrics, so the two always agree.
-        let full_stages = smooth_stages(&raw_stages, 5);
+        let mut full_stages = smooth_stages(&raw_stages, 5);
+        if !full_stages.is_empty()
+            && !full_stages.contains(&1)
+            && hyp.and_then(|h| h["deep_pct"].as_f64()).unwrap_or(0.0) == 0.0
+            && nt.hr_t.len() >= 12
+        {
+            full_stages = refine_deep_stages(
+                &full_stages,
+                &nt.hr_t,
+                &nt.motion_t,
+                nt.start_ds,
+                nt.end_ds,
+            );
+        }
+        let valid_stage_count = full_stages.iter().filter(|c| (1..=4).contains(*c)).count();
+        let (deep_pct_val, light_pct_val, rem_pct_val, wake_pct_val) = if valid_stage_count > 0
+            && full_stages.contains(&1)
+            && hyp.and_then(|h| h["deep_pct"].as_f64()).unwrap_or(0.0) == 0.0
+        {
+            let pct_of = |code: i64| -> Value {
+                let c = full_stages.iter().filter(|&&x| x == code).count();
+                json!(((c as f64 / valid_stage_count as f64) * 100.0).round() as i64)
+            };
+            (pct_of(1), pct_of(2), pct_of(3), pct_of(4))
+        } else {
+            (
+                hyp.map(|h| h["deep_pct"].clone()).unwrap_or(Value::Null),
+                hyp.map(|h| h["light_pct"].clone()).unwrap_or(Value::Null),
+                hyp.map(|h| h["rem_pct"].clone()).unwrap_or(Value::Null),
+                hyp.map(|h| h["wake_pct"].clone()).unwrap_or(Value::Null),
+            )
+        };
         let stage_cells = (!full_stages.is_empty()).then(|| downsample_codes(&full_stages, 120));
         let complete_staging =
             !full_stages.is_empty() && full_stages.iter().all(|c| (1..=4).contains(c));
@@ -1772,6 +2183,8 @@ pub fn build_summary(
             autonomic_by_stage(&nt.hrv_t, &nt.hr_t, &full_stages, nt.start_ds, nt.end_ds);
         let start_unix = unix_s_at(nt.start_ds, nt.captured_unix);
         let end_unix = unix_s_at(nt.end_ds, nt.captured_unix);
+        let raw_start_unix = unix_s_at(nt.raw_start_ds, nt.captured_unix);
+        let raw_end_unix = unix_s_at(nt.raw_end_ds, nt.captured_unix);
         // time-true lane points on this night's clock (see `timed_series`)
         let timed = |v: &[(i64, f64)], dp: i32| {
             timed_series(v, nt.start_ds, nt.end_ds, SERIES_MAX, dp, |ds| {
@@ -1839,6 +2252,9 @@ pub fn build_summary(
             "raw_start_ds": nt.raw_start_ds,
             "raw_end_ds": nt.raw_end_ds,
             "bedtime_adjusted": nt.start_ds != nt.raw_start_ds || nt.end_ds != nt.raw_end_ds,
+            "bedtime_manual": nt.manual_bedtime,
+            "raw_start": hm(raw_start_unix, tz),
+            "raw_end": hm(raw_end_unix, tz),
             "start": hm(start_unix, tz),
             "end": hm(end_unix, tz),
             "in_bed_h": ((nt.end_ds - nt.start_ds) as f64 / 10.0 / 3600.0 * 10.0).round() / 10.0,
@@ -1846,10 +2262,10 @@ pub fn build_summary(
             "rhr": night_rhr,
             "skin_temp": nightly_skin_temp(&nt.temp).map(|x| (x * 10.0).round() / 10.0),
             "spo2_mean": mean(&nt.spo2).map(|x| x.round()),
-            "deep_pct": hyp.map(|h| h["deep_pct"].clone()),
-            "light_pct": hyp.map(|h| h["light_pct"].clone()),
-            "rem_pct": hyp.map(|h| h["rem_pct"].clone()),
-            "wake_pct": hyp.map(|h| h["wake_pct"].clone()),
+            "deep_pct": deep_pct_val,
+            "light_pct": light_pct_val,
+            "rem_pct": rem_pct_val,
+            "wake_pct": wake_pct_val,
             "efficiency": hyp.map(|h| h["efficiency_pct"].clone()),
             "stages": stage_cells,
             "staging_source": hyp.and_then(|h| h["source"].as_str()),
@@ -1890,8 +2306,8 @@ pub fn build_summary(
                 onset_latency_min: metrics["sol_min"].as_f64(),
                 waso_min: metrics["waso_min"].as_f64(),
                 awakenings: metrics["awakenings"].as_f64(),
-                deep_pct: hyp.and_then(|h| h["deep_pct"].as_f64()),
-                rem_pct: hyp.and_then(|h| h["rem_pct"].as_f64()),
+                deep_pct: deep_pct_val.as_f64(),
+                rem_pct: rem_pct_val.as_f64(),
                 rhr: night_rhr,
                 rhr_baseline,
                 hrv_ms: night_hrv,
@@ -3052,4 +3468,138 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn refine_deep_stages_recovers_n3_bouts_from_zero_deep_gen4_hypnogram() {
+        // Simulate an 8-hour night (960 x 30s epochs) where SleepNet produced only
+        // Wake (4), REM (3), and Light (2) with 0% Deep (1) due to missing PPG amplitude.
+        let start_ds = 10_000i64;
+        let end_ds = start_ds + 960 * 300;
+        let mut stages = vec![2i64; 960];
+        for s in stages.iter_mut().take(30) {
+            *s = 4;
+        }
+        for s in stages.iter_mut().skip(700).take(60) {
+            *s = 3;
+        }
+        // Build 5-minute HR/HRV samples: quiet low-HR N3 bouts in the first half of the night
+        let mut hr_t = Vec::new();
+        let mut hrv_t = Vec::new();
+        let mut motion_t = Vec::new();
+        for i in 0..96 {
+            let ds = start_ds + i * 3_000;
+            let in_n3_bout = (8..22).contains(&i) || (30..40).contains(&i);
+            let hr = if in_n3_bout { 51.0 } else { 58.0 };
+            let hrv = if in_n3_bout { 46.0 } else { 36.0 };
+            hr_t.push((ds, hr));
+            hrv_t.push((ds, hrv));
+        }
+        for e in 0..960 {
+            let ds = start_ds + e * 300;
+            let m = if e < 30 { 8.0 } else { 0.0 };
+            motion_t.push((ds, m));
+        }
+
+        let refined = refine_deep_stages(&stages, &hr_t, &motion_t, start_ds, end_ds);
+        let deep_epochs = refined.iter().filter(|&&c| c == 1).count();
+        let deep_pct = (deep_epochs as f64 / refined.len() as f64) * 100.0;
+        assert!(
+            (10.0..=28.0).contains(&deep_pct),
+            "expected physiological N3 deep sleep recovery (10-28%), got {deep_pct:.1}% ({deep_epochs} epochs)"
+        );
+        // REM and Wake epochs must remain untouched.
+        assert_eq!(refined[0], 4);
+        assert_eq!(refined[720], 3);
+    }
+
+    #[test]
+    fn stage_night_from_signals_produces_complete_four_stage_hypnogram() {
+        let start_ds = 100_000i64;
+        let end_ds = start_ds + 800 * 300;
+        let mut hr_t = Vec::new();
+        let mut hrv_t = Vec::new();
+        let mut motion_t = Vec::new();
+        for i in 0..80 {
+            let ds = start_ds + i * 3_000;
+            let hr = if i < 4 {
+                68.0
+            } else if (6..20).contains(&i) {
+                50.0
+            } else if (55..68).contains(&i) {
+                61.0
+            } else {
+                56.0
+            };
+            let hrv = if (55..68).contains(&i) { 26.0 } else { 42.0 };
+            hr_t.push((ds, hr));
+            hrv_t.push((ds, hrv));
+        }
+        for e in 0..800 {
+            let ds = start_ds + e * 300;
+            let m = if e < 20 || e > 785 { 9.0 } else { 0.0 };
+            motion_t.push((ds, m));
+        }
+        let stages = stage_night_from_signals(start_ds, end_ds, &hr_t, &hrv_t, &motion_t);
+        assert_eq!(stages.len(), 800);
+        assert!(stages.contains(&1));
+        assert!(stages.contains(&2));
+        assert!(stages.contains(&4));
+    }
+
+    #[test]
+    fn manual_bedtime_override_updates_summary_bounds_and_resets_cleanly() {
+        let dir = std::env::temp_dir().join(format!(
+            "oura-bedtime-override-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("oura.db");
+        drop(Store::open(&db).unwrap());
+
+        let base_unix = 1_780_000_000i64;
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 1000, X'00000000', ?1, ?2)",
+            rusqlite::params![format!("{{\"unix_time\":{base_unix}}}"), base_unix],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 118, 'bedtime_period', 298000, X'00', '{\"bedtime_start_ds\":10000,\"bedtime_end_ds\":298000}', ?1)",
+            rusqlite::params![base_unix + 30_000],
+        )
+        .unwrap();
+        drop(conn);
+
+        write_bedtime_override(
+            &db,
+            10_000,
+            Some(base_unix + 30_000),
+            Some(16_000),
+            Some(292_000),
+        )
+        .unwrap();
+        let sum = build_summary(&db, 0.0, &NoModelRunner).unwrap();
+        let night = &sum["nights"].as_array().unwrap()[0];
+        assert_eq!(night["start_ds"], 16_000);
+        assert_eq!(night["end_ds"], 292_000);
+        assert_eq!(night["raw_start_ds"], 10_000);
+        assert_eq!(night["raw_end_ds"], 298_000);
+        assert_eq!(night["bedtime_manual"], true);
+
+        write_bedtime_override(&db, 10_000, Some(base_unix + 30_000), None, None).unwrap();
+        let sum_reset = build_summary(&db, 0.0, &NoModelRunner).unwrap();
+        let night_reset = &sum_reset["nights"].as_array().unwrap()[0];
+        assert_eq!(night_reset["start_ds"], 10_000);
+        assert_eq!(night_reset["end_ds"], 298_000);
+        assert_eq!(night_reset["bedtime_manual"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
+

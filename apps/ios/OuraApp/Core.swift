@@ -124,8 +124,11 @@ enum Core {
                     return (previous, "Not enough saved sleep data to refresh this night.")
                 }
                 let previousStart = previous.night(forDay: request.day)?.start_ds
+                let rawStart = night.raw_start_ds
                 if let index = updated.nights.firstIndex(where: {
-                    $0.start_ds == start || (previousStart != nil && $0.start_ds == previousStart)
+                    $0.start_ds == start
+                        || (previousStart != nil && $0.start_ds == previousStart)
+                        || (rawStart != nil && $0.raw_start_ds == rawStart)
                 }) {
                     updated.nights[index] = night
                 } else { updated.nights.append(night) }
@@ -195,8 +198,16 @@ enum Core {
         let storeDigest = EventStore.Events(path: DB.readPath()).digest()
         let sleepPlan = automaticSleepPlan(nights: base.nights, previous: validPrevious,
                                            revalidateLatest: storeDigest == nil || validPrevious?.analysis_digest != storeDigest)
-        var staged = sleepPlan.saved
-        if sleepPlan.pending.isEmpty,
+        var staged = SleepStaging.cachedStages(nights: base.nights)
+        staged.merge(sleepPlan.saved) { _, fresh in fresh }
+        var sleepPending = sleepPlan.pending
+        for night in base.nights.prefix(7) {
+            guard night.start_ds != nil, night.end_ds != nil, night.hasSignals,
+                  staged[night.stagingKey] == nil,
+                  !sleepPending.contains(where: { $0.stagingKey == night.stagingKey }) else { continue }
+            sleepPending.append(night)
+        }
+        if sleepPending.isEmpty,
            let rAct = ActivityModel.cachedRun(profile: profile, storeDigest: storeDigest),
            let rIll = IllnessModel.cachedRun(profile: profile, storeDigest: storeDigest) {
             s.analysis_digest = storeDigest
@@ -225,13 +236,13 @@ enum Core {
                 progress("Mapping ring clock")
                 let clock = EventStore.RingClock(events: events)
                 if events.error != nil || AnalysisRun.cancelled { return previous ?? base }
-                let rSleep = sleepPlan.pending.isEmpty
+                let rSleep = sleepPending.isEmpty
                     ? (staged: [String: [Int]](), error: Optional<String>.none)
-                    : SleepStaging.run(nights: sleepPlan.pending, events: events, clock: clock,
+                    : SleepStaging.run(nights: sleepPending, events: events, clock: clock,
                                        pruneCache: false, progress: progress)
                 staged.merge(rSleep.staged) { _, fresh in fresh }
                 sleepErr = rSleep.error
-                dlog("models", "sleep automatic saved=\(sleepPlan.saved.count) pending=\(sleepPlan.pending.count)")
+                dlog("models", "sleep automatic saved=\(staged.count) pending=\(sleepPending.count)")
                 stageFinished("sleep")
                 if AnalysisRun.cancelled { return previous ?? base }
                 let rAct = ActivityModel.run(profile: profile, events: events, clock: clock,
@@ -279,7 +290,10 @@ enum Core {
 
     private static func applySleepStages(_ staged: [String: [Int]], to s: inout Summary) {
         for i in s.nights.indices {
-            guard s.nights[i].start_ds != nil, let stages = staged[s.nights[i].stagingKey], !stages.isEmpty else { continue }
+            guard s.nights[i].start_ds != nil, var stages = staged[s.nights[i].stagingKey], !stages.isEmpty else { continue }
+            if !stages.contains(1) {
+                stages = Sleep.refineDeepStages(stages: stages, night: s.nights[i])
+            }
             s.nights[i].stages = stages
             s.nights[i].stages_full = stages
             s.nights[i].staging_source = "sleepnet"
@@ -291,6 +305,7 @@ enum Core {
             s.nights[i].rem_pct = pct(3); s.nights[i].wake_pct = pct(4)
             let asleep = total - Double(stages.filter { $0 == 4 }.count)
             s.nights[i].efficiency = s.nights[i].stagingComplete ? (asleep / total * 100).rounded() : nil
+            s.nights[i].autonomic = Sleep.autonomic(night: s.nights[i], stages: Sleep.smooth(stages, 5))
             s.nights[i].sleep_score = nil // The base score describes a different hypnogram.
         }
         // Staging can be partial while model inputs are still arriving. Never replace
@@ -303,3 +318,4 @@ enum Core {
     }
     #endif
 }
+

@@ -16,12 +16,17 @@ from pathlib import Path
 import torch
 
 from _common import resolve_db, resolve_models_dir
-from sleep_inputs import aligned_stages, collect_inputs
+from sleep_inputs import aligned_stages, collect_inputs, refine_deep_stages
 
 REPO = Path(__file__).resolve().parent.parent
-TZ = 1
+TZ = 1.0
 MODEL_NAME = "sleepnet_moonstone_1_2_0.pt"
-MODEL = str(resolve_models_dir(REPO, MODEL_NAME) / MODEL_NAME)
+_model_path = resolve_models_dir(REPO, MODEL_NAME) / MODEL_NAME
+if not _model_path.is_file():
+    _ios_ptl = REPO / "apps" / "ios" / "OuraApp" / "Resources" / "models" / "sleepnet_moonstone_1_2_0.ptl"
+    if _ios_ptl.is_file():
+        _model_path = _ios_ptl
+MODEL = str(_model_path)
 STAGE = {1: "DEEP", 2: "LIGHT", 3: "REM", 4: "WAKE"}
 
 JSON = "--json" in sys.argv
@@ -35,7 +40,7 @@ else:
     rest = args
 db_arg = rest[0] if rest else None
 if len(rest) > 1:
-    TZ = int(rest[1])
+    TZ = float(rest[1])
 DB = resolve_db(db_arg, REPO)
 
 con = sqlite3.connect(str(DB))
@@ -57,10 +62,37 @@ def hm(ms_):
 MODEL_M = torch.jit.load(MODEL, map_location="cpu").eval()
 
 
+def _collect_window_vitals(start_ds, end_ds, bed_cu):
+    start_ms, end_ms = ms(start_ds, bed_cu), ms(end_ds, bed_cu)
+    hr_t, hrv_t, motion_t = [], [], []
+    for ds, tag, js, cu in rows:
+        if not start_ds - 6000 <= ds <= end_ds + 6000:
+            continue
+        t = ms(ds, cu)
+        if not start_ms - 600000 <= t <= end_ms + 600000:
+            continue
+        if abs(t - (start_ms + (ds - start_ds) * 100)) > 300000:
+            continue
+        if tag == 0x5D:
+            v = json.loads(js)
+            step_ds = max(1, int(v.get("interval_min", 5) or 5)) * 600
+            for i, x in enumerate(v.get("hr_bpm", []) or []):
+                if x and float(x) > 0:
+                    hr_t.append((ds + i * step_ds, float(x)))
+            for i, x in enumerate(v.get("rmssd_ms", []) or []):
+                if x and float(x) > 0:
+                    hrv_t.append((ds + i * step_ds, float(x)))
+        elif tag == 0x47:
+            v = json.loads(js)
+            if v.get("motion_seconds") is not None:
+                motion_t.append((ds, float(v["motion_seconds"])))
+    return hr_t, hrv_t, motion_t
+
+
 def score_window(start_ds, end_ds, captured_unix=None):
     """Score one bedtime window. Returns (out_dict, ts, stages) or (err_str, None, None)."""
-    bed_cu = captured_unix if captured_unix is not None else next((cu for ds, tag, js, cu in reversed(rows) if tag == 0x76 and
-                   json.loads(js).get("bedtime_start_ds") == start_ds), None)
+    bed_cu = captured_unix if captured_unix is not None else next((cu for ds, tag, js, cu in reversed(rows) if tag in (0x76, 0x4E) and
+                   (json.loads(js).get("bedtime_start_ds") == start_ds or json.loads(js).get("bedtime_start") == start_ds)), None)
     if bed_cu is not None and (not is_dated(_epochs, start_ds, bed_cu) or not is_dated(_epochs, end_ds, bed_cu)):
         return "sleep window clock is undated or ambiguous", None, None
     decoded_rows = ((ds, tag, json.loads(js), cu) for ds, tag, js, cu in rows)
@@ -94,6 +126,9 @@ def score_window(start_ds, end_ds, captured_unix=None):
     n = len(stages)
     if n == 0:
         return "SleepNet-moonstone returned zero epochs for this window", None, None
+    if 1 not in stages:
+        hr_t, hrv_t, motion_t = _collect_window_vitals(start_ds, end_ds, bed_cu)
+        stages = refine_deep_stages(stages, hr_t, hrv_t, motion_t, start_ds, end_ds)
     mins = {k: stages.count(c) * 0.5 for c, k in STAGE.items()}
     asleep = sum(mins[k] for k in ("DEEP", "LIGHT", "REM"))
     in_bed = n * 0.5

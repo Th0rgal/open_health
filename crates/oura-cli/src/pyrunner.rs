@@ -45,22 +45,30 @@ pub fn resolve_db(db: &Path) -> Result<PathBuf> {
     Ok(abs)
 }
 
-/// The repo venv's python (which has torch) if present, else `python3` on PATH.
+/// The repo venv's python (which has torch) if present, else `python3` / `python` on PATH.
 pub fn venv_python(root: &Path) -> PathBuf {
     if let Some(configured) = std::env::var_os("OURA_PYTHON") {
         return PathBuf::from(configured);
     }
 
+    let parent = root.parent().unwrap_or(root);
     let candidates = [
         root.join(".venv/bin/python"),
-        root.parent()
-            .unwrap_or(root)
-            .join("open_oura/.venv/bin/python"),
+        root.join(".venv/Scripts/python.exe"),
+        parent.join("open_oura/.venv/bin/python"),
+        parent.join("open_oura/.venv/Scripts/python.exe"),
     ];
-    candidates
-        .into_iter()
-        .find(|python| python.is_file())
-        .unwrap_or_else(|| PathBuf::from("python3"))
+    if let Some(found) = candidates.into_iter().find(|python| python.is_file()) {
+        return found;
+    }
+    #[cfg(windows)]
+    {
+        PathBuf::from("python")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("python3")
+    }
 }
 
 /// Locate one private desktop model in either the product checkout or the

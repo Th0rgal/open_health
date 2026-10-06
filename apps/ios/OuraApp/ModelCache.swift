@@ -86,7 +86,9 @@ enum ModelCacheStore {
     // unknown first epoch and was reported incomplete).
     // 9: Historical raw `ring_start` (0x41) events and decoder migration invalidate
     // ambiguous multi-reboot stall intervals.
-    static let version = 9
+    // 10: Oura Gen 4 0x75 sleep_temp_event, 0x60/0x80 IBI deduplication, and N3 deep
+    // sleep recovery.
+    static let version = 10
     static let cvaFile = "cva-model-cache.json"
     static let illnessFile = "illness-model-cache.json"
     static let activityFile = "activity-model-cache.json"

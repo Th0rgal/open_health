@@ -19,8 +19,12 @@ const cap = (s) => esc(s).replace(/^./, (c) => c.toUpperCase());
 const kfmt = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(Math.round(n)));
 
 let CURRENT_PROFILE = null;
-let CURRENT_TZ = 0; // whole hours from UTC, as the summary reports it
+let CURRENT_TZ = 0; // hours from UTC, as the summary reports it
 let LAST_DEVICE_SERIAL = null;
+const browserTzOffset = () => {
+  const off = -new Date().getTimezoneOffset() / 60;
+  return Number.isFinite(off) ? off : 0;
+};
 
 // ── local dashboard fetch helpers ──────────────────────────────────────────
 // Every mutating endpoint is gated by the X-Oura-Dash header; these centralize it
@@ -306,7 +310,7 @@ function dayCard(d, ymd) {
 // on its own and fills in when it arrives.
 let HR_QUARTER_LOAD = null;
 function fillDayHr(ymd, meta, strip) {
-  const request = HR_QUARTER_LOAD ||= fetch("/api/hourly-hr?minutes=15").then((r) => r.json());
+  const request = HR_QUARTER_LOAD ||= fetch(`/api/hourly-hr?minutes=15&tz=${browserTzOffset()}`).then((r) => r.json());
   request
     .then((j) => {
       if (j.error) throw new Error(j.error);
@@ -813,10 +817,13 @@ function exportDayJson(d, ymd, axis) {
   const n = nightForDay(d, ymd);
   const debt = ((d.sleep_debt || {}).days || []).find((x) => x.date === ymd) || null;
   const hr = HOURLY_HR || {};
+  const tzOff = d.tz ?? browserTzOffset();
+  const tzName = (typeof Intl !== "undefined" && Intl.DateTimeFormat && Intl.DateTimeFormat().resolvedOptions().timeZone)
+    || `UTC${tzOff >= 0 ? "+" : ""}${tzOff}`;
   const payload = {
     day: ymd, kind: "day", generated_at: new Date().toISOString(),
-    timezone: `UTC${(d.tz || 0) >= 0 ? "+" : ""}${d.tz || 0}`,
-    tz_offset: d.tz || 0,
+    timezone: tzName,
+    tz_offset: tzOff,
     app_version: "web", profile: d.profile || null,
     sleep: n ? { night: n, sleep_debt: debt } : null,
     activity: {
@@ -967,8 +974,14 @@ function sleepInterpretation(d, n, m) {
 function sleepSection(d, ymd, axis, cursor) {
   const sec = el("section", "rpt-sec");
   sec.id = "sec-sleep";
-  sec.append(secHead("Sleep"));
   const n = nightForDay(d, ymd);
+  const canEditBedtime = !!(n && n.start_ds != null && n.end_ds != null);
+  const editToggle = canEditBedtime ? el("button", "bedtime-edit-btn", n.bedtime_manual ? "Bedtime · edited" : "Adjust bedtime") : null;
+  if (editToggle) {
+    editToggle.type = "button";
+    editToggle.title = "Adjust bedtime and wake-up window for this night";
+  }
+  sec.append(secHead("Sleep", editToggle));
   if (!n) {
     sec.append(el("div", "ad-muted", "No sleep ended on this day in the ring's data."));
     return sec;
@@ -981,9 +994,86 @@ function sleepSection(d, ymd, axis, cursor) {
     statTile("Time in bed", num(n.in_bed_h) + " h") +
     statTile("Asleep", asleepH != null ? asleepH.toFixed(1) + " h" : "—") +
     statTile("Efficiency", n.efficiency != null ? n.efficiency + "%" : "—") +
-    statTile("Bedtime", `${n.start}–${n.end}`);
+    statTile(n.bedtime_manual ? "Bedtime · edited" : "Bedtime", `${n.start}–${n.end}`);
   sec.append(strip);
-  if (n.staging_complete === false)
+  if (canEditBedtime) {
+    const editor = el("form", "bedtime-editor");
+    editor.hidden = true;
+    const rawRange = n.raw_start && n.raw_end ? `${n.raw_start}–${n.raw_end}` : null;
+    editor.innerHTML =
+      `<label class="be-field"><span>Bedtime</span><input type="time" name="start" value="${esc(n.start || "23:00")}" required></label>` +
+      `<span class="be-sep">→</span>` +
+      `<label class="be-field"><span>Wake-up</span><input type="time" name="end" value="${esc(n.end || "07:00")}" required></label>` +
+      `<div class="be-actions">` +
+      `<button type="submit" class="be-save">Apply</button>` +
+      (n.bedtime_manual ? `<button type="button" class="be-reset" title="Restore ring-detected window${rawRange ? ` (${rawRange})` : ""}">Reset</button>` : "") +
+      `<button type="button" class="be-cancel">Cancel</button>` +
+      `</div>`;
+    const toggleEditor = () => {
+      editor.hidden = !editor.hidden;
+      editToggle.classList.toggle("active", !editor.hidden);
+    };
+    editToggle.addEventListener("click", toggleEditor);
+    const bedTile = strip.lastElementChild;
+    if (bedTile) {
+      bedTile.classList.add("ss-interactive");
+      bedTile.title = "Click to adjust bedtime and wake-up";
+      bedTile.addEventListener("click", toggleEditor);
+    }
+    editor.querySelector(".be-cancel")?.addEventListener("click", () => {
+      editor.hidden = true;
+      editToggle.classList.remove("active");
+    });
+    const submitOverride = async (payload, okMsg) => {
+      try {
+        const res = await (await postDash("/api/bedtime", payload)).json();
+        if (!res.ok) {
+          toast(res.error || "Could not update bedtime.", "error");
+          return;
+        }
+        toast(okMsg, "ok");
+        const fresh = await (await fetch(`/api/summary?tz=${browserTzOffset()}`)).json();
+        if (!fresh.error) {
+          CURRENT_TZ = fresh.tz || 0;
+          await load();
+          openDayPage(fresh, ymd, null, true);
+        }
+      } catch (_) {
+        toast("Couldn't reach the local server.", "error");
+      }
+    };
+    editor.querySelector(".be-reset")?.addEventListener("click", () => {
+      submitOverride(
+        { raw_start_ds: n.raw_start_ds ?? n.start_ds, captured_unix: n.captured_unix ?? 0, reset: true },
+        "Restored ring-detected sleep window."
+      );
+    });
+    editor.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const fd = new FormData(editor);
+      const startHM = String(fd.get("start") || n.start);
+      const endHM = String(fd.get("end") || n.end);
+      let dStart = parseHM(startHM) - parseHM(n.start);
+      if (dStart > 720) dStart -= 1440;
+      if (dStart < -720) dStart += 1440;
+      let dEnd = parseHM(endHM) - parseHM(n.end);
+      if (dEnd > 720) dEnd -= 1440;
+      if (dEnd < -720) dEnd += 1440;
+      const newStartDs = Math.round(n.start_ds + dStart * 600);
+      let newEndDs = Math.round(n.end_ds + dEnd * 600);
+      if (newEndDs <= newStartDs) newEndDs += 1440 * 600;
+      if (newEndDs - newStartDs < 30 * 600 || newEndDs - newStartDs > 20 * 36000) {
+        toast("Sleep window must be between 30 minutes and 20 hours.", "error");
+        return;
+      }
+      submitOverride(
+        { raw_start_ds: n.raw_start_ds ?? n.start_ds, captured_unix: n.captured_unix ?? 0, start_ds: newStartDs, end_ds: newEndDs },
+        `Updated sleep window (${startHM}–${endHM}).`
+      );
+    });
+    sec.append(editor);
+  }
+  if (staged && n.staging_complete === false)
     sec.append(el("p", "error", "Incomplete sleep analysis. Gaps mean no data, not awake time; sleep metrics are withheld."));
   if (staged) sec.append(stageLegend());
   else sec.append(el("p", "hr-note", "Sleep stages are unavailable for this night. The lanes below are what the ring recorded overnight."));
@@ -1237,7 +1327,7 @@ function heartSection(ymd, axis, cursor) {
     const seq = ++HR_SEQ; // a slower earlier response must not overwrite a newer one
     sw.querySelectorAll("button").forEach((b) => b.classList.toggle("on", +b.dataset.min === HR_BIN_MIN));
     chart.replaceChildren(el("div", "skeleton skeleton-block"));
-    fetch(`/api/hourly-hr?minutes=${HR_BIN_MIN}`)
+    fetch(`/api/hourly-hr?minutes=${HR_BIN_MIN}&tz=${browserTzOffset()}`)
       .then((r) => r.json())
       .then((j) => {
         if (seq !== HR_SEQ) return;
@@ -2071,7 +2161,7 @@ async function load() {
   const seq = ++LOAD_SEQ;
   let d;
   try {
-    d = await (await fetch("/api/summary")).json();
+    d = await (await fetch(`/api/summary?tz=${browserTzOffset()}`)).json();
   } catch (e) {
     if (seq === LOAD_SEQ) showLoadError("Could not reach the local server.");
     return;

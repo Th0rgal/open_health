@@ -42,6 +42,8 @@ struct NightTimedSeries: Codable {
 struct NightRow: Codable, Identifiable {
     var date: String?; var ymd: String?; var start_ds: Int64?; var end_ds: Int64?
     var raw_start_ds: Int64?; var raw_end_ds: Int64?; var bedtime_adjusted: Bool?
+    var bedtime_manual: Bool?
+    var raw_start: String?; var raw_end: String?
     var start: String?; var end: String?
     // supplied by the shared brain: the morning you woke (day the night belongs to),
     // absolute bounds, and how the ring clock was tied to wall time for this night.
@@ -73,6 +75,11 @@ struct NightRow: Codable, Identifiable {
     var sleep_score: SleepScore? = nil
     var id: String { (date ?? "") + (start ?? "") }
     var hasHypnogram: Bool { (hypnogram?.count ?? 0) > 1 }
+    var isBedtimeManual: Bool { bedtime_manual ?? false }
+    var hasSignals: Bool {
+        !(series_t?.hr.isEmpty ?? true) || !(series?.hr.isEmpty ?? true)
+            || !(series_t?.motion.isEmpty ?? true) || !(series?.motion.isEmpty ?? true)
+    }
 }
 /// One component of the literature-based sleep score, with the paper behind it.
 struct SleepScoreComponent: Codable, Identifiable {
@@ -511,3 +518,47 @@ private func clockLabel(_ hour: Double) -> String {
     let totalMinutes = Int((hour * 60).rounded())
     return String(format: "%02d:%02d", (totalMinutes / 60) % 24, totalMinutes % 60)
 }
+
+/// Persists manual bedtime and wake-up adjustments in `bedtime_overrides.json` beside
+/// `oura.db` so `oura-summary` (FFI) reads the exact same format on iOS and desktop.
+enum BedtimeOverrideStore {
+    struct Entry: Codable, Equatable {
+        var raw_start_ds: Int64
+        var captured_unix: Int64
+        var start_ds: Int64
+        var end_ds: Int64
+    }
+
+    static func fileURL(for dbPath: String? = nil) -> URL {
+        let path = dbPath ?? DB.readPath()
+        let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
+        return dir.appendingPathComponent("bedtime_overrides.json")
+    }
+
+    static func load(dbPath: String? = nil) -> [Entry] {
+        let url = fileURL(for: dbPath)
+        guard let data = try? Data(contentsOf: url),
+              let entries = try? JSONDecoder().decode([Entry].self, from: data) else {
+            return []
+        }
+        return entries
+    }
+
+    static func save(rawStartDs: Int64, capturedUnix: Int64, bounds: (startDs: Int64, endDs: Int64)?, dbPath: String? = nil) {
+        var list = load(dbPath: dbPath)
+        list.removeAll { $0.raw_start_ds == rawStartDs && ($0.captured_unix == capturedUnix || $0.captured_unix == 0 || capturedUnix == 0) }
+        if let bounds, bounds.endDs > bounds.startDs {
+            list.append(Entry(raw_start_ds: rawStartDs, captured_unix: capturedUnix, start_ds: bounds.startDs, end_ds: bounds.endDs))
+        }
+        guard let data = try? JSONEncoder().encode(list) else { return }
+        let primary = fileURL(for: dbPath)
+        try? data.write(to: primary, options: .atomic)
+        if dbPath == nil {
+            let writable = DB.url.deletingLastPathComponent().appendingPathComponent("bedtime_overrides.json")
+            if writable != primary {
+                try? data.write(to: writable, options: .atomic)
+            }
+        }
+    }
+}
+
