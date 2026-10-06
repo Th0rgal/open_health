@@ -759,8 +759,8 @@ final class StabilityTests: XCTestCase {
             hrvTimed.append([Double(t), quiet ? 42.0 : 32.0])
             t += 300
         }
-        var night = NightRow(date: "2026-10-05", start: "00:11", end: "08:26", in_bed_h: 8.2,
-                             start_unix: startUnix, end_unix: endUnix)
+        var night = NightRow(date: "2026-10-05", start: "00:11", end: "08:26",
+                             start_unix: startUnix, end_unix: endUnix, in_bed_h: 8.2)
         night.series_t = NightTimedSeries(hr: hrTimed, hrv: hrvTimed,
                                           motion: [[Double(startUnix + 60), 18.0], [Double(endUnix - 60), 15.0]])
 
