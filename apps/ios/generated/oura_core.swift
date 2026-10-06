@@ -1491,7 +1491,7 @@ public func eventsJson(dbPath: String, nameFilter: String, limit: UInt32) -> Str
 }
 /**
  * Copy the synced database to `out_path` as one self-contained SQLite file
- * (`VACUUM INTO`), so the exact on-phone ring records can be replayed on the
+ * (SQLite page backup), so the exact on-phone ring records can be replayed on the
  * desktop with `oura --db <file> …`. The auth key lives in the Keychain and is
  * never part of the database.
  */
@@ -1524,7 +1524,7 @@ public func hourlyHrJson(dbPath: String, tzOffset: Int64, days: UInt32) -> Strin
 }
 /**
  * A lightweight, model-free summary (device + data-health only) — kept as a fast
- * path / fallback. Returns `{ serials, device, event_counts, decoded_events }`.
+ * path / fallback. Returns `{ serials, device, event_counts, total_events, raw_events, decoded_events }`.
  */
 public func quickSummaryJson(dbPath: String) -> String {
     return try!  FfiConverterString.lift(try! rustCall() {
@@ -1592,13 +1592,13 @@ private var initializationResult: InitializationResult = {
     if (uniffi_oura_core_checksum_func_events_json() != 22398) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_oura_core_checksum_func_export_database() != 46626) {
+    if (uniffi_oura_core_checksum_func_export_database() != 30024) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_func_hourly_hr_json() != 21410) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_oura_core_checksum_func_quick_summary_json() != 19199) {
+    if (uniffi_oura_core_checksum_func_quick_summary_json() != 3685) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_func_rmssd() != 51404) {
