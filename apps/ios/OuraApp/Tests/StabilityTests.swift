@@ -786,5 +786,48 @@ final class StabilityTests: XCTestCase {
         try BedtimeOverrideStore.clear(forNightKey: "2026-10-05", dbPath: dbPath)
         XCTAssertNil(BedtimeOverrideStore.load(dbPath: dbPath)["2026-10-05"])
     }
-}
 
+    func testSummaryDecodesRustArrayAndLegacyDictUndatedReasons() throws {
+        let rustFormatJSON = """
+        {
+          "device": {
+            "total_events": 14957
+          },
+          "clock": {
+            "warnings": [],
+            "undated_reasons": [
+              {
+                "reason": "unanchored_boot",
+                "count": 12,
+                "span_h": 1.5,
+                "recoverable": true,
+                "message": "Waiting for time anchor"
+              }
+            ]
+          },
+          "nights": []
+        }
+        """.data(using: .utf8)!
+        let decodedRust = try JSONDecoder().decode(Summary.self, from: rustFormatJSON)
+        XCTAssertEqual(decodedRust.device?.total_events, 14957)
+        XCTAssertEqual(decodedRust.clock?.undated_reasons?["unanchored_boot"], 12)
+        XCTAssertEqual(decodedRust.clock?.undated_reason_entries.first?.recoverable, true)
+
+        let legacyFormatJSON = """
+        {
+          "device": {
+            "total_events": 500
+          },
+          "clock": {
+            "undated_reasons": {
+              "ambiguous_reboot_stall": 4
+            }
+          },
+          "nights": []
+        }
+        """.data(using: .utf8)!
+        let decodedLegacy = try JSONDecoder().decode(Summary.self, from: legacyFormatJSON)
+        XCTAssertEqual(decodedLegacy.clock?.undated_reasons?["ambiguous_reboot_stall"], 4)
+        XCTAssertEqual(decodedLegacy.clock?.undated_reason_entries.first?.reason, "ambiguous_reboot_stall")
+    }
+}

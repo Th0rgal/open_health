@@ -468,6 +468,17 @@ final class RingSync: ObservableObject {
         return out
     }
 
+    private static let preferredPeripheralKey = "ring.peripheral-uuid"
+
+    private var preferredPeripheralID: UUID? {
+        UserDefaults.standard.string(forKey: Self.preferredPeripheralKey).flatMap(UUID.init(uuidString:))
+    }
+
+    private func rememberPeripheral(_ id: UUID?) {
+        guard let id else { return }
+        UserDefaults.standard.set(id.uuidString, forKey: Self.preferredPeripheralKey)
+    }
+
     /// Connect, wire the inbound-frame pump, and run a full sync into the writable DB.
     private func rememberSerial(_ serial: String) {
         guard !serial.isEmpty, serial != "unknown" else { return }
@@ -503,7 +514,7 @@ final class RingSync: ObservableObject {
 
         dlog("reset", "start — target \(confirmSerial)")
         status = "looking for \(confirmSerial)…"
-        let t = BLETransport(nameContains: "Oura")
+        let t = BLETransport(nameContains: "Oura", preferredPeripheralID: preferredPeripheralID)
         transport = t
         do {
             try await t.connect()
@@ -525,6 +536,7 @@ final class RingSync: ObservableObject {
         do {
             let serial = try await s.factoryReset(keyHex: keyHex, confirmSerial: confirmSerial)
             Keychain.clearKey()
+            UserDefaults.standard.removeObject(forKey: Self.preferredPeripheralKey)
             lastReport = nil
             dlog("reset", "wiped \(serial)")
             status = "\(serial) wiped. Its old key is gone — pair it again to start over."
@@ -595,6 +607,7 @@ final class RingSync: ObservableObject {
             // will not hand it back.
             Keychain.saveKey(report.keyHex)
             rememberSerial(report.serial)
+            rememberPeripheral(t.connectedPeripheralID)
             dlog("pair", "paired \(report.serial) minted=\(report.minted)")
             status = "paired with \(report.serial) — key saved to this iPhone. Back it up: it can't be read off the ring."
             return report.keyHex
@@ -649,22 +662,32 @@ final class RingSync: ObservableObject {
         // where the link dropped rather than starting over — reconnect-and-retry is
         // safe and cheap. Retries cover both connect failures and mid-sync drops.
         var connectedDuringRun = source == "resume"
-        for attempt in 1...max(1, maxAttempts) {
+        var excludedPeripherals = Set<UUID>()
+        var attempt = 1
+        var totalBudget = max(1, maxAttempts)
+        while attempt <= totalBudget {
             if paused || Task.isCancelled || !WorkCoordinator.shared.available { status = "Sync paused. Return to the app to resume."; return nil }
             attemptID = UUID().uuidString
             dlog("sync", "attempt=\(attempt) id=\(attemptID) run=\(runID)")
             if attempt > 1 {
-                dlog("sync", "attempt \(attempt)/\(maxAttempts); resuming from the checkpointed cursor in 3 s")
-                status = "Connection lost. Retrying (\(attempt) of \(maxAttempts))…"
-                do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { return nil }
+                let delayNs: UInt64 = excludedPeripherals.isEmpty ? 3_000_000_000 : 1_000_000_000
+                dlog("sync", "attempt \(attempt)/\(totalBudget); resuming in \(delayNs / 1_000_000_000) s (excludedRings=\(excludedPeripherals.count))")
+                if excludedPeripherals.isEmpty {
+                    status = "Connection lost. Retrying (\(attempt) of \(totalBudget))…"
+                }
+                do { try await Task.sleep(nanoseconds: delayNs) } catch { return nil }
                 guard !paused, WorkCoordinator.shared.available else { return nil }
             }
 
-            status = attempt == 1 ? "Looking for your ring nearby…" : "Looking for your ring again (attempt \(attempt)/\(maxAttempts))…"
+            if excludedPeripherals.isEmpty {
+                status = attempt == 1 ? "Looking for your ring nearby…" : "Looking for your ring again (attempt \(attempt)/\(totalBudget))…"
+            }
             dlog("sync", "connecting; scanning for the Oura service (name filter 'Oura')…")
             // fresh transport + session per attempt: the previous link is dead and
             // BLETransport's notification stream is per-connection.
-            let t = BLETransport(nameContains: "Oura")
+            let t = BLETransport(nameContains: "Oura",
+                                 preferredPeripheralID: preferredPeripheralID,
+                                 excludedPeripheralIDs: excludedPeripherals)
             transport = t
             do {
                 try await t.connect()
@@ -676,6 +699,12 @@ final class RingSync: ObservableObject {
                 // app holds it, leaving nothing to discover.
                 if case BLEError.poweredOff = error { status = "Bluetooth is unavailable. Check Bluetooth and app permissions in Settings."; return nil }
                 t.disconnect()
+                if case BLEError.ringNotAdvertising = error, !excludedPeripherals.isEmpty {
+                    connectionIssue = "Your ring wasn’t found"
+                    status = "Couldn’t find your paired ring. Another Oura ring nearby rejected this key — move the other ring away or place yours on its charger."
+                    clearIncompleteSync()
+                    return nil
+                }
                 if case BLEError.ringNotAdvertising(let count) = error, !connectedDuringRun {
                     connectionIssue = "Your ring wasn’t found"
                     status = count > 0
@@ -687,6 +716,7 @@ final class RingSync: ObservableObject {
                 }
                 dlog("sync", "connection failed: \(error)")
                 status = "Couldn’t connect. Place your ring on its charger and disconnect it from other phones."
+                attempt += 1
                 continue
             }
             connectedDuringRun = true
@@ -708,12 +738,19 @@ final class RingSync: ObservableObject {
                 let expectedAttempt = attemptID
                 let progress = SyncProgressBridge { [weak self] stage, bytesLeft, events in
                     guard self?.attemptID == expectedAttempt, self?.busy == true, self?.paused == false else { return }
-                    if stage == "setup" { Keychain.saveKey(key) }
+                    if stage == "setup" {
+                        Keychain.saveKey(key)
+                    }
+                    if events > 0 {
+                        self?.rememberPeripheral(t.connectedPeripheralID)
+                    }
                     self?.showProgress(stage: stage, bytesLeft: bytesLeft, events: events)
                 }
                 let report = try await s.sync(dbPath: DB.url.path, keyHex: key, progress: progress)
                 Keychain.saveKey(key)
                 rememberSerial(report.serial)
+                rememberPeripheral(t.connectedPeripheralID)
+
                 lastReport = report
                 let completedAt = Date()
                 lastSuccessfulSyncAt = completedAt
@@ -737,6 +774,18 @@ final class RingSync: ObservableObject {
                 pump = nil
                 t.disconnect() // release the (possibly half-dead) link before retrying
                 if Self.isAuthenticationFailure(error) {
+                    if let badID = t.connectedPeripheralID,
+                       excludedPeripherals.count < 2,
+                       excludedPeripherals.insert(badID).inserted {
+                        if badID == preferredPeripheralID {
+                            UserDefaults.standard.removeObject(forKey: Self.preferredPeripheralKey)
+                        }
+                        totalBudget = max(totalBudget, attempt + 1)
+                        dlog("sync", "ring id=\(badID.uuidString.suffix(12)) rejected auth key; excluding and scanning for another nearby ring")
+                        status = "Another Oura ring answered first; scanning for your paired ring…"
+                        attempt += 1
+                        continue
+                    }
                     status = "Your ring rejected this pairing key. Use the key from the phone that originally set up this ring."
                     dlog("sync", "not retrying: auth rejection is deterministic")
                     // Deterministic rejection — an eager resume would just re-fail.
@@ -744,9 +793,10 @@ final class RingSync: ObservableObject {
                     return nil
                 }
                 status = "Sync interrupted. Try connecting again."
+                attempt += 1
             }
         }
-        dlog("sync", "failed run=\(runID) attempts=\(maxAttempts) reason=\(status)")
+        dlog("sync", "failed run=\(runID) attempts=\(totalBudget) reason=\(status)")
         return nil
     }
 

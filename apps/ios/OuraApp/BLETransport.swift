@@ -63,8 +63,18 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     private var writeTimeout: DispatchWorkItem?
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
+    private var _connectedPeripheralID: UUID?
+    var connectedPeripheralID: UUID? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _connectedPeripheralID
+    }
     private var writeChar: CBCharacteristic?
     private let nameContains: String
+    private let preferredPeripheralID: UUID?
+    private let excludedPeripheralIDs: Set<UUID>
+    private var scanStartedAt: Date?
+
 
     private var notifyContinuation: AsyncStream<Data>.Continuation?
     // recreated per connect() so a reconnect gets a fresh, live stream — the previous
@@ -100,8 +110,12 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     // of the continuations so a success and a timeout can't both resume one (a crash).
     private let lock = NSLock()
 
-    init(nameContains: String = "Oura") {
+    init(nameContains: String = "Oura",
+         preferredPeripheralID: UUID? = nil,
+         excludedPeripheralIDs: Set<UUID> = []) {
         self.nameContains = nameContains
+        self.preferredPeripheralID = preferredPeripheralID
+        self.excludedPeripheralIDs = excludedPeripheralIDs
         super.init()
         // CoreBluetooth requires a SERIAL queue for delegate callbacks; a concurrent
         // global queue can deliver them out of order (e.g. a notify confirmation
@@ -160,6 +174,7 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     }
 
     private func startScan() {
+        scanStartedAt = Date()
         lock.lock(); stage = "scanning; no ring advertisement seen yet"; lock.unlock()
         dlog("ble", "scanning (unfiltered, allow duplicates); matching service \(RingUUID.service)")
         // UNFILTERED scan, matching done in didDiscover: an OS-side service filter
@@ -281,9 +296,31 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             let conn = advertisementData[CBAdvertisementDataIsConnectable] as? Bool
             dlog("scan", "saw '\(advName.isEmpty ? "<no name>" : advName)' id=\(peripheral.identifier.uuidString.suffix(12)) rssi=\(RSSI) services=[\(svc)] mfr=\(mfr) connectable=\(conn.map(String.init) ?? "?")")
         }
+        if excludedPeripheralIDs.contains(peripheral.identifier) {
+            let skipKey = "\(peripheral.identifier.uuidString)|excluded"
+            if loggedAds.insert(skipKey).inserted {
+                dlog("scan", "skipping excluded ring id=\(peripheral.identifier.uuidString.suffix(12)) (rejected auth key earlier this run)")
+            }
+            return
+        }
+        if let preferred = preferredPeripheralID,
+           peripheral.identifier != preferred,
+           !excludedPeripheralIDs.contains(preferred),
+           let started = scanStartedAt,
+           Date().timeIntervalSince(started) < 4.0 {
+            let waitKey = "\(peripheral.identifier.uuidString)|wait-preferred"
+            if loggedAds.insert(waitKey).inserted {
+                dlog("scan", "deferring non-preferred ring id=\(peripheral.identifier.uuidString.suffix(12)) briefly to let preferred ring \(preferred.uuidString.suffix(12)) answer")
+            }
+            return
+        }
+        guard self.peripheral == nil else { return }
         central.stopScan()
-        dlog("ble", "ring matched rssi=\(RSSI) otherDevices=\(otherDevices.count); connecting")
-        lock.lock(); stage = "GATT-connecting to the discovered ring"; lock.unlock()
+        dlog("ble", "ring matched id=\(peripheral.identifier.uuidString.suffix(12)) rssi=\(RSSI) otherDevices=\(otherDevices.count); connecting")
+        lock.lock()
+        stage = "GATT-connecting to the discovered ring"
+        _connectedPeripheralID = peripheral.identifier
+        lock.unlock()
         self.peripheral = peripheral
         peripheral.delegate = self
         central.connect(peripheral, options: nil)

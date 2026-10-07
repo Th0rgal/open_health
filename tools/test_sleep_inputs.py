@@ -100,7 +100,39 @@ class SleepInputTests(unittest.TestCase):
         self.assertEqual(undated_reason(epochs, 53000000, cap), "ambiguous_reboot_stall")
         self.assertTrue(is_dated(epochs, 59000000, cap))
 
+    def test_refine_deep_stages_recovers_early_cycle_n3_and_rejects_late_rem_hrv_surges(self):
+        start_ds = 100000
+        epochs = 980
+        end_ds = start_ds + epochs * 300
+        stages = [4] * 30 + [2] * (epochs - 38) + [4] * 8
+        hr_t = []
+        hrv_t = []
+        for i in range(98):
+            ds = start_ds + i * 3000
+            circadian_base = 63.0 - 10.0 * (i / 97.0)
+            if i < 3:
+                hr, hrv = 67.0, 25.0
+            elif 4 <= i <= 10:
+                hr, hrv = 58.0, 33.0
+            elif 23 <= i <= 26:
+                hr, hrv = 51.0, 29.0
+            elif 57 <= i <= 62:
+                hr, hrv = 51.5, 60.0
+            else:
+                hr, hrv = circadian_base, 31.0
+            hr_t.append((ds, hr))
+            hrv_t.append((ds, hrv))
+        motion_t = [
+            (start_ds + e * 300, 12.0 if (e < 28 or e >= 972) else 0.0)
+            for e in range(epochs)
+        ]
+        refined = refine_deep_stages(stages, hr_t, hrv_t, motion_t, start_ds, end_ds)
+        first_deep = refined.index(1)
+        self.assertGreaterEqual(first_deep, 38)
+        self.assertLessEqual(first_deep, 70)
+        self.assertGreaterEqual(refined[44:105].count(1), 30)
+        self.assertEqual(refined[570:620].count(1), 0)
+
 
 if __name__ == '__main__':
     unittest.main()
-

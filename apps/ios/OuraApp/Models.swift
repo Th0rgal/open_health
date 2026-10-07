@@ -215,11 +215,62 @@ struct ClockEpoch: Codable {
     var capture_min: Int64?; var capture_max: Int64?
     var anchors: Int?; var anchor_sources: [String]?; var latest_anchor_unix: Int64?
 }
+struct UndatedReasonEntry: Codable, Equatable {
+    var reason: String?
+    var count: Int?
+    var span_h: Double?
+    var recoverable: Bool?
+    var message: String?
+}
 struct ClockDiag: Codable {
     var epochs: [ClockEpoch] = []
     var warnings: [String] = []
-    var undated_reasons: [String: Int]? = nil
+    var undated_reason_entries: [UndatedReasonEntry] = []
     var undated_nights: [UndatedNight] = []
+    var undated_reasons: [String: Int]? {
+        var counts: [String: Int] = [:]
+        for entry in undated_reason_entries {
+            guard let reason = entry.reason, let count = entry.count else { continue }
+            counts[reason, default: 0] += count
+        }
+        return counts.isEmpty ? nil : counts
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case epochs, warnings, undated_reasons, undated_nights
+    }
+
+    init(epochs: [ClockEpoch] = [], warnings: [String] = [],
+         undated_reasons: [UndatedReasonEntry] = [], undated_nights: [UndatedNight] = []) {
+        self.epochs = epochs
+        self.warnings = warnings
+        self.undated_reason_entries = undated_reasons
+        self.undated_nights = undated_nights
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        epochs = (try? c.decodeIfPresent([ClockEpoch].self, forKey: .epochs)) ?? []
+        warnings = (try? c.decodeIfPresent([String].self, forKey: .warnings)) ?? []
+        if let arr = try? c.decodeIfPresent([UndatedReasonEntry].self, forKey: .undated_reasons) {
+            undated_reason_entries = arr
+        } else if let dict = try? c.decodeIfPresent([String: Int].self, forKey: .undated_reasons) {
+            undated_reason_entries = dict.keys.sorted().map { k in
+                UndatedReasonEntry(reason: k, count: dict[k])
+            }
+        } else {
+            undated_reason_entries = []
+        }
+        undated_nights = (try? c.decodeIfPresent([UndatedNight].self, forKey: .undated_nights)) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(epochs, forKey: .epochs)
+        try c.encode(warnings, forKey: .warnings)
+        try c.encode(undated_reason_entries, forKey: .undated_reasons)
+        try c.encode(undated_nights, forKey: .undated_nights)
+    }
 }
 struct UndatedNight: Codable {
     var start_ds: Int64?; var end_ds: Int64?; var in_bed_h: Double?
@@ -262,21 +313,21 @@ struct Summary: Codable {
     /// Summary that carries the message instead of a generic "decode failed".
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        analysis_digest = try c.decodeIfPresent(String.self, forKey: .analysis_digest)
-        analysis_version = try c.decodeIfPresent(Int.self, forKey: .analysis_version)
-        digest = try c.decodeIfPresent(String.self, forKey: .digest)
-        device = try c.decodeIfPresent(Device.self, forKey: .device)
-        nights = try c.decodeIfPresent([NightRow].self, forKey: .nights) ?? []
-        clock = try c.decodeIfPresent(ClockDiag.self, forKey: .clock)
-        vitals = try c.decodeIfPresent(Vitals.self, forKey: .vitals) ?? Vitals()
-        activity_profile = try c.decodeIfPresent([String: [Double]].self, forKey: .activity_profile) ?? [:]
-        activity_daily = try c.decodeIfPresent([String: DailyStat].self, forKey: .activity_daily) ?? [:]
-        profile = try c.decodeIfPresent(Profile.self, forKey: .profile)
-        cardio = try c.decodeIfPresent(Cardio.self, forKey: .cardio)
-        fitness = try c.decodeIfPresent(Fitness.self, forKey: .fitness)
-        sleepDebt = try c.decodeIfPresent(SleepDebtSummary.self, forKey: .sleepDebt)
-        symptoms = try c.decodeIfPresent(IllnessResult.self, forKey: .symptoms)
-        error = try c.decodeIfPresent(String.self, forKey: .error)
+        analysis_digest = try? c.decodeIfPresent(String.self, forKey: .analysis_digest)
+        analysis_version = try? c.decodeIfPresent(Int.self, forKey: .analysis_version)
+        digest = try? c.decodeIfPresent(String.self, forKey: .digest)
+        device = try? c.decodeIfPresent(Device.self, forKey: .device)
+        nights = (try? c.decodeIfPresent([NightRow].self, forKey: .nights)) ?? []
+        clock = try? c.decodeIfPresent(ClockDiag.self, forKey: .clock)
+        vitals = (try? c.decodeIfPresent(Vitals.self, forKey: .vitals)) ?? Vitals()
+        activity_profile = (try? c.decodeIfPresent([String: [Double]].self, forKey: .activity_profile)) ?? [:]
+        activity_daily = (try? c.decodeIfPresent([String: DailyStat].self, forKey: .activity_daily)) ?? [:]
+        profile = try? c.decodeIfPresent(Profile.self, forKey: .profile)
+        cardio = try? c.decodeIfPresent(Cardio.self, forKey: .cardio)
+        fitness = try? c.decodeIfPresent(Fitness.self, forKey: .fitness)
+        sleepDebt = try? c.decodeIfPresent(SleepDebtSummary.self, forKey: .sleepDebt)
+        symptoms = try? c.decodeIfPresent(IllnessResult.self, forKey: .symptoms)
+        error = try? c.decodeIfPresent(String.self, forKey: .error)
     }
     /// recent days (newest first) that have a movement profile.
     var activeDays: [String] { activity_profile.keys.sorted(by: >) }
@@ -598,5 +649,3 @@ enum BedtimeOverrideStore {
         try write(map, dbPath: dbPath)
     }
 }
-
-

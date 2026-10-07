@@ -118,84 +118,181 @@ def collect_inputs(rows, start_ds, end_ds, captured_unix, unix_ms):
     return sorted(beats), sorted(motion), sorted(temp)
 
 
+def _interp_at_ds(pts, ds):
+    if not pts:
+        return 0.0
+    if ds <= pts[0][0]:
+        return pts[0][1]
+    if ds >= pts[-1][0]:
+        return pts[-1][1]
+    lo, hi = 0, len(pts) - 1
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        if pts[mid][0] <= ds:
+            lo = mid
+        else:
+            hi = mid
+    t0, v0 = pts[lo]
+    t1, v1 = pts[hi]
+    if t1 <= t0:
+        return v0
+    f = (ds - t0) / (t1 - t0)
+    return v0 * (1.0 - f) + v1 * f
+
+
 def refine_deep_stages(stages, hr_t, hrv_t, motion_t, start_ds, end_ds):
     """Recover N3 deep sleep (code 1) when Oura Gen 4 0x80 missing PPG amplitude
     causes SleepNet to collapse all NREM sleep into Light sleep (code 2)."""
+    import math
     n = len(stages)
-    if n < 20 or end_ds <= start_ds or 1 in stages:
+    if n < 40 or end_ds <= start_ds or 1 in stages:
         return list(stages)
-    hrs = sorted(v for _, v in hr_t if 30.0 < v < 140.0)
-    if len(hrs) < 8:
+    if stages.count(2) < 20:
+        return list(stages)
+    hr_pts = sorted((int(ds), float(v)) for ds, v in hr_t if 30.0 < v < 140.0)
+    if len(hr_pts) < 6:
+        return list(stages)
+    hrv_pts = sorted((int(ds), float(v)) for ds, v in (hrv_t or []) if v > 0.0)
+
+    span_ds = max(1.0, float(end_ds - start_ds))
+    epoch_ds = span_ds / n
+    hr_ep = [_interp_at_ds(hr_pts, start_ds + int(round((i + 0.5) * epoch_ds))) for i in range(n)]
+    hrv_ep = [_interp_at_ds(hrv_pts, start_ds + int(round((i + 0.5) * epoch_ds))) for i in range(n)] if hrv_pts else [0.0] * n
+
+    epoch_mo = [0.0] * n
+    for ds, val in (motion_t or []):
+        f = (ds - start_ds) / span_ds
+        if -1e-6 <= f <= 1.0 + 1e-6:
+            idx = min(max(int(f * n), 0), n - 1)
+            if val > epoch_mo[idx]:
+                epoch_mo[idx] = float(val)
+
+    if max(hr_ep) - min(hr_ep) < 2.0:
         return list(stages)
 
-    def pct(arr, q):
-        if not arr:
-            return None
-        pos = max(0.0, min(1.0, q)) * (len(arr) - 1)
-        lo = int(pos)
-        hi = min(lo + 1, len(arr) - 1)
-        return arr[lo] * (1.0 - (pos - lo)) + arr[hi] * (pos - lo)
-
-    hr_p35 = pct(hrs, 0.35)
-    hr_p50 = pct(hrs, 0.50)
-    hrvs = sorted(v for _, v in hrv_t if v > 0.0)
-    hrv_p45 = pct(hrvs, 0.45) if hrvs else 0.0
-    span_ds = float(end_ds - start_ds)
-
-    cand = [False] * n
-    for idx, code in enumerate(stages):
-        if code != 2:
-            continue
-        e_start = start_ds + idx * 300
-        e_end = e_start + 300
-        e_mid = e_start + 150
-        frac = (e_mid - start_ds) / span_ds
-        if frac > 0.82:
-            continue
-        mot = [v for ds, v in motion_t if e_start - 300 <= ds <= e_end + 300]
-        if (sum(mot) / len(mot) if mot else 0.0) > 2.5:
-            continue
-        near_hr = [v for ds, v in hr_t if abs(ds - e_mid) <= 3600 and 30.0 < v < 140.0]
-        if not near_hr:
-            continue
-        local_hr = sum(near_hr) / len(near_hr)
-        near_hrv = [v for ds, v in hrv_t if abs(ds - e_mid) <= 3600 and v > 0.0]
-        local_hrv = sum(near_hrv) / len(near_hrv) if near_hrv else hrv_p45
-        first_two_thirds = frac <= 0.68
-        hr_limit = (hr_p35 + 0.6) if first_two_thirds else (hr_p35 - 0.3)
-        very_low_hr = local_hr <= (hr_p35 - 0.8)
-        calm_autonomic = local_hr <= hr_limit and (not hrvs or local_hrv >= hrv_p45 * 0.88 or very_low_hr)
-        early_nrem_dip = frac <= 0.55 and local_hr <= hr_p50 and (not mot or max(mot) <= 1.0) and (not hrvs or local_hrv >= hrv_p45)
-        cand[idx] = calm_autonomic or early_nrem_dip
-
-    smoothed = list(cand)
+    local_hr = [0.0] * n
     for i in range(n):
-        if stages[i] != 2:
-            smoothed[i] = False
-            continue
-        lo, hi = max(0, i - 3), min(n, i + 4)
-        votes = sum(1 for x in cand[lo:hi] if x)
-        smoothed[i] = votes * 2 >= (hi - lo)
+        lo = max(0, i - 90)
+        hi = min(n, i + 91)
+        local_hr[i] = sum(hr_ep[lo:hi]) / (hi - lo)
 
-    out = list(stages)
+    sorted_hrv = sorted(v for _, v in hrv_pts)
+    hrv_med = sorted_hrv[len(sorted_hrv) // 2] if sorted_hrv else 0.0
+
+    sleep_indices = [i for i, c in enumerate(stages) if c in (1, 2, 3)]
+    if len(sleep_indices) < 20:
+        return list(stages)
+    onset = sleep_indices[0]
+    final_sleep = sleep_indices[-1]
+    sleep_span = max(1, final_sleep - onset)
+
+    runs = []
     i = 0
     while i < n:
-        if not smoothed[i]:
+        if stages[i] == 2 and epoch_mo[i] <= 1.0:
+            j = i
+            while j < n and stages[j] == 2 and epoch_mo[j] <= 1.0:
+                j += 1
+            if j - i >= 12:
+                runs.append((i, j))
+            i = j
+        else:
             i += 1
-            continue
-        j = i
-        while j < n and smoothed[j]:
-            j += 1
-        if j - i >= 6:
-            for k in range(i, j):
-                if out[k] == 2:
-                    out[k] = 1
-        i = j
+    if not runs:
+        return list(stages)
 
-    max_deep = max(1, int(n * 0.24))
-    deep_indices = [idx for idx, c in enumerate(out) if c == 1]
-    if len(deep_indices) > max_deep:
-        for idx in deep_indices[max_deep:]:
-            out[idx] = 2
+    segmented_runs = []
+    for r_start, r_end in runs:
+        if r_end - r_start <= 180:
+            segmented_runs.append((r_start, r_end))
+        else:
+            cur = r_start
+            while cur + 12 <= r_end:
+                seg_end = min(r_end, cur + 90)
+                if r_end - seg_end < 24:
+                    seg_end = r_end
+                segmented_runs.append((cur, seg_end))
+                cur = seg_end
+
+    first_cycle_max_len = max(
+        (r_end - r_start for r_start, r_end in segmented_runs if ((r_start + r_end) / 2.0 - onset) / sleep_span < 0.16),
+        default=0,
+    )
+
+    scored_runs = []
+    for r_start, r_end in segmented_runs:
+        run_len = r_end - r_start
+        mid = (r_start + r_end) / 2.0
+        sleep_frac = max(0.0, (mid - onset) / sleep_span)
+        if sleep_frac > 0.56:
+            continue
+        if sleep_frac < 0.12 and first_cycle_max_len >= 40 and run_len < first_cycle_max_len * 0.65:
+            continue
+        mean_hr = sum(hr_ep[r_start:r_end]) / run_len
+        mean_loc_hr = sum(local_hr[r_start:r_end]) / run_len
+        prev_end = max(1, r_start)
+        prev_hr = sum(hr_ep[:prev_end]) / prev_end
+        mean_hrv = sum(hrv_ep[r_start:r_end]) / run_len if hrv_pts else 0.0
+        hr_dip = mean_loc_hr - mean_hr
+        prev_dip = prev_hr - mean_hr
+        if prev_dip < -0.25 or (prev_dip < 0.10 and hr_dip < 0.35):
+            continue
+        if sorted_hrv and sleep_frac > 0.12 and mean_hrv > max(38.0, hrv_med * 1.15) and hr_dip < 2.0:
+            continue
+        homeo = math.exp(-2.2 * sleep_frac)
+        dur_bonus = min(1.0, max(0.0, (run_len - 12) / 48.0))
+        dip_bonus = max(-0.5, min(0.6, hr_dip / 3.0))
+        score = homeo * 0.55 + dur_bonus * 0.35 + dip_bonus * 0.25
+        scored_runs.append((score, r_start, r_end, sleep_frac, hr_dip))
+
+    scored_runs.sort(key=lambda x: x[0], reverse=True)
+    asleep_epochs = len(sleep_indices)
+    target_deep = max(12, int(round(asleep_epochs * 0.105)))
+    out = list(stages)
+    selected_centers = []
+    deep_count = 0
+
+    for _score, r_start, r_end, sleep_frac, hr_dip in scored_runs:
+        if deep_count >= target_deep:
+            break
+        run_len = r_end - r_start
+        mid = (r_start + r_end) // 2
+        if any(abs(mid - c) < 110 for c in selected_centers):
+            continue
+        remaining = target_deep - deep_count
+        if remaining < 8:
+            break
+        if sleep_frac < 0.16:
+            lead = 2 if r_start <= onset + 12 else min(10, max(2, (run_len - 12) // 5))
+            tail = min(4, max(1, (run_len - 12 - lead) // 6))
+            max_bout = min(56, run_len - lead - tail, remaining)
+            if max_bout < 8:
+                continue
+            best_s = r_start + lead
+            best_hr = 1e9
+            for cand_s in range(r_start + lead, max(r_start + lead + 1, r_end - tail - max_bout + 1)):
+                m_hr = sum(hr_ep[cand_s:cand_s + max_bout]) / max_bout
+                if m_hr < best_hr:
+                    best_hr = m_hr
+                    best_s = cand_s
+            s_idx = best_s
+            e_idx = s_idx + max_bout
+        elif sleep_frac < 0.36:
+            cap = min(42, max(10, (run_len * 9) // 20)) if hr_dip >= 2.0 else min(26, max(10, (run_len * 2) // 5))
+            max_bout = min(cap, remaining, run_len)
+            tail = min(4, max(1, (run_len - max_bout) // 4))
+            e_idx = r_end - tail
+            s_idx = max(r_start + min(4, run_len), e_idx - max_bout)
+        else:
+            max_bout = min(22, max(8, (run_len * 2) // 5), remaining, run_len)
+            s_idx = r_start + (run_len - max_bout) // 2
+            e_idx = s_idx + max_bout
+        if e_idx <= s_idx or e_idx - s_idx < 8:
+            continue
+        for k in range(s_idx, e_idx):
+            out[k] = 1
+        deep_count += e_idx - s_idx
+        selected_centers.append((s_idx + e_idx) // 2)
+
     return out
 
