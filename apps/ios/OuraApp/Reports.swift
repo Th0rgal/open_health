@@ -336,7 +336,7 @@ enum Sleep {
     /// `oura-summary::refine_deep_stages_with_hrv`.
     static func refineDeepStages(stages: [Int], night: NightRow) -> [Int] {
         let n = stages.count
-        let rawHRCount = night.series_t?.hr?.count ?? night.series?.hr?.count ?? 0
+        let rawHRCount = max(night.series_t?.hr.count ?? 0, night.series?.hr.count ?? 0)
         guard n >= 40,
               rawHRCount >= 6,
               stages.allSatisfy({ (1...4).contains($0) }),
@@ -495,7 +495,7 @@ enum Sleep {
             spanS = night.durationS
         }
         let n = Int((spanS / 30.0).rounded())
-        let rawHRCount = night.series_t?.hr?.count ?? night.series?.hr?.count ?? 0
+        let rawHRCount = max(night.series_t?.hr.count ?? 0, night.series?.hr.count ?? 0)
         guard (120...1920).contains(n),
               rawHRCount >= 12,
               let grid = epochSignalGrid(night: night, count: n) else { return nil }
