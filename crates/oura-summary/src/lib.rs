@@ -522,6 +522,8 @@ const PULSE_BURST_GAP_DS: i64 = 2 * 60 * 10;
 const MAX_PULSE_CONTINUATION_GAP_DS: i64 = 15 * 60 * 10;
 const MIN_ACCEPTED_BEATS_PER_BURST: usize = 2;
 const MIN_LONG_SLEEP_DS: i64 = 3 * 60 * 60 * 10;
+/// Stated windows are whole minutes, so one can differ from the bedtime it describes by up to this.
+const STATED_WINDOW_SLACK_DS: i64 = 2 * 600;
 /// A run of nocturnal-only events shorter than this is not called a night on its own.
 const MIN_DERIVED_BED_DS: i64 = 60 * 60 * 10;
 const MIN_PREMATURE_END_EVIDENCE_DS: i64 = 30 * 60 * 10;
@@ -623,7 +625,10 @@ struct RingSleep {
 /// not follow the previous one starts a new sleep. A page carries only the `ds` at
 /// which the ring emitted it — writing happens when analysis finishes, i.e. at the end
 /// of the sleep — so a run ends at its last page and runs back at 30 s an epoch.
-fn ring_sleep_runs(pages: &[(i64, i64, i64, Vec<i64>)]) -> Vec<RingSleep> {
+fn ring_sleep_runs(
+    pages: &[(i64, i64, i64, Vec<i64>)],
+    windows: &[SleepWindowStatement],
+) -> Vec<RingSleep> {
     let epoch_ds = (RING_STAGE_EPOCH_S * 10.0) as i64;
     let mut runs: Vec<RingSleep> = Vec::new();
     let mut previous_page = -1i64;
@@ -644,9 +649,32 @@ fn ring_sleep_runs(pages: &[(i64, i64, i64, Vec<i64>)]) -> Vec<RingSleep> {
         previous_page = *page;
     }
     for run in &mut runs {
-        run.start_ds = run.end_ds - run.codes.len() as i64 * epoch_ds;
+        let first_page_ds = run.start_ds;
+        (run.start_ds, run.end_ds) = stated_window(first_page_ds, windows)
+            .unwrap_or((run.end_ds - run.codes.len() as i64 * epoch_ds, run.end_ds));
     }
     runs
+}
+
+/// A `sleep_summary_1` event: the ring's statement of the sleep it just analysed, as
+/// minutes back from the event's own stamp to the window start and end.
+#[derive(Clone, Copy)]
+struct SleepWindowStatement {
+    stamp_ds: i64,
+    start_min: i64,
+    end_min: i64,
+}
+
+/// The window stated by the `sleep_summary_1` the ring emitted just before the
+/// hypnogram page burst that begins at `first_page_ds` (0.2 to 8.7 s earlier on a
+/// Gen 3 fw 3.4.3; a minute is allowed).
+fn stated_window(first_page_ds: i64, windows: &[SleepWindowStatement]) -> Option<(i64, i64)> {
+    windows
+        .iter()
+        .filter(|w| (first_page_ds - 600..=first_page_ds).contains(&w.stamp_ds))
+        .max_by_key(|w| w.stamp_ds)
+        .filter(|w| w.start_min > w.end_min)
+        .map(|w| (w.stamp_ds - w.start_min * 600, w.stamp_ds - w.end_min * 600))
 }
 
 /// One `sleep_phase_data` stage epoch, in the codes the rest of the pipeline speaks:
@@ -672,17 +700,13 @@ const RING_STAGE_EPOCH_S: f64 = 30.0;
 /// available with no model at all, and this is what fills the hypnogram in a
 /// model-free build.
 ///
-/// **Placing it in time.** The pages carry no timestamp of their own — their `ds` is
-/// when the ring emitted them, not when you slept. Anchoring the run to END at the
-/// last page's emission and running back at 30 s an epoch was checked against the
-/// ring's independent per-window record for the night in question:
-///
-/// | | median HR | median motion | `sleep_state`=1 |
-/// |---|---|---|---|
-/// | inside the inferred window | 58.5 | 0 | 79% |
-/// | in bed before it | 76.8 | 5 | 20% |
-///
-/// Asleep versus awake-in-bed, from data the hypnogram never touched. The anchor holds.
+/// **Placing it in time.** The pages carry no timestamp of their own, and every event
+/// of the ring's post-sleep analysis is stamped when the analysis finishes (hours after
+/// waking: 107 to 301 min on one Gen 3), not when you slept. The `sleep_summary_1`
+/// emitted just before the pages states the window as minute offsets from its stamp
+/// (see [`stated_window`]); it reproduced the declared bedtime within a minute on 16 of
+/// 16 nights. Without one, the run ends at its last page's emission and runs back at
+/// 30 s an epoch, which holds only when the ring analyses right at waking.
 ///
 /// Unanalysed epochs are unknown (0), not evidence of wakefulness. Partial
 /// coverage must not manufacture sleep latency, efficiency or sleep debt.
@@ -1332,7 +1356,10 @@ fn beds_from_sleep_signal(
         explicit
             .iter()
             .chain(derived.iter())
-            .any(|bed| bed.start_ds <= start && end <= bed.end_ds)
+            .any(|bed| {
+                bed.start_ds - STATED_WINDOW_SLACK_DS <= start
+                    && end <= bed.end_ds + STATED_WINDOW_SLACK_DS
+            })
     };
 
     // 1. the ring's own analysed sleeps
@@ -2023,6 +2050,7 @@ pub fn build_summary(
     let mut raw_beds: Vec<BedPeriod> = Vec::new();
     let mut sleep_support: Vec<(i64, i64)> = Vec::new();
     let mut ring_hypnogram_pages: Vec<(i64, i64, i64, Vec<i64>)> = Vec::new();
+    let mut sleep_windows: Vec<SleepWindowStatement> = Vec::new();
     // (ds, sleep_state) straight from the ring: its own asleep/awake call per window.
     let mut ring_sleep_state: Vec<(i64, i64)> = Vec::new();
     let mut pulse_support: Vec<(i64, i64, usize)> = Vec::new();
@@ -2066,6 +2094,19 @@ pub fn build_summary(
                             staged: false,
                         }),
                     }
+                }
+            }
+        }
+        if n == "sleep_summary_1" {
+            if let Ok(v) = serde_json::from_str::<Value>(jstr) {
+                if let (Some(start_min), Some(end_min)) =
+                    (v["start_offset_min"].as_i64(), v["end_offset_min"].as_i64())
+                {
+                    sleep_windows.push(SleepWindowStatement {
+                        stamp_ds: *ds,
+                        start_min,
+                        end_min,
+                    });
                 }
             }
         }
@@ -2127,7 +2168,7 @@ pub fn build_summary(
             }
         }
     }
-    let ring_sleeps = ring_sleep_runs(&ring_hypnogram_pages);
+    let ring_sleeps = ring_sleep_runs(&ring_hypnogram_pages, &sleep_windows);
     raw_beds.extend(beds_from_sleep_signal(
         &raw_beds,
         &ring_sleeps,
@@ -3125,6 +3166,38 @@ mod tests {
         assert_eq!(hyps.len(), 2);
         assert_eq!(hyps[&(0, 1)]["stages"][0], 1);
         assert_eq!(hyps[&(0, 86401)]["stages"][0], 3);
+    }
+
+    #[test]
+    fn hypnogram_is_placed_by_the_window_the_ring_states_not_by_its_emission() {
+        // 8 h window ending 235 min before the stamp of a summary emitted 7 s ahead of the pages.
+        let stamp = 1_000_000;
+        let stated = SleepWindowStatement {
+            stamp_ds: stamp,
+            start_min: 715,
+            end_min: 235,
+        };
+        let pages = [
+            (stamp + 70, 1, 0, vec![2; 52]),
+            (stamp + 71, 1, 1, vec![2; 52]),
+        ];
+        let runs = ring_sleep_runs(&pages, &[stated]);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            (runs[0].start_ds, runs[0].end_ds),
+            (stamp - 715 * 600, stamp - 235 * 600)
+        );
+
+        // No summary near the burst: end at the last page and run back 30 s per epoch.
+        let runs = ring_sleep_runs(&pages, &[]);
+        assert_eq!(runs[0].end_ds, stamp + 71);
+        assert_eq!(runs[0].start_ds, stamp + 71 - 104 * 300);
+        // A summary from another burst is not used.
+        let other = SleepWindowStatement {
+            stamp_ds: stamp - 100_000,
+            ..stated
+        };
+        assert_eq!(ring_sleep_runs(&pages, &[other])[0].end_ds, stamp + 71);
     }
 
     #[test]
