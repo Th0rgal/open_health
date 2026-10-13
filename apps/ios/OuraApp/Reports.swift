@@ -1333,6 +1333,8 @@ struct SleepDebtDetail: View {
 }
 
 // ── the full-page report (sleep ⇄ activity) ──────────────────────────────────
+extension Notification.Name { static let summaryNeedsReload = Notification.Name("summaryNeedsReload") }
+
 struct DayAnalysisContext {
     var summary: Summary?
     var isBusy: Bool
@@ -1603,6 +1605,12 @@ struct SleepReport: View {
         }
     }
 
+    /// Without the torch refresh (model-free builds) the root view just rebuilds the summary.
+    private func reloadSleep() async {
+        if let analysis { _ = await analysis.refresh(DayAnalysisRequest(day: day, kind: .sleep)) }
+        else { NotificationCenter.default.post(name: .summaryNeedsReload, object: nil) }
+    }
+
     @ViewBuilder private func bedtimeEditor(_ n: NightRow) -> some View {
         let nightKey = n.date ?? day
         VStack(alignment: .leading, spacing: 10) {
@@ -1628,7 +1636,7 @@ struct SleepReport: View {
                     savingBedtime = true
                     Task {
                         try? BedtimeOverrideStore.set(startHM: startHM, endHM: endHM, forNightKey: nightKey, night: n)
-                        _ = await analysis?.refresh(DayAnalysisRequest(day: day, kind: .sleep))
+                        await reloadSleep()
                         savingBedtime = false
                         editingBedtime = false
                     }
@@ -1647,7 +1655,7 @@ struct SleepReport: View {
                         savingBedtime = true
                         Task {
                             try? BedtimeOverrideStore.clear(forNightKey: nightKey, night: n)
-                            _ = await analysis?.refresh(DayAnalysisRequest(day: day, kind: .sleep))
+                            await reloadSleep()
                             savingBedtime = false
                             editingBedtime = false
                         }
