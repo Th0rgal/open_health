@@ -726,6 +726,14 @@ fn ring_hypnograms(
         if !painted {
             continue;
         }
+        // A window the user widened past the staged run declares that edge time as in bed
+        // and unstaged, i.e. awake. Without this a 2-minute adjustment hides efficiency.
+        if night.manual_bedtime {
+            let first = stages.iter().position(|&c| c != 0).unwrap_or(0);
+            let last = stages.iter().rposition(|&c| c != 0).unwrap_or(0);
+            stages[..first].fill(4);
+            stages[last + 1..].fill(4);
+        }
         let share = |code: i64| {
             let n = stages.iter().filter(|&&c| c == code).count();
             (n as f64 / stages.len() as f64 * 1000.0).round() / 10.0
@@ -3156,6 +3164,27 @@ mod tests {
         let compact = downsample_codes(&smoothed, 120);
         assert!(compact[..60].iter().all(|&c| c == 0));
         assert_eq!(sleep_metrics(&smoothed, 8.0 * 3600.0), (Value::Null, 0));
+    }
+
+    #[test]
+    fn manual_window_wider_than_the_run_counts_the_edges_as_wake() {
+        let night = Night {
+            start_ds: 0,
+            end_ds: 8 * 36000,
+            captured_unix: 1,
+            manual_bedtime: true,
+            ..Default::default()
+        };
+        let run = RingSleep {
+            start_ds: 600,
+            end_ds: 8 * 36000 - 600,
+            captured_unix: 1,
+            codes: vec![2; 956],
+        };
+        let hyp = ring_hypnograms(&[run], &[night], |ds, _| ds as f64 / 10.0);
+        assert_eq!(hyp[0].1["stages"][0], 4);
+        assert_eq!(hyp[0].1["stages"][959], 4);
+        assert_eq!(hyp[0].1["efficiency_pct"], 99.6);
     }
 
     #[test]
