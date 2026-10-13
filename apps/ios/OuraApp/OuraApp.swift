@@ -861,6 +861,7 @@ struct RootView: View {
             // with SQLite + model output without blanking the existing Today card.
             requestAutomaticSync()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .summaryNeedsReload)) { _ in load(force: true) }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataDidBecomeAvailableNotification)) { _ in
             requestAutomaticSync()
         }
