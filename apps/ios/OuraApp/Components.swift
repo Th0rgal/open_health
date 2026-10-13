@@ -491,6 +491,8 @@ struct Hypnogram: View {
 struct MovementRidge: View {
     let profile: [Double]
     var height: CGFloat = 44
+    /// Hour of day to mark with a dashed line (today only), where the data ends.
+    var nowHour: Double? = nil
     var body: some View {
         Canvas { ctx, size in
             guard profile.count > 1 else { return }
@@ -507,7 +509,52 @@ struct MovementRidge: View {
             var line = Path(); line.move(to: pt(0))
             for i in 1..<n { line.addLine(to: pt(i)) }
             ctx.stroke(line, with: .color(Obs.chart.opacity(0.85)), style: .init(lineWidth: 1.2, lineJoin: .round))
+            if let nowHour {
+                let x = size.width * min(1, nowHour * 4 / CGFloat(n - 1))
+                ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) },
+                           with: .color(Obs.ink2), style: .init(lineWidth: 1, dash: [3, 3]))
+            }
         }
         .frame(height: height)
+    }
+}
+
+/// Day pages in a horizontal paging scroll, oldest on the left and the latest on the
+/// right, with the previous page peeking in. `selection` is shared with the rest of the
+/// screen so everything daily follows the swipe.
+struct DayPager<Page: View>: View {
+    let days: [String]               // newest first
+    @Binding var selection: String?
+    @ViewBuilder let page: (String) -> Page
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(days.reversed(), id: \.self) { day in
+                        page(day)
+                            .containerRelativeFrame(.horizontal) { width, _ in days.count > 1 ? width - 28 : width }
+                            .id(day)
+                    }
+                }
+                .scrollTargetLayout()
+            }
+            .scrollTargetBehavior(.viewAligned)
+            .scrollClipDisabled()
+            .defaultScrollAnchor(.trailing)
+            .scrollPosition(id: $selection)
+            .onAppear { selection = days.first }
+            .onChange(of: days.first) { _, latest in selection = latest }
+            if days.count > 1 {
+                let atEarliest = selection == days.last
+                let atLatest = selection == days.first
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.left").opacity(atEarliest ? 0.25 : 1)
+                    Text(atLatest ? "swipe for earlier days" : "earlier · later")
+                    Image(systemName: "chevron.right").opacity(atLatest ? 0.25 : 1)
+                }
+                .font(Obs.mono(9, .medium)).tracking(0.8).foregroundStyle(Obs.muted)
+            }
+        }
     }
 }

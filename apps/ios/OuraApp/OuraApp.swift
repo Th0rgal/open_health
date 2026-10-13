@@ -56,7 +56,7 @@ struct TodayCard: View {
                         }
                         Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
                     }
-                    MovementRidge(profile: s.activity_profile[day] ?? [])
+                    MovementRidge(profile: s.activity_profile[day] ?? [], nowHour: hourNow(on: day))
                     ForEach(Array(s.workoutsOn(day).prefix(2))) { w in
                         SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM)
                     }
@@ -797,6 +797,8 @@ struct RootView: View {
         }
     }
     @State private var showAllDays = false
+    /// The day every daily panel shows; nil until the pager reports the latest.
+    @State private var homeDay: String?
     @State private var showSync = false
     @State private var showProfile = false
     @State private var showSleepDebt = false
@@ -1030,12 +1032,49 @@ struct RootView: View {
         }
     }
 
+    /// One home page: the day's tag (with sync progress on the latest) over its card.
+    @ViewBuilder private func dayPage(_ s: Summary, _ day: String) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 9) {
+                ObsTag(displayedDayLabel(day), icon: "sun.max.fill")
+                    .fixedSize()
+                if displayedDayLabel(day) != day {
+                    Text(String(day.suffix(5))).font(Obs.mono(11)).foregroundStyle(Obs.muted)
+                }
+                if day == s.days.first, ring.busy || isRefreshingSummary {
+                    ProgressView().controlSize(.mini).scaleEffect(0.68).tint(Obs.ink)
+                    // one line next to the tag: short labels, no wrapping
+                    Text((ring.busy ? "Syncing ring" : (modelProgress.label ?? "Analyzing saved data")).lowercased()).font(Obs.mono(9, .medium))
+                        .tracking(0.6).foregroundStyle(Obs.ink2)
+                        .lineLimit(1).minimumScaleFactor(0.8).truncationMode(.tail)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: ring.busy || isRefreshingSummary)
+            TodayCard(s: s, day: day,
+                      onSleep: { report = ReportSel(day: day, sleep: true) },
+                      onActivity: { report = ReportSel(day: day, sleep: false) })
+        }
+    }
+
+    /// A nightly vital as of `day`: that night's value and the trend up to it. The change
+    /// against baseline is only meaningful for the latest night.
+    private func nightlyVital(_ s: Summary, day: String, kind: VitalKind, trend: Trend = Trend(),
+                              format: String = "%.0f", detail: String? = nil,
+                              pick: (NightRow) -> Double?) -> some View {
+        let points = s.recentNightly(upTo: day, pick)
+        return VitalCell(tag: kind.title,
+                         value: points.last.map { String(format: format, $0.value) } ?? "–",
+                         unit: kind.unit,
+                         delta: day == s.days.first ? trend.delta_pct : nil,
+                         series: points.map(\.value), baseline: trend.baseline,
+                         deltaGoodWhenPositive: kind != .heartRate,
+                         detail: points.last.map { $0.date == day ? detail : latestLabel(date: $0.date) } ?? nil,
+                         action: { vital = kind })
+    }
+
     @ViewBuilder private func content(_ s: Summary) -> some View {
-        let latestTemp = s.nights.first { $0.skin_temp != nil }
-        let latestOxygen = s.nights.first { $0.spo2_mean != nil }
-        let recentTemperatures = Array(s.nights.compactMap(\.skin_temp).prefix(14).reversed())
-        let recentOxygen = Array(s.nights.compactMap(\.spo2_mean).prefix(14).reversed())
-        let latestHR = s.vitals.hr
+        let day = homeDay.flatMap { s.days.contains($0) ? $0 : nil } ?? s.days.first
+        let isLatest = day == s.days.first
         ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -1053,72 +1092,49 @@ struct RootView: View {
                         ObsTag("no data"); Text(err).font(Obs.mono(13)).foregroundStyle(Obs.bad)
                     } else {
                         // digest headline
-                        if let d = s.digest {
+                        if isLatest, let d = s.digest {
                             Text(d).font(Obs.prose(16, .regular)).foregroundStyle(Obs.ink)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
 
                         // today — last night's sleep + that day's activity as one unit, the
                         // hero of the home; tap the sleep or the activity region for its report.
-                        if let day = s.days.first {
-                            HStack(spacing: 9) {
-                                ObsTag(displayedDayLabel(day), icon: "sun.max.fill")
-                                    .fixedSize()
-                                if displayedDayLabel(day) != day {
-                                    Text(String(day.suffix(5))).font(Obs.mono(11)).foregroundStyle(Obs.muted)
-                                }
-                                if ring.busy || isRefreshingSummary {
-                                    ProgressView().controlSize(.mini).scaleEffect(0.68).tint(Obs.ink)
-                                    // one line next to the tag: short labels, no wrapping
-                                    Text((ring.busy ? "Syncing ring" : (modelProgress.label ?? "Analyzing saved data")).lowercased()).font(Obs.mono(9, .medium))
-                                        .tracking(0.6).foregroundStyle(Obs.ink2)
-                                        .lineLimit(1).minimumScaleFactor(0.8).truncationMode(.tail)
-                                }
-                            }
-                            .animation(.easeInOut(duration: 0.2), value: ring.busy || isRefreshingSummary)
-                            TodayCard(s: s, day: day,
-                                      onSleep: { report = ReportSel(day: day, sleep: true) },
-                                      onActivity: { report = ReportSel(day: day, sleep: false) })
+                        if !s.days.isEmpty {
+                            DayPager(days: s.days, selection: $homeDay) { dayPage(s, $0) }
                         }
 
                         // vitals
                         ObsRule()
                         ObsTag("vitals", icon: "waveform.path.ecg")
-                        HStack(alignment: .top, spacing: 24) {
-                            VitalCell(tag: "nightly hrv", value: f(s.vitals.hrv.latest), unit: "ms",
-                                      delta: s.vitals.hrv.delta_pct, series: s.vitals.hrv.series,
-                                      baseline: s.vitals.hrv.baseline,
-                                      action: { vital = .hrv })
-                            VitalCell(tag: "heart rate",
-                                      value: f(latestHR?.latest ?? s.vitals.rhr.latest), unit: "bpm",
-                                      series: s.vitals.rhr.series,
-                                      baseline: s.vitals.rhr.baseline,
-                                      deltaGoodWhenPositive: false,
-                                      detail: latestHR.map { latestLabel(date: $0.date, time: $0.hm) }
-                                          ?? "nightly minimum",
-                                      action: { vital = .heartRate })
-                        }
-                        HStack(alignment: .top, spacing: 24) {
-                            VitalCell(tag: "skin temp",
-                                      value: latestTemp?.skin_temp.map { String(format: "%.1f", $0) } ?? "–",
-                                      unit: "°c",
-                                      series: recentTemperatures,
-                                      detail: latestTemp.map { latestLabel(date: s.wakeYmd($0)) },
-                                      action: { vital = .temp })
-                            VitalCell(tag: "blood o₂", value: f(latestOxygen?.spo2_mean), unit: "%",
-                                      series: recentOxygen,
-                                      detail: latestOxygen.map { latestLabel(date: s.wakeYmd($0)) },
-                                      action: { vital = .oxygen })
+                        if let day {
+                            HStack(alignment: .top, spacing: 24) {
+                                nightlyVital(s, day: day, kind: .hrv, trend: s.vitals.hrv, pick: \.hrv_ms)
+                                if isLatest, let hr = s.vitals.hr {
+                                    VitalCell(tag: "heart rate", value: f(hr.latest ?? s.vitals.rhr.latest), unit: "bpm",
+                                              series: s.vitals.rhr.series,
+                                              baseline: s.vitals.rhr.baseline,
+                                              deltaGoodWhenPositive: false,
+                                              detail: latestLabel(date: hr.date, time: hr.hm),
+                                              action: { vital = .heartRate })
+                                } else {
+                                    nightlyVital(s, day: day, kind: .heartRate, trend: s.vitals.rhr,
+                                                 detail: "nightly minimum", pick: \.rhr)
+                                }
+                            }
+                            HStack(alignment: .top, spacing: 24) {
+                                nightlyVital(s, day: day, kind: .temp, format: "%.1f", pick: \.skin_temp)
+                                nightlyVital(s, day: day, kind: .oxygen, pick: \.spo2_mean)
+                            }
                         }
 
-                        if let debt = s.sleepDebt {
+                        if let day, let debt = s.sleepDebt?.asOf(day) {
                             ObsRule()
                             SleepDebtCard(debt: debt) { showSleepDebt = true }
                         }
 
                         // Torch build: Oura's own illness model. Otherwise the shared
                         // core's baseline comparison over the same four biomarkers.
-                        if let radar = s.symptomRadar, radar.available {
+                        if isLatest, let radar = s.symptomRadar, radar.available {
                             ObsRule()
                             IllnessCard(illness: radar)
                         }

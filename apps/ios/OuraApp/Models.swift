@@ -165,6 +165,7 @@ struct SleepDebtDay: Codable, Identifiable {
     var sleep_need_min: Double
     var shortfall_min: Double?
     var cumulative_debt_min: Double?
+    var state: String?
     var valid_days: Int
     var id: String { date }
 }
@@ -177,6 +178,17 @@ struct SleepDebtSummary: Codable {
     var window_days: Int = 14
     var state: String = "none"
     var days: [SleepDebtDay] = []
+
+    /// The debt as it stood at the end of `day`, or nil outside the summarized window.
+    func asOf(_ day: String) -> SleepDebtSummary? {
+        guard let entry = days.first(where: { $0.date == day }) else { return nil }
+        var debt = self
+        debt.debt_min = entry.cumulative_debt_min ?? 0
+        debt.valid = entry.cumulative_debt_min != nil
+        debt.valid_days = entry.valid_days
+        debt.state = entry.state ?? "none"
+        return debt
+    }
 }
 struct Device: Codable {
     var serial: String?; var firmware: String?
@@ -381,6 +393,11 @@ extension Summary {
         workouts.filter { $0.isWorkout >= 0.5 && $0.dayLabel == day }
     }
 
+    /// The last 14 nightly values up to and including `day`, oldest first.
+    func recentNightly(upTo day: String, _ pick: (NightRow) -> Double?) -> [DatedVital] {
+        Array(nightlySeries(pick).filter { $0.date <= day }.suffix(14))
+    }
+
     /// One value per wake-date (longest night wins), oldest first — feeds vital trend charts.
     func nightlySeries(_ pick: (NightRow) -> Double?) -> [DatedVital] {
         var byDay: [String: (dur: Double, value: Double)] = [:]
@@ -552,6 +569,14 @@ private func median(_ values: [Double]) -> Double? {
 private func localDay(_ date: Date) -> String {
     let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
     return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+}
+
+/// The hour of the local day (0 to 24) when `day` is today, else nil: where that day's
+/// data ends.
+func hourNow(on day: String, now: Date = Date()) -> Double? {
+    guard day == localDay(now) else { return nil }
+    let c = Calendar.current.dateComponents([.hour, .minute], from: now)
+    return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60
 }
 
 private func nextDay(after day: String) -> String? {
