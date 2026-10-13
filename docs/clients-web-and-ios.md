@@ -161,6 +161,10 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
 - **Sleep score + breathing rate** (`nights[].sleep_score`, `breath_rate`).
 - **Skin temperature / latest HR vitals and trend pages**, **hourly heart rate**
   (`hourly_hr` is FFI-only; no `/api` endpoint yet).
+- **Swipeable home day**: the iOS home pages through days with a horizontal swipe, and the
+  vitals and sleep debt follow the selected day (`homeDay` in `OuraApp.swift`); the web home
+  shows the latest day. A dashed "now" line marks the current time on today's movement chart
+  (`MovementRidge`, `MetProfile`); the web movement chart has none.
 - **Symptom Radar details**: all four biomarkers with their personal band
   (`lower`/`upper`); the web lists only the flagged ones.
 

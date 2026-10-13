@@ -350,6 +350,15 @@ fn sleep_need_s(asleep_by_day: &std::collections::BTreeMap<i64, i32>, day: i64) 
     ((need / SLEEP_NEED_ROUND_S).round() * SLEEP_NEED_ROUND_S) as i32
 }
 
+fn sleep_debt_state(debt_min: f64) -> &'static str {
+    match debt_min {
+        d if d >= 540.0 => "high",
+        d if d >= 360.0 => "moderate",
+        d if d >= 180.0 => "low",
+        _ => "none",
+    }
+}
+
 /// Android's sleep-debt screen works on calendar days, not individual sleep sessions:
 /// a main sleep and a nap ending on the same day both contribute to that day's total.
 /// Build the complete 14-day series here so every client renders the same result.
@@ -384,13 +393,15 @@ fn sleep_debt_summary(asleep_by_day: &std::collections::BTreeMap<i64, i32>) -> V
         let total = asleep_by_day.get(&day).copied();
         let need_s = sleep_need_s(asleep_by_day, day);
         let valid_days = actual.iter().filter(|&&s| s > 0).count();
+        let cumulative = debt.valid.then(|| (debt.debt_s as f64 / 60.0).round());
         let (y, m, d) = civil(day);
         days.push(json!({
             "date": format!("{y:04}-{m:02}-{d:02}"),
             "total_sleep_min": total.map(|s| (s as f64 / 60.0).round()),
             "sleep_need_min": (need_s as f64 / 60.0).round(),
             "shortfall_min": total.map(|s| ((need_s - s) as f64 / 60.0).round()),
-            "cumulative_debt_min": debt.valid.then(|| (debt.debt_s as f64 / 60.0).round()),
+            "cumulative_debt_min": cumulative,
+            "state": sleep_debt_state(cumulative.unwrap_or(0.0)),
             "valid_days": valid_days,
         }));
     }
@@ -403,12 +414,7 @@ fn sleep_debt_summary(asleep_by_day: &std::collections::BTreeMap<i64, i32>) -> V
     } else {
         0.0
     };
-    let state = match debt_min {
-        d if d >= 540.0 => "high",
-        d if d >= 360.0 => "moderate",
-        d if d >= 180.0 => "low",
-        _ => "none",
-    };
+    let state = sleep_debt_state(debt_min);
     let recent_shortfall_min = if debt.valid && debt.recent_shortfall_s != i32::MAX {
         (debt.recent_shortfall_s as f64 / 60.0).round()
     } else {

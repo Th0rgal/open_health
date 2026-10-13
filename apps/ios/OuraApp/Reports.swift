@@ -1802,7 +1802,7 @@ struct ActivityReport: View {
         }
 
         Rule("movement across the day")
-        MetProfile(timeline: s.wakingActivityTimeline(for: day))
+        MetProfile(timeline: s.wakingActivityTimeline(for: day), nowHour: hourNow(on: day))
 
         let bucketMin = prof.isEmpty ? 15.0 : 24.0 * 60.0 / Double(prof.count)
         let activeMin = Double(prof.filter { $0 >= 3 }.count) * bucketMin
@@ -1837,6 +1837,8 @@ private func compactSteps(_ steps: Double?) -> (value: String, unit: String) {
 // window. The timeline can cross midnight and says when its bedtime is estimated.
 private struct MetProfile: View {
     let timeline: WakingActivityTimeline
+    /// Hour of day to mark with a dashed line (today only), where the data ends.
+    var nowHour: Double? = nil
 
     private var ticks: [Double] {
         var result = [timeline.startHour]
@@ -1868,6 +1870,11 @@ private struct MetProfile: View {
                     let x = x(hour)
                     ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) },
                                with: .color(Obs.trace.opacity(0.2)), lineWidth: 0.5)
+                }
+                if let nowHour, (timeline.startHour...timeline.endHour).contains(nowHour) {
+                    let x = x(nowHour)
+                    ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) },
+                               with: .color(Obs.ink2), style: .init(lineWidth: 1, dash: [3, 3]))
                 }
                 guard timeline.points.count > 1 else { return }
                 let peak = max(1, timeline.points.map(\.met).max() ?? 1)
