@@ -754,6 +754,12 @@ private struct SyncIndicatorButton: View {
             ZStack {
                 Circle()
                     .stroke(Obs.rule, lineWidth: 0.8)
+                if ring.busy, let fraction = ring.drainFraction {
+                    Circle()
+                        .trim(from: 0, to: fraction)
+                        .stroke(Obs.ink, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
                 Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(ring.busy ? Obs.ink : (ring.wasRecentlySynced ? Obs.good : Obs.ink2))
