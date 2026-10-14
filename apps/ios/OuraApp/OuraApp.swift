@@ -799,6 +799,7 @@ struct RootView: View {
     @State private var showAllDays = false
     @State private var showSync = false
     @State private var showProfile = false
+    @State private var showRing = false
     @State private var showSleepDebt = false
     @State private var vital: VitalKind?
     @State private var loadGeneration = 0
@@ -850,6 +851,7 @@ struct RootView: View {
             SyncView(ring: ring, onSynced: refreshAfterSync, onReset: resetAndReload)
         }
         .sheet(isPresented: $showProfile) { ProfileSettingsView(profile: s?.profile, onSaved: refreshDerivedData) }
+        .sheet(isPresented: $showRing) { if let s { RingDetailView(s: s) } }
         .sheet(isPresented: $showSleepDebt) { if let debt = s?.sleepDebt { SleepDebtDetail(debt: debt) } }
         .sheet(item: $vital) { kind in if let s { VitalTrendView(s: s, kind: kind) } }
         #if TORCH
@@ -1037,14 +1039,18 @@ struct RootView: View {
         let latestHR = s.vitals.hr
         ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("Open Oura").font(Obs.serif(22)).foregroundStyle(Obs.ink)
-                        Text("beta").font(Obs.mono(9, .medium)).tracking(1.2).foregroundStyle(Obs.muted)
+                    HStack(alignment: .center, spacing: 12) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("Open Oura").font(Obs.serif(22)).foregroundStyle(Obs.ink)
+                            Text("beta").font(Obs.mono(9, .medium)).tracking(1.2).foregroundStyle(Obs.muted)
+                        }
                         Spacer()
                         Button { showProfile = true } label: {
                             Image(systemName: "person.crop.circle")
                                 .font(.system(size: 17)).foregroundStyle(Obs.ink2)
+                                .frame(width: 31, height: 31)
                         }
+                        RingBatteryButton(pct: s.device?.battery_pct) { showRing = true }
                         SyncIndicatorButton(ring: ring) { showSync = true }
                     }
 
@@ -1177,9 +1183,55 @@ struct RootView: View {
                                 }
                             }
                         }
+                    }
+                }
+                .padding(.horizontal, 24).padding(.top, 12).padding(.bottom, 24)
+            }
+    }
+}
 
+/// Battery level as the border of a ring: green from 30%, yellow below 30%, red below 15%.
+struct RingBatteryButton: View {
+    let pct: Int?
+    let action: () -> Void
+
+    private static func color(_ pct: Int?) -> Color {
+        guard let pct else { return Obs.muted }
+        if pct < 15 { return Obs.alert }
+        if pct < 30 { return Obs.caution }
+        return Obs.good
+    }
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle().stroke(Obs.rule, lineWidth: 2.5)
+                Circle()
+                    .trim(from: 0, to: CGFloat(min(max(pct ?? 0, 0), 100)) / 100)
+                    .stroke(Self.color(pct), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Circle().stroke(Obs.ink2, lineWidth: 1.4).frame(width: 11, height: 11)
+            }
+            .frame(width: 24, height: 24)
+            .frame(width: 31, height: 31)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(pct.map { "Ring battery \($0) percent" } ?? "Ring details")
+        .accessibilityHint("Opens ring details")
+    }
+}
+
+/// Ring identity, battery, sync and data health.
+struct RingDetailView: View {
+    let s: Summary
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Obs.canvas.ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
                         // device & data health
-                        ObsRule()
                         ObsTag("device", icon: "cpu")
                         VStack(spacing: 10) {
                             ObsStat(label: "serial", value: s.device?.serial ?? "–")
@@ -1199,9 +1251,13 @@ struct RootView: View {
                             return "\(String(format: "%.0f", span)) days\(obs) · \(s.device?.nights ?? s.nights.count) nights"
                         })
                     }
+                    .padding(24)
                 }
-                .padding(.horizontal, 24).padding(.top, 12).padding(.bottom, 24)
             }
+            .navigationTitle("Ring")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        }
     }
 }
 

@@ -29,6 +29,7 @@ enum Obs {
     static let chart = adaptive(light: 0x6e695f, dark: 0xa8a195)
     static let good = adaptive(light: 0x1baf7a, dark: 0x2ec48c)
     static let bad = adaptive(light: 0xeb6834, dark: 0xe07a4a)
+    static let caution = adaptive(light: 0xd9a93b, dark: 0xe6bd5c)
     static let alert = adaptive(light: 0xc4472c, dark: 0xe06a4f)
 
     // Back-compat names. `teal` is the quiet chart color; `yellow` is a problem.

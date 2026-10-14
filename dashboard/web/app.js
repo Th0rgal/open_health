@@ -1969,14 +1969,17 @@ function placeFormat(modules, reserved, ecl, mask) {
 function renderActions(d) {
   const dev = d.device || {};
   const b = $("batt");
-  if (dev.battery_pct != null) {
-    b.innerHTML = icon("battery-high") + `<span>${dev.battery_pct}%</span>`;
-    b.classList.toggle("low", dev.battery_pct < 20);
-    b.hidden = false;
-    b.title = `Ring battery ${dev.battery_pct}%${dev.battery_v ? " · " + dev.battery_v + " V" : ""}`;
-  } else {
-    b.hidden = true;
-  }
+  const pct = dev.battery_pct;
+  // the ring glyph's border is the battery gauge: arc length = charge
+  const C = 2 * Math.PI * 10;
+  const arc = pct != null ? (Math.min(Math.max(pct, 0), 100) / 100) * C : 0;
+  b.style.setProperty("--batt", pct == null ? "var(--muted)" : pct < 15 ? "#e0715a" : pct < 30 ? "#d9b04a" : "#4cb894");
+  b.innerHTML = `<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">` +
+    `<circle cx="12" cy="12" r="10" class="g-track"/>` +
+    `<circle cx="12" cy="12" r="10" class="g-arc" stroke-dasharray="${arc} ${C}" transform="rotate(-90 12 12)"/>` +
+    `<circle cx="12" cy="12" r="4" class="g-ring"/></svg>`;
+  b.hidden = false;
+  b.title = pct != null ? `Ring battery ${pct}%${dev.battery_v ? " · " + dev.battery_v + " V" : ""}` : "Ring details";
   $("foot-meta").textContent = `${dev.nights || 0} nights · ${(dev.total_events || 0).toLocaleString()} events`;
 }
 
@@ -2195,6 +2198,8 @@ async function load() {
 $("sync-btn").addEventListener("click", doSync);
 $("live-btn").addEventListener("click", toggleLive);
 $("profile-btn").addEventListener("click", openProfile);
+$("batt").addEventListener("click", () => $("device-dialog").showModal());
+$("device-close").addEventListener("click", () => $("device-dialog").close());
 $("profile-form").addEventListener("submit", saveProfile);
 $("profile-cancel").addEventListener("click", () => $("profile-dialog").close());
 load();

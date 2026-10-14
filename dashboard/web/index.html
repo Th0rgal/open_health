@@ -19,7 +19,7 @@
         </span>
       </div>
       <div class="actions">
-        <span id="batt" class="batt" title="Ring battery"></span>
+        <button id="batt" class="batt" title="Ring details" aria-label="Ring details" hidden></button>
         <button id="sync-btn" class="action" title="Sync the ring over Bluetooth">
           <span class="ic" style="--i:url(/icons/arrows-clockwise.svg)"></span>
           <span id="sync-label">Sync</span>
@@ -107,11 +107,6 @@
           <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/heartbeat.svg)"></span>Symptom radar</h2></div>
           <div id="illness" class="illness"><div class="skeleton skeleton-block"></div></div>
         </section>
-
-        <section class="panel" id="device-panel">
-          <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/cpu.svg)"></span>Device &amp; data health</h2></div>
-          <div id="device" class="device"><div class="skeleton skeleton-block"></div></div>
-        </section>
       </aside>
     </main>
 
@@ -120,6 +115,15 @@
       <span id="foot-meta"></span>
     </footer>
   </div>
+
+  <!-- ring details: battery, firmware, data health -->
+  <dialog id="device-dialog" class="dialog device-dialog">
+    <div class="dd-head">
+      <h3>Ring</h3>
+      <button type="button" id="device-close" class="btn-text">Close</button>
+    </div>
+    <div id="device" class="device"><div class="skeleton skeleton-block"></div></div>
+  </dialog>
 
   <!-- profile editor -->
   <dialog id="profile-dialog" class="dialog">
