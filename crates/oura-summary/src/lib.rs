@@ -664,6 +664,9 @@ fn stage_code(phase: &str) -> i64 {
 /// Seconds of sleep per `sleep_phase_data` epoch.
 const RING_STAGE_EPOCH_S: f64 = 30.0;
 
+/// Longest unstaged edge gap (2 minutes) counted as wake on an automatic bedtime window.
+const AUTO_EDGE_GAP_EPOCHS: usize = 4;
+
 /// The ring's OWN hypnogram, assembled from `sleep_phase_data` (tag `0x5a`).
 ///
 /// Upstream lists this event as "not emitted yet"; a Gen 3 on fw 3.4.3 emits it — 52
@@ -726,12 +729,16 @@ fn ring_hypnograms(
         if !painted {
             continue;
         }
-        // A window the user widened past the staged run declares that edge time as in bed
-        // and unstaged, i.e. awake. Without this a 2-minute adjustment hides efficiency.
-        if night.manual_bedtime {
-            let first = stages.iter().position(|&c| c != 0).unwrap_or(0);
-            let last = stages.iter().rposition(|&c| c != 0).unwrap_or(0);
+        // Unstaged epochs at either end of the window are in bed and awake. A manually
+        // widened window declares any amount; an automatic one only a short gap, where
+        // the stated window overhangs the staged run by part of an epoch.
+        let max_gap = if night.manual_bedtime { cells } else { AUTO_EDGE_GAP_EPOCHS };
+        let first = stages.iter().position(|&c| c != 0).unwrap_or(0);
+        let last = stages.iter().rposition(|&c| c != 0).unwrap_or(0);
+        if first <= max_gap {
             stages[..first].fill(4);
+        }
+        if cells - 1 - last <= max_gap {
             stages[last + 1..].fill(4);
         }
         let share = |code: i64| {
@@ -3185,6 +3192,28 @@ mod tests {
         assert_eq!(hyp[0].1["stages"][0], 4);
         assert_eq!(hyp[0].1["stages"][959], 4);
         assert_eq!(hyp[0].1["efficiency_pct"], 99.6);
+    }
+
+    #[test]
+    fn automatic_window_counts_only_a_short_edge_gap_as_wake() {
+        let night = || Night {
+            start_ds: 0,
+            end_ds: 8 * 36000,
+            captured_unix: 1,
+            ..Default::default()
+        };
+        let staged = |lead_epochs: i64, codes: usize| RingSleep {
+            start_ds: lead_epochs * 300,
+            end_ds: 8 * 36000,
+            captured_unix: 1,
+            codes: vec![2; codes],
+        };
+        let short = ring_hypnograms(&[staged(1, 959)], &[night()], |ds, _| ds as f64 / 10.0);
+        assert_eq!(short[0].1["stages"][0], 4);
+        assert_eq!(short[0].1["efficiency_pct"], 99.9);
+        let long = ring_hypnograms(&[staged(20, 940)], &[night()], |ds, _| ds as f64 / 10.0);
+        assert_eq!(long[0].1["stages"][0], 0);
+        assert!(long[0].1["efficiency_pct"].is_null());
     }
 
     #[test]
