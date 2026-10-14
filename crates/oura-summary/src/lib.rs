@@ -494,6 +494,8 @@ struct Night {
     // timestamped twins of `spo2`/`temp`/`motion` for the time-true `series_t` lanes;
     // samples packed in one event sit at that event's time.
     spo2_t: Vec<(i64, f64)>,
+    // Gen 3 `spo2_event` percentages; used when a night has no `spo2_r_pi_event`.
+    spo2_fw_t: Vec<(i64, f64)>,
     temp_t: Vec<(i64, f64)>,
     motion_t: Vec<(i64, f64)>,
     /// Respiratory rate, breaths per minute, from the ring's own per-window estimate
@@ -2089,6 +2091,7 @@ pub fn build_summary(
             "sleep_acm_period"
                 | "sleep_temp_event"
                 | "spo2_r_pi_event"
+                | "spo2_event"
                 | "sleep_period_information_2"
         ) {
             sleep_support.push((*ds, *cu));
@@ -2310,6 +2313,17 @@ pub fn build_summary(
                     nights[idx].spo2.extend(pcts);
                 }
             }
+            "spo2_event" => {
+                // firmware-computed % per sample; the ring can overshoot 100
+                if let Some(a) = v["spo2_percent"].as_array() {
+                    nights[idx].spo2_fw_t.extend(
+                        a.iter()
+                            .filter_map(|x| x.as_f64())
+                            .filter(|&x| x > 0.0)
+                            .map(|x| (*ds, x.min(100.0))),
+                    );
+                }
+            }
             "motion_event" => {
                 // seconds of motion in this window — a restlessness signal aligned to
                 // the night, feeds the polysomnograph's movement lane.
@@ -2506,6 +2520,12 @@ pub fn build_summary(
             None
         };
         let wake_ymd = Some(ymd_label(end_unix, tz));
+        let spo2_pts: &[(i64, f64)] = if nt.spo2_t.is_empty() {
+            &nt.spo2_fw_t
+        } else {
+            &nt.spo2_t
+        };
+        let spo2_vals: Vec<f64> = spo2_pts.iter().map(|p| p.1).collect();
         nights_json.push(json!({
             "date": date_label(start_unix, tz),
             "ymd": ymd_label(start_unix, tz),
@@ -2531,7 +2551,7 @@ pub fn build_summary(
             "hrv_ms": night_hrv,
             "rhr": night_rhr,
             "skin_temp": nightly_skin_temp(&nt.temp).map(|x| (x * 10.0).round() / 10.0),
-            "spo2_mean": mean(&nt.spo2).map(|x| x.round()),
+            "spo2_mean": mean(&spo2_vals).map(|x| x.round()),
             "deep_pct": deep_pct_val,
             "light_pct": light_pct_val,
             "rem_pct": rem_pct_val,
@@ -2550,7 +2570,7 @@ pub fn build_summary(
                 "hrv": series(&nt.rmssd, 0),
                 "temp": series(&nt.temp, 2),
                 "temp_span": temp_span,
-                "spo2": series(&nt.spo2, 0),
+                "spo2": series(&spo2_vals, 0),
                 "motion": nt.motion,
                 "motion_time": nt.motion_t.iter().map(|(ds, _)|
                     ((*ds - nt.start_ds) as f64 / span_ds).clamp(0.0, 1.0)).collect::<Vec<_>>(),
@@ -2561,7 +2581,7 @@ pub fn build_summary(
                 "hr": timed(&nt.hr_t, 0),
                 "hrv": timed(&nt.hrv_t, 0),
                 "temp": timed(&nt.temp_t, 2),
-                "spo2": timed(&nt.spo2_t, 0),
+                "spo2": timed(spo2_pts, 0),
                 "motion": timed(&nt.motion_t, 0),
             },
             "metrics": metrics,
@@ -2779,7 +2799,11 @@ pub fn build_summary(
             ),
             "daytime_hr"
         ),
-        feat("SpO2", cap_on("spo2", has("spo2_r_pi_event")), "spo2"),
+        feat(
+            "SpO2",
+            cap_on("spo2", has("spo2_r_pi_event") || has("spo2_event")),
+            "spo2"
+        ),
         feat(
             "Exercise HR",
             cap_on("exercise_hr", has("ehr_trace_event")),
@@ -2846,7 +2870,7 @@ pub fn build_summary(
             has("cva_raw_ppg_data"),
             "enable cva_ppg"
         ),
-        insight("SpO2", has("spo2_r_pi_event"), "enable spo2"),
+        insight("SpO2", has("spo2_r_pi_event") || has("spo2_event"), "enable spo2"),
         insight("Activity sessions", true, ""),
         insight("HRV / resting HR", true, ""),
         insight(
