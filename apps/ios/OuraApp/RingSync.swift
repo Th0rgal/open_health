@@ -311,6 +311,8 @@ final class SyncProgressBridge: SyncProgressListener, @unchecked Sendable {
 final class RingSync: ObservableObject {
     @Published var status: String = ""
     @Published var busy = false
+    /// Share of the current drain already transferred, from the ring's remaining bytes.
+    @Published private(set) var drainFraction: Double?
     @Published private(set) var exportStatus: String?
     @Published var connectionIssue: String?
     @Published var lastReport: SyncReport?
@@ -332,6 +334,7 @@ final class RingSync: ObservableObject {
     private var session: RingSession?
     private var pump: Task<Void, Never>?
     private var lastProgressBytes: UInt64?
+    private var peakBytesLeft: UInt64 = 0
     private var lastProgressAt: Date?
     private var smoothedBytesPerSecond: Double?
     private var lastAutomaticAttemptAt: Date?
@@ -624,6 +627,8 @@ final class RingSync: ObservableObject {
         connectionIssue = nil
         lastReport = nil   // clear any prior success so a failed retry isn't read as one
         lastProgressBytes = nil
+        peakBytesLeft = 0
+        drainFraction = nil
         lastProgressAt = nil
         smoothedBytesPerSecond = nil
         let key = keyHex.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -837,6 +842,8 @@ final class RingSync: ObservableObject {
                     smoothedBytesPerSecond = nil // a rebase/new drain starts a new estimate
                 }
                 lastProgressBytes = bytesLeft
+                peakBytesLeft = max(peakBytesLeft, bytesLeft)
+                drainFraction = 1 - Double(bytesLeft) / Double(peakBytesLeft)
                 lastProgressAt = now
                 let eta = smoothedBytesPerSecond.flatMap { rate -> String? in
                     guard rate > 0 else { return nil }
@@ -845,6 +852,7 @@ final class RingSync: ObservableObject {
                 status = "syncing… ~\(Self.fmtBytes(bytesLeft)) left · \(events) events"
                     + (eta.map { " · about \($0)" } ?? "")
             } else if events > 0 {
+                drainFraction = 1
                 status = "syncing… \(events) events · finishing up"
             } else {
                 status = "Syncing…"

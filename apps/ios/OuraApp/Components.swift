@@ -558,3 +558,37 @@ struct DayPager<Page: View>: View {
         }
     }
 }
+
+/// Sleep, readiness and activity scores for one day: a ring filled to the score over its value.
+struct ScoreRow: View {
+    let scores: DayScores?
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            ScoreDial(label: "sleep", value: scores?.sleep)
+            ScoreDial(label: "readiness", value: scores?.readiness)
+            ScoreDial(label: "activity", value: scores?.activity)
+        }
+    }
+}
+
+private struct ScoreDial: View {
+    let label: String
+    let value: Double?
+    var body: some View {
+        VStack(spacing: 8) {
+            ZStack {
+                Circle().stroke(Obs.rule, lineWidth: 4)
+                Circle()
+                    .trim(from: 0, to: (value ?? 0) / 100)
+                    .stroke(Obs.good, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Text(value.map { String(format: "%.0f", $0) } ?? "–")
+                    .font(Obs.mono(20, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
+            }
+            .frame(width: 64, height: 64)
+            ObsTag(label)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+    }
+}

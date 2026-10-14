@@ -14,6 +14,7 @@
 
 pub mod hourly_hr;
 pub mod ring_time;
+pub mod scores;
 pub mod sleep_score;
 pub mod symptoms;
 
@@ -500,6 +501,8 @@ struct Night {
     // timestamped twins of `spo2`/`temp`/`motion` for the time-true `series_t` lanes;
     // samples packed in one event sit at that event's time.
     spo2_t: Vec<(i64, f64)>,
+    // Gen 3 `spo2_event` percentages; used when a night has no `spo2_r_pi_event`.
+    spo2_fw_t: Vec<(i64, f64)>,
     temp_t: Vec<(i64, f64)>,
     motion_t: Vec<(i64, f64)>,
     /// Respiratory rate, breaths per minute, from the ring's own per-window estimate
@@ -838,6 +841,9 @@ fn keep_analysed_ends(
     }
 }
 
+/// Longest unstaged edge gap (2 minutes) counted as wake on an automatic bedtime window.
+const AUTO_EDGE_GAP_EPOCHS: usize = 4;
+
 /// The ring's OWN hypnogram, assembled from `sleep_phase_data` (tag `0x5a`).
 ///
 /// Upstream lists this event as "not emitted yet"; a Gen 3 on fw 3.4.3 emits it — 52
@@ -872,12 +878,17 @@ fn ring_hypnograms(
         ) else {
             continue;
         };
-        // A window the user widened past the staged run declares that edge time as in bed
-        // and unstaged, i.e. awake. Without this a 2-minute adjustment hides efficiency.
-        if night.manual_bedtime {
-            let first = stages.iter().position(|&c| c != 0).unwrap_or(0);
-            let last = stages.iter().rposition(|&c| c != 0).unwrap_or(0);
+        // Unstaged epochs at either end of the window are in bed and awake. A manually
+        // widened window declares any amount; an automatic one only a short gap, where
+        // the stated window overhangs the staged run by part of an epoch.
+        let cells = stages.len();
+        let max_gap = if night.manual_bedtime { cells } else { AUTO_EDGE_GAP_EPOCHS };
+        let first = stages.iter().position(|&c| c != 0).unwrap_or(0);
+        let last = stages.iter().rposition(|&c| c != 0).unwrap_or(0);
+        if first <= max_gap {
             stages[..first].fill(4);
+        }
+        if cells - 1 - last <= max_gap {
             stages[last + 1..].fill(4);
         }
         let share = |code: i64| {
@@ -2260,6 +2271,7 @@ pub fn build_summary(
             "sleep_acm_period"
                 | "sleep_temp_event"
                 | "spo2_r_pi_event"
+                | "spo2_event"
                 | "sleep_period_information_2"
         ) {
             sleep_support.push((*ds, *cu));
@@ -2490,6 +2502,17 @@ pub fn build_summary(
                     nights[idx].spo2.extend(pcts);
                 }
             }
+            "spo2_event" => {
+                // firmware-computed % per sample; the ring can overshoot 100
+                if let Some(a) = v["spo2_percent"].as_array() {
+                    nights[idx].spo2_fw_t.extend(
+                        a.iter()
+                            .filter_map(|x| x.as_f64())
+                            .filter(|&x| x > 0.0)
+                            .map(|x| (*ds, x.min(100.0))),
+                    );
+                }
+            }
             "motion_event" => {
                 // seconds of motion in this window — a restlessness signal aligned to
                 // the night, feeds the polysomnograph's movement lane.
@@ -2686,6 +2709,12 @@ pub fn build_summary(
             None
         };
         let wake_ymd = Some(ymd_label(end_unix, tz));
+        let spo2_pts: &[(i64, f64)] = if nt.spo2_t.is_empty() {
+            &nt.spo2_fw_t
+        } else {
+            &nt.spo2_t
+        };
+        let spo2_vals: Vec<f64> = spo2_pts.iter().map(|p| p.1).collect();
         nights_json.push(json!({
             "date": date_label(start_unix, tz),
             "ymd": ymd_label(start_unix, tz),
@@ -2711,7 +2740,7 @@ pub fn build_summary(
             "hrv_ms": night_hrv,
             "rhr": night_rhr,
             "skin_temp": nightly_skin_temp(&nt.temp).map(|x| (x * 10.0).round() / 10.0),
-            "spo2_mean": mean(&nt.spo2).map(|x| x.round()),
+            "spo2_mean": mean(&spo2_vals).map(|x| x.round()),
             "deep_pct": deep_pct_val,
             "light_pct": light_pct_val,
             "rem_pct": rem_pct_val,
@@ -2730,7 +2759,7 @@ pub fn build_summary(
                 "hrv": series(&nt.rmssd, 0),
                 "temp": series(&nt.temp, 2),
                 "temp_span": temp_span,
-                "spo2": series(&nt.spo2, 0),
+                "spo2": series(&spo2_vals, 0),
                 "motion": nt.motion,
                 "motion_time": nt.motion_t.iter().map(|(ds, _)|
                     ((*ds - nt.start_ds) as f64 / span_ds).clamp(0.0, 1.0)).collect::<Vec<_>>(),
@@ -2741,7 +2770,7 @@ pub fn build_summary(
                 "hr": timed(&nt.hr_t, 0),
                 "hrv": timed(&nt.hrv_t, 0),
                 "temp": timed(&nt.temp_t, 2),
-                "spo2": timed(&nt.spo2_t, 0),
+                "spo2": timed(spo2_pts, 0),
                 "motion": timed(&nt.motion_t, 0),
             },
             "metrics": metrics,
@@ -2959,7 +2988,11 @@ pub fn build_summary(
             ),
             "daytime_hr"
         ),
-        feat("SpO2", cap_on("spo2", has("spo2_r_pi_event")), "spo2"),
+        feat(
+            "SpO2",
+            cap_on("spo2", has("spo2_r_pi_event") || has("spo2_event")),
+            "spo2"
+        ),
         feat(
             "Exercise HR",
             cap_on("exercise_hr", has("ehr_trace_event")),
@@ -3026,7 +3059,7 @@ pub fn build_summary(
             has("cva_raw_ppg_data"),
             "enable cva_ppg"
         ),
-        insight("SpO2", has("spo2_r_pi_event"), "enable spo2"),
+        insight("SpO2", has("spo2_r_pi_event") || has("spo2_event"), "enable spo2"),
         insight("Activity sessions", true, ""),
         insight("HRV / resting HR", true, ""),
         insight(
@@ -3173,6 +3206,7 @@ pub fn build_summary(
         "clock": clock_diag,
         "device": device,
         "profile": demo.to_json(),
+        "scores": scores::daily_scores(&nights_json, &activity_daily, &sleep_debt),
         "nights": nights_json,
         "sleep_debt": sleep_debt,
         // Model-free Symptom Radar: the same four biomarkers the torch illness model
@@ -3409,6 +3443,28 @@ mod tests {
         assert_eq!(hyp[0].1["stages"][0], 4);
         assert_eq!(hyp[0].1["stages"][959], 4);
         assert_eq!(hyp[0].1["efficiency_pct"], 99.6);
+    }
+
+    #[test]
+    fn automatic_window_counts_only_a_short_edge_gap_as_wake() {
+        let night = || Night {
+            start_ds: 0,
+            end_ds: 8 * 36000,
+            captured_unix: 1,
+            ..Default::default()
+        };
+        let staged = |lead_epochs: i64, codes: usize| RingSleep {
+            start_ds: lead_epochs * 300,
+            end_ds: 8 * 36000,
+            captured_unix: 1,
+            codes: vec![2; codes],
+        };
+        let short = ring_hypnograms(&[staged(1, 959)], &[night()], |ds, _| ds as f64 / 10.0);
+        assert_eq!(short[0].1["stages"][0], 4);
+        assert_eq!(short[0].1["efficiency_pct"], 99.9);
+        let long = ring_hypnograms(&[staged(20, 940)], &[night()], |ds, _| ds as f64 / 10.0);
+        assert_eq!(long[0].1["stages"][0], 0);
+        assert!(long[0].1["efficiency_pct"].is_null());
     }
 
     #[test]

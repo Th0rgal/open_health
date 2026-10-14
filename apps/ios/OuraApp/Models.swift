@@ -289,6 +289,12 @@ struct UndatedNight: Codable {
     var captured_unix: Int64?; var source: String?
     var reason: String?; var recoverable: Bool?
 }
+/// Estimated daily scores (0-100) from `oura-summary::scores`; each is nil without its inputs.
+struct DayScores: Codable {
+    var sleep: Double?
+    var readiness: Double?
+    var activity: Double?
+}
 struct Summary: Codable {
     var analysis_digest: String? = nil
     var analysis_version: Int? = nil
@@ -299,6 +305,7 @@ struct Summary: Codable {
     var vitals = Vitals()
     var activity_profile: [String: [Double]] = [:]   // date → 96 × 15-min mean MET-above-rest
     var activity_daily: [String: DailyStat] = [:]     // date → steps / active-kcal / total-kcal
+    var scores: [String: DayScores] = [:]             // wake date → sleep / readiness / activity
     var profile: Profile?
     var cardio: Cardio?
     var fitness: Fitness?
@@ -314,7 +321,7 @@ struct Summary: Codable {
     // out of decoding.
     enum CodingKeys: String, CodingKey {
         case analysis_digest, analysis_version
-        case digest, device, nights, clock, vitals, activity_profile, activity_daily, profile, cardio, fitness, error
+        case digest, device, nights, clock, vitals, activity_profile, activity_daily, scores, profile, cardio, fitness, error
         case symptoms
         case sleepDebt = "sleep_debt"
     }
@@ -334,6 +341,7 @@ struct Summary: Codable {
         vitals = (try? c.decodeIfPresent(Vitals.self, forKey: .vitals)) ?? Vitals()
         activity_profile = (try? c.decodeIfPresent([String: [Double]].self, forKey: .activity_profile)) ?? [:]
         activity_daily = (try? c.decodeIfPresent([String: DailyStat].self, forKey: .activity_daily)) ?? [:]
+        scores = (try? c.decodeIfPresent([String: DayScores].self, forKey: .scores)) ?? [:]
         profile = try? c.decodeIfPresent(Profile.self, forKey: .profile)
         cardio = try? c.decodeIfPresent(Cardio.self, forKey: .cardio)
         fitness = try? c.decodeIfPresent(Fitness.self, forKey: .fitness)
