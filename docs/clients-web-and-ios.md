@@ -159,7 +159,9 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
 - **On-phone ring sync UX**: the ring's own battery and firmware are read right after
   authentication (`SyncProgressListener.on_device`) and shown at once (`RingInfo`,
   `ringCard`, battery button). Sync continues in the background, reconnects to the saved
-  ring by identifier, and a paired ring shows a status card with the key collapsed. The web
+  ring by identifier, registers the app stream (`16 01 02`) on every ring so it asks for a
+  15 ms connection interval (a Gen 3 batch arrives in ~420 ms instead of ~850 ms; the mode
+  lasts one connection), and a paired ring shows a status card with the key collapsed. The web
   dashboard reads a local database and has no BLE sync.
 - **Sleep report without a hypnogram**: iOS still draws the time-in-bed strip and the
   signal lanes; the web returns early.
