@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Oura automatic_activity_detection 3.1.11 with Android-parity inputs.
+"""Run the activity detection model on one local day at a time.
 
 The official Android app evaluates one local calendar day at a time and feeds
 the 12-column step-motion series produced by steps_motion_decoder. Those details
@@ -16,17 +16,17 @@ from pathlib import Path
 
 import torch
 
-from _common import resolve_db, resolve_models_dir
+from _common import clock_events_relation, resolve_db, resolve_models_dir
 from activity_features import decoder_to_aad, unpack_real_step
 from epoch_time import build_epochs, is_dated, make_unix_s
 
 warnings.filterwarnings("ignore", message=".*searchsorted.*")
 
 REPO = Path(__file__).resolve().parent.parent
-MODEL_NAME = "automatic_activity_detection_3_1_11.pt"
+MODEL_NAME = "automatic_activity_detection_3_1_15.pt"
 MODEL = resolve_models_dir(REPO, MODEL_NAME) / MODEL_NAME
 STEP_MODEL = MODEL.parent / "steps_motion_decoder_2_0_0.pt"
-MODEL_VERSION = "3.1.11"
+MODEL_VERSION = "3.1.15"
 
 BEHAVIOR = {
     -1: "nothing", 0: "<empty>", 1: "badminton", 2: "boxing", 3: "crossCountrySkiing",
@@ -96,7 +96,7 @@ ACCEPTABLE_LAST_HR_MISSING_MINUTES = 5
 
 
 def model_would_reject(met, motion, temperature, heart_rate, step_rows):
-    """Mirror of the model's `get_last_valid_time` (AAD 3.1.11 preprocessor).
+    """Mirror of the model's last-valid-time preprocessing step.
 
     With fewer than MIN_VALID_METS worn MET minutes before the last motion sample the
     valid window collapses to minute 0 and the graph indexes an empty MET tensor.
@@ -222,7 +222,7 @@ def main():
         sys.exit(f"error: model not found: {MODEL}")
     db = sqlite3.connect(str(db_path))
     rows = db.execute(
-        "SELECT ring_timestamp,tag,decoded_json,captured_unix FROM events "
+        "SELECT ring_timestamp,tag,decoded_json,captured_unix FROM " + clock_events_relation(db) + " "
         "WHERE decoded_json IS NOT NULL ORDER BY captured_unix,id"
     ).fetchall()
     if not rows:

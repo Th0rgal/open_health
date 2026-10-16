@@ -14,8 +14,6 @@ int oura_activity(const char *path, const float *context, const float *user,
                   const float *motion, int no, const float *temp, int nt,
                   const float *hr, int nh, float threshold, float duration,
                   float *out, int cap) { return -1; }
-int oura_stepmotion(const char *path, const int64_t *ts, const float *raw,
-                    int n, int64_t *out_ts, float *out, int cap) { return -1; }
 int oura_illness(const char *path, const float *series, const float *scalars,
                  double *score, int *decision, float *biomarkers) { return -1; }
 void oura_torch_release(void) {}

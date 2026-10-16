@@ -14,7 +14,7 @@ w.fetch = async url => {
   requests.push(url);
   return { ok: true, json: async () => ({ minutes: 15, bins: [], latest: null }) };
 };
-w.eval(fs.readFileSync('dashboard/web/app.js', 'utf8').replace(/load\(\);\s*$/, '') + '\nwindow.openDayPage = openDayPage; window.toggleLive = toggleLive;');
+w.eval(fs.readFileSync('dashboard/web/app.js', 'utf8').replace(/load\(\);\s*$/, '') + '\nwindow.openDayPage = openDayPage; window.toggleLive = toggleLive; window.renderStagerChoice = renderStagerChoice; window.setStager = (s) => { CURRENT_STAGER = s; };');
 const start = Date.UTC(2026, 8, 25, 22) / 1000;
 const night = { ymd: '2026-09-25', wake_ymd: '2026-09-26', start_unix: start,
   end_unix: start + 8 * 3600, start: '22:00', end: '06:00', in_bed_h: 8,
@@ -38,6 +38,27 @@ w.openDayPage(nssa, '2026-09-26');
 const lanes = [...w.document.querySelectorAll('.tl-row')].map(row => row.textContent);
 assert(lanes.some(t => t.includes('Stages · 5 min (Oura app)')), '5-minute Oura lane missing');
 assert(lanes.some(t => t.includes('Stages') && !t.includes('5 min')), '30 s stage lane missing');
+// Any stager gets the 5-minute lane; only NSSA carries the Oura app label.
+const builtIn = { ...data, nights: [{ ...night, stages_full: new Array(40).fill(2), staging_complete: true,
+  staging_source: 'xgb', stages_5min: [4, 2, 1, 3] }] };
+w.openDayPage(builtIn, night.wake_ymd);
+const builtInLanes = [...w.document.querySelectorAll('.tl-row')].map(row => row.textContent);
+assert(builtInLanes.some(t => t.includes('Stages · 5 min') && !t.includes('Oura app')), '5-minute lane missing for the built-in stager');
+// The sleep stager selector disables an option whose model files are missing and shows its notice.
+const stager = (official) => ({ choice: 'auto', effective: official ? 'official' : 'xgb', notice: null, options: [
+  { id: 'official', label: 'Official staging', detail: 'official detail', available: official,
+    notice: official ? null : 'Not available in this build. Missing: sleepstaging_2_6_0_classifier.bin.' },
+  { id: 'xgb', label: 'Built-in staging', detail: 'built-in detail', available: true, notice: null }] });
+w.setStager(stager(false));
+w.renderStagerChoice();
+const choice = w.document.getElementById('f-stager');
+const options = [...choice.options].map(o => [o.value, o.disabled]);
+assert.deepEqual(options, [['auto', false], ['official', true], ['xgb', false]]);
+assert(w.document.getElementById('f-stager-note').textContent.includes('sleepstaging_2_6_0_classifier.bin'));
+w.setStager(stager(true));
+w.renderStagerChoice();
+assert(![...w.document.getElementById('f-stager').options].some(o => o.disabled));
+assert(!w.document.getElementById('f-stager-note').textContent.includes('Not available'));
 const absent = { ...data, nights: [{ ...night, start_ds: 10000, end_ds: 298000, stages_full: [] }] };
 w.openDayPage(absent, '2026-09-26');
 assert(w.document.querySelector('#sec-sleep').textContent.includes('stages are unavailable'));

@@ -11,7 +11,7 @@ from export_mobile import MODELS, repair_activity_empty_peaks
 class MobileActivityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        path = MODELS / "automatic_activity_detection_3_1_11.pt"
+        path = MODELS / "automatic_activity_detection_3_1_15.pt"
         if not path.exists():
             raise unittest.SkipTest("Local activity model is not installed")
         cls.original = torch.jit.load(str(path)).eval()
@@ -85,7 +85,7 @@ class DayGuardTests(unittest.TestCase):
         full_motion = [[600.0 + i, 0, 30, 0, 0, 0, float("nan"), 10, 1] for i in range(13)]
         self.assertFalse(reject(met, full_motion, [[612.0, 33.0]], [[612.0, 60.0]], [[600.0], [612.0]]))
         # Model agrees: the rejected inputs throw, the accepted ones run.
-        model = torch.jit.load(str(MODELS / "automatic_activity_detection_3_1_11.pt")).eval()
+        model = torch.jit.load(str(MODELS / "automatic_activity_detection_3_1_15.pt")).eval()
         nan = float("nan")
         def run(m, mo, te, hr):
             steps = [[m[0][0]] + [nan] * 11, [m[-1][0]] + [nan] * 11]

@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import clock_events_relation
 from epoch_time import build_epochs, is_dated, make_unix_s
 from respiratory_rate import respiratory_rate
 
@@ -58,7 +59,7 @@ def civil(days):
 def load(db):
     con = sqlite3.connect(str(db))
     rows = con.execute(
-        "SELECT ring_timestamp, tag, decoded_json, captured_unix FROM events "
+        "SELECT ring_timestamp, tag, decoded_json, captured_unix FROM " + clock_events_relation(con) + " "
         "WHERE decoded_json IS NOT NULL ORDER BY captured_unix, id"
     ).fetchall()
     con.close()

@@ -17,12 +17,12 @@ MODELS_DIR = REPO / "notes" / "models"
 
 # newest version per family (drop superseded duplicates)
 NEWEST = [
-    "automatic_activity_detection_3_1_11",
+    "automatic_activity_detection_3_1_15",
     "atlas_2_1_0",
     "awhr_imputation_1_2_0",
     "awhr_profile_selector_1_0_1",
     "cumulative_stress_1_2_2",
-    "cva_2_1_0",
+    "cva_2_1_5",
     "cva_calibrator_1_3_0",
     "daily_medians_1_1_0",
     "daily_short_term_baselines_1_1_0",

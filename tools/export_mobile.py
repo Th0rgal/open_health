@@ -12,7 +12,7 @@ Outputs land in `notes/models/mobile/<name>.ptl` (gitignored, like the models).
 
 Usage:
     python tools/export_mobile.py            # export all
-    python tools/export_mobile.py automatic_activity_detection_3_1_11
+    python tools/export_mobile.py <model name>
     python -m unittest discover -s tools -p test_mobile_activity.py  # parity check
 """
 import argparse
@@ -29,12 +29,12 @@ OUT = MODELS / "mobile"
 
 # newest version per family (same list as inspect_models.py)
 NEWEST = [
-    "automatic_activity_detection_3_1_11",
+    "automatic_activity_detection_3_1_15",
     "atlas_2_1_0",
     "awhr_imputation_1_2_0",
     "awhr_profile_selector_1_0_1",
     "cumulative_stress_1_2_2",
-    "cva_2_1_0",
+    "cva_2_1_5",
     "cva_calibrator_1_3_0",
     "daily_medians_1_1_0",
     "daily_short_term_baselines_1_1_0",
@@ -59,7 +59,7 @@ NEWEST = [
 
 
 def repair_activity_empty_peaks(model):
-    """Repair AAD 3.1.11's scripted find_peaks(<3 samples) empty-list type.
+    """Repair the activity model's scripted find_peaks(<3 samples) empty-list type.
 
     The source uses torch.tensor([], dtype=int64), serialized as List[Tensor].
     Both full TorchScript and the lite runtime reject that list before applying
@@ -103,7 +103,7 @@ def export_one(name):
             # (TorchBridge.mm + NssaOps.c).
             import nssa_ops  # noqa: F401
         m = torch.jit.load(str(src), map_location="cpu").eval()
-        if name == "automatic_activity_detection_3_1_11":
+        if name == "automatic_activity_detection_3_1_15":
             m = repair_activity_empty_peaks(m)
         dst = OUT / f"{name}.ptl"
         m._save_for_lite_interpreter(str(dst))

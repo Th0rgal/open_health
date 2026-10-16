@@ -50,3 +50,12 @@ def resolve_db(arg, repo):
     if not db.exists():
         sys.exit(f"error: database not found: {db} (run `oura sync` first)")
     return db
+
+
+def clock_events_relation(con):
+    """The relation holding the clock stream: `events_with_anchors` (ring events plus
+    the phone anchors stored in `phone_anchors`) once the DB has it, else `events`."""
+    has_view = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name='events_with_anchors'"
+    ).fetchone()
+    return "events_with_anchors" if has_view else "events"

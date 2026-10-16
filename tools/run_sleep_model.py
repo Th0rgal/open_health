@@ -21,7 +21,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from _common import resolve_db, resolve_models_dir
+from _common import clock_events_relation, resolve_db, resolve_models_dir
 from epoch_time import build_epochs, is_dated, make_unix_s
 from nssa_inputs import TAG_BEDTIME, collect_nssa_inputs
 from ibi_correction import correct_ibis
@@ -58,7 +58,7 @@ def read_profile(db):
 
 
 con = sqlite3.connect(str(DB))
-rows = con.execute("SELECT ring_timestamp, tag, COALESCE(decoded_json, '{}'), captured_unix, body FROM events "
+rows = con.execute("SELECT ring_timestamp, tag, COALESCE(decoded_json, '{}'), captured_unix, body FROM " + clock_events_relation(con) + " "
                    "WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14) "
                    "ORDER BY captured_unix, id").fetchall()
 _epochs = build_epochs([r[:4] for r in rows])

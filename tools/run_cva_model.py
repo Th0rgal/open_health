@@ -4,7 +4,7 @@
 Decodes the `cva_raw_ppg_data` events (BLE tag 0x81) the ring emits when the
 `cva_ppg` (CAP_CVA_PPG_SAMPLER, id 13) feature is enabled, reconstructs the PPG
 waveform, segments it the way the app does (groups of 1500 samples), and runs
-Oura's decrypted `cva_2_1_0.pt` model.
+Oura's decrypted `cva_2_1_5.pt` model.
 
 Decode: each 0x81 body is a stateful delta stream. Byte 0x80 marks the next
 three bytes as a signed 24-bit absolute ADC sample; every other byte is a signed
@@ -35,7 +35,7 @@ import torch
 from _common import resolve_db, resolve_models_dir
 
 REPO = Path(__file__).resolve().parent.parent
-MODEL_NAME = "cva_2_1_0.pt"
+MODEL_NAME = "cva_2_1_5.pt"
 MODEL = resolve_models_dir(REPO, MODEL_NAME) / MODEL_NAME
 SEG_LEN = 1500          # samples per segment (hard model constant)
 GAP_DS = 20             # >2 s (deciseconds) splits two PPG measurements
