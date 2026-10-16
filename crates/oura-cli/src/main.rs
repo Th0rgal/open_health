@@ -282,6 +282,11 @@ enum Command {
         /// via `$OURA_BLOOD_FILES`.
         #[arg(long, value_name = "DIR")]
         blood_files: Option<PathBuf>,
+        /// Sleep stager: `auto` (official when its model files are present, else
+        /// built-in), `official` (Oura's sleepstaging graph and its classifier) or `xgb`
+        /// (the built-in Rust pipeline). Stored in profile.json; omit to keep the stored choice.
+        #[arg(long, value_name = "MODE", value_parser = ["auto", "official", "xgb"])]
+        sleep_stager: Option<String>,
     },
 }
 
@@ -505,6 +510,7 @@ async fn main() -> Result<()> {
             weight,
             dna_files,
             blood_files,
+            sleep_stager,
         } => {
             let seed = dashboard::Demographics {
                 sex: sex.chars().next().unwrap_or('M').to_ascii_uppercase(),
@@ -524,6 +530,7 @@ async fn main() -> Result<()> {
                 cli.name.clone(),
                 cli.key_file.clone(),
                 seed,
+                sleep_stager.clone(),
             )
             .await
         }
@@ -1059,10 +1066,10 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
         next_cursor
     );
 
-    // Same anchor the iOS sync writes (oura-core `phone_anchor_event`): without it a
+    // Same anchor the iOS sync writes (oura-core `phone_anchor`): without it a
     // CLI-synced DB has no wall-clock point on the near side of a battery brownout.
-    if let Some(anchor) = phone_anchor_event(events_synced, next_cursor) {
-        if let Err(e) = store.insert_event(&serial, &anchor) {
+    if let Some((ring_ts, unix)) = phone_anchor(events_synced, next_cursor) {
+        if let Err(e) = store.insert_phone_anchor(&serial, ring_ts, unix) {
             eprintln!("  … phone anchor not saved: {e}");
         }
     }
@@ -1095,12 +1102,9 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
     Ok(())
 }
 
-/// A synthetic `time_sync` (0x42) row pairing the newest drained ring timestamp with
-/// the host clock; body and decoded shape match oura-core's phone anchor.
-fn phone_anchor_event(
-    events_synced: u32,
-    next_cursor: u32,
-) -> Option<oura_protocol::events::RingEvent> {
+/// The `(ring_timestamp, unix_time)` pair of a phone anchor: the newest drained ring
+/// timestamp with the host clock; same as oura-core's `phone_anchor`.
+fn phone_anchor(events_synced: u32, next_cursor: u32) -> Option<(u32, u32)> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
@@ -1108,15 +1112,7 @@ fn phone_anchor_event(
     if events_synced == 0 || next_cursor == 0 {
         return None;
     }
-    let mut body = now.to_le_bytes().to_vec();
-    body.extend_from_slice(b"phone");
-    Some(oura_protocol::events::RingEvent {
-        tag: 0x42,
-        name: oura_protocol::events::event_name(0x42),
-        timestamp: next_cursor - 1,
-        body,
-        decoded: Some(serde_json::json!({ "unix_time": now, "source": "phone" })),
-    })
+    Some((next_cursor - 1, now))
 }
 
 async fn cmd_latest(cli: &Cli, key: &Option<[u8; 16]>) -> Result<()> {

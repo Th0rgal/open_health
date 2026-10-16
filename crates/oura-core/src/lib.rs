@@ -32,6 +32,70 @@ pub fn rmssd(ibi_ms: Vec<u16>) -> f64 {
 /// of the dashboard — with model fields null until the torch runner is wired.
 ///
 /// Returns the summary JSON string, or `{ "error": "…" }`.
+/// The ring's records inside a time window, for plotting an activity afterwards. Read from the
+/// database on the phone; the ring is not contacted. Each series is parallel arrays of unix
+/// seconds and values.
+#[derive(uniffi::Record, Clone, Debug, Default)]
+pub struct ActivitySeriesRecord {
+    pub hr_t: Vec<f64>,
+    pub hr_v: Vec<f64>,
+    pub met_t: Vec<f64>,
+    pub met_v: Vec<f64>,
+    pub motion_t: Vec<f64>,
+    pub motion_v: Vec<f64>,
+}
+
+#[uniffi::export]
+pub fn activity_series(db_path: String, start_unix: f64, end_unix: f64) -> ActivitySeriesRecord {
+    let Ok(store) = oura_store::Store::open_read_only(&db_path) else { return ActivitySeriesRecord::default() };
+    let Ok(events) = store.decoded_events() else { return ActivitySeriesRecord::default() };
+    let clock = oura_summary::ring_time::RingClock::from_events(&events);
+    let s = oura_analysis::ported::window_series::window_series(
+        &events,
+        &|ds, cu| clock.dated_unix_s(ds, cu),
+        start_unix,
+        end_unix,
+    );
+    let split = |v: Vec<(f64, f64)>| -> (Vec<f64>, Vec<f64>) { v.into_iter().unzip() };
+    let (hr_t, hr_v) = split(s.hr);
+    let (met_t, met_v) = split(s.met);
+    let (motion_t, motion_v) = split(s.motion);
+    ActivitySeriesRecord { hr_t, hr_v, met_t, met_v, motion_t, motion_v }
+}
+
+/// The activity model's step-motion input: a row per 10 s, decoded from the stored real-step
+/// records by open_oura's `steps_motion_decoder` (no model file). `features` is `timestamps_ms.len()`
+/// rows of 11 values in the activity model's column order.
+#[derive(uniffi::Record, Clone, Debug, Default)]
+pub struct StepMotionRowsRecord {
+    pub timestamps_ms: Vec<i64>,
+    pub features: Vec<f32>,
+}
+
+#[uniffi::export]
+pub fn step_motion_rows(db_path: String) -> StepMotionRowsRecord {
+    let Ok(store) = oura_store::Store::open_read_only(&db_path) else { return StepMotionRowsRecord::default() };
+    let Ok(events) = store.decoded_events() else { return StepMotionRowsRecord::default() };
+    let clock = oura_summary::ring_time::RingClock::from_events(&events);
+    let rows = oura_summary::real_steps::stepmotion_rows(std::path::Path::new(&db_path), &clock);
+    StepMotionRowsRecord {
+        timestamps_ms: rows.iter().map(|r| r.0).collect(),
+        features: rows.iter().flat_map(|r| r.1).collect(),
+    }
+}
+
+/// Installs the step counter weights from a file you supply (not part of the repository). Returns whether the model is now available.
+#[uniffi::export]
+pub fn step_counter_load(path: String) -> bool {
+    oura_summary::real_steps::load_step_counter(&path)
+}
+
+/// Whether the step counter model is installed, so the profile can offer it as the step source.
+#[uniffi::export]
+pub fn step_counter_available() -> bool {
+    oura_summary::real_steps::available()
+}
+
 #[uniffi::export]
 pub fn summary_json(db_path: String, tz_offset: i64) -> String {
     match oura_summary::build_summary(
@@ -190,13 +254,14 @@ fn raw_events(db_path: &str, name_filter: &str, limit: u32) -> Result<serde_json
 /// plus raw `0x41` (`ring_start`, 14 bytes) rows whose `decoded_json` is NULL.
 fn clock_rows(conn: &rusqlite::Connection) -> Result<Vec<(i64, u8, String, i64)>, String> {
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT ring_timestamp, tag, \
                     CASE WHEN tag IN (66, 133) THEN COALESCE(decoded_json, '') ELSE '' END, captured_unix \
-             FROM events \
+             FROM {} \
              WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14) \
              ORDER BY captured_unix, id",
-        )
+            oura_store::storage::clock_events_relation(conn)
+        ))
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
@@ -274,7 +339,6 @@ use std::sync::{Arc, Mutex};
 
 use oura_link::transport::Transport;
 use oura_link::OuraClient;
-use oura_protocol::events::RingEvent;
 use oura_store::storage::Store;
 use tokio::sync::{broadcast, watch};
 
@@ -292,6 +356,21 @@ pub trait BleWriter: Send + Sync {
 #[uniffi::export(callback_interface)]
 pub trait SyncProgressListener: Send + Sync {
     fn on_progress(&self, stage: String, bytes_left: u64, events_synced: u32);
+    /// Ring identity and charge, read right after authentication so the UI can show
+    /// them before the history drain starts. `battery_pct` is `None` when the ring
+    /// did not answer the battery request.
+    fn on_device(&self, serial: String, firmware: String, battery_pct: Option<u8>);
+    /// Free-form diagnostic line (timings, skipped optional steps). Never affects control flow.
+    fn on_note(&self, message: String);
+}
+
+/// Swift implements this to receive live heart-rate beats.
+#[uniffi::export(callback_interface)]
+pub trait LiveHrListener: Send + Sync {
+    /// `"auth"` while authenticating, `"streaming"` once the ring has been asked for beats.
+    fn on_stage(&self, stage: String);
+    /// One valid beat: the instantaneous rate and the inter-beat interval it came from.
+    fn on_sample(&self, bpm: u16, ibi_ms: u16);
 }
 
 #[derive(uniffi::Record)]
@@ -449,6 +528,7 @@ async fn drain_into_store(
 ) -> Result<oura_link::client::SyncOutcome, SyncError> {
     let batch = Mutex::new(Vec::new());
     let checkpoint = AtomicU32::new(cursor);
+    let batch_started = Mutex::new(std::time::Instant::now());
     let outcome = client
         .drain_events(
             cursor,
@@ -458,6 +538,8 @@ async fn drain_into_store(
             },
             |p| {
                 let mut events = batch.lock().unwrap();
+                let received_ms = batch_started.lock().unwrap().elapsed().as_millis();
+                let commit_started = std::time::Instant::now();
                 match store
                     .lock()
                     .unwrap()
@@ -466,8 +548,20 @@ async fn drain_into_store(
                     Ok(count) => {
                         inserted.fetch_add(count, Ordering::Relaxed);
                         checkpoint.store(p.next_cursor, Ordering::Relaxed);
+                        for line in oura_link::transport::take_diag() {
+                            progress.on_note(line);
+                        }
+                        progress.on_note(format!(
+                            "batch events={} inserted={} receive_ms={} commit_ms={} bytes_left={}",
+                            events.len(),
+                            count,
+                            received_ms,
+                            commit_started.elapsed().as_millis(),
+                            p.bytes_left
+                        ));
                         events.clear();
                         progress.on_progress("sync".into(), p.bytes_left as u64, p.events_synced);
+                        *batch_started.lock().unwrap() = std::time::Instant::now();
                         true
                     }
                     Err(error) => {
@@ -516,6 +610,40 @@ fn is_rejected_history_cursor(error: &str) -> bool {
     error.contains("extended history request failed with result code 0xff")
 }
 
+
+/// One ring capture feature as the ring reports it.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct CaptureFeature {
+    pub id: u8,
+    pub name: String,
+    /// 0 off, 1 automatic, 2 requested, 3 live; `None` when the ring did not answer.
+    pub mode: Option<u8>,
+}
+
+impl From<oura_link::CaptureFeature> for CaptureFeature {
+    fn from(f: oura_link::CaptureFeature) -> Self {
+        CaptureFeature { id: f.id, name: f.name.to_string(), mode: f.mode }
+    }
+}
+
+/// A requested mode for one capture feature (0 off, 1 automatic).
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct CaptureChange {
+    pub id: u8,
+    pub mode: u8,
+}
+
+/// What `exercise_start` did to the ring.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct ExerciseStart {
+    /// Exercise heart rate mode before the start (0 off, 1 automatic, 2 requested), if readable.
+    pub previous_mode: Option<u8>,
+    /// Mode the ring reports after the start (2 when the session is armed).
+    pub mode_after: Option<u8>,
+    /// Result byte of the parameter write (0 success).
+    pub parameter_result: u8,
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl RingSession {
     #[uniffi::constructor]
@@ -560,6 +688,127 @@ impl RingSession {
             _ = stop.changed() => Err(SyncError::Interrupted {
                 reason: stop.borrow().clone().unwrap_or_else(|| "cancelled".into()) }),
             result = self.sync_inner(db_path, key_hex, progress) => result,
+        }
+    }
+
+    /// Authenticate, then stream live heart rate for up to `seconds` (the ring must be
+    /// worn). `listener` receives each valid beat. Returns the number of beats. The
+    /// ring is put back to automatic measuring on every exit, including `cancel`.
+    pub async fn live_heart_rate(
+        &self,
+        key_hex: String,
+        seconds: u32,
+        listener: Box<dyn LiveHrListener>,
+    ) -> Result<u32, SyncError> {
+        let fail = |e: String| SyncError::Failed(e);
+        let key =
+            parse_key(&key_hex).ok_or_else(|| fail("auth key must be 32 hex chars".into()))?;
+        let mut stop = self.stop.subscribe();
+        if let Some(reason) = stop.borrow().clone() {
+            return Err(SyncError::Interrupted { reason });
+        }
+        let client = OuraClient::new(FfiTransport {
+            tx: self.tx.clone(),
+            writer: self.writer.clone(),
+        });
+        listener.on_stage("auth".into());
+        let authenticated = tokio::select! {
+            biased;
+            _ = stop.changed() => return Err(SyncError::Interrupted {
+                reason: stop.borrow().clone().unwrap_or_else(|| "cancelled".into()) }),
+            result = client.authenticate(&key) => result,
+        };
+        authenticated.map_err(|e| fail(e.to_string()))?;
+        listener.on_stage("streaming".into());
+        let beats = AtomicU32::new(0);
+        let stream = client.live_heart_rate(std::time::Duration::from_secs(seconds as u64), false, |s| {
+            beats.fetch_add(1, Ordering::Relaxed);
+            listener.on_sample(s.bpm, s.ibi_ms);
+        });
+        tokio::select! {
+            biased;
+            _ = stop.changed() => {
+                // the stream future is dropped before its own teardown ran
+                let restore = async {
+                    let _ = client.set_feature_mode(oura_protocol::protocol::feature::DAYTIME_HR,
+                        oura_protocol::protocol::feature_mode::AUTOMATIC).await;
+                    let _ = client.set_feature_subscription(oura_protocol::protocol::feature::DAYTIME_HR,
+                        oura_protocol::protocol::subscription_mode::OFF).await;
+                };
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), restore).await;
+                Err(SyncError::Interrupted {
+                    reason: stop.borrow().clone().unwrap_or_else(|| "cancelled".into()) })
+            }
+            result = stream => {
+                result.map_err(|e| fail(e.to_string()))?;
+                Ok(beats.load(Ordering::Relaxed))
+            }
+        }
+    }
+
+    /// Authenticate and read the mode of each capture feature. Writes nothing to the ring.
+    pub async fn capture_settings(&self, key_hex: String) -> Result<Vec<CaptureFeature>, SyncError> {
+        let client = self.authenticated_client(&key_hex).await?;
+        Ok(client.capture_features().await.into_iter().map(Into::into).collect())
+    }
+
+    /// Authenticate, set the requested modes (0 off or 1 automatic; anything else is refused
+    /// before anything is sent) and return the modes read back.
+    pub async fn apply_capture_settings(
+        &self,
+        key_hex: String,
+        changes: Vec<CaptureChange>,
+    ) -> Result<Vec<CaptureFeature>, SyncError> {
+        let client = self.authenticated_client(&key_hex).await?;
+        let pairs: Vec<(u8, u8)> = changes.iter().map(|c| (c.id, c.mode)).collect();
+        let modes = client.set_capture_modes(&pairs).await.map_err(|e| SyncError::Failed(e.to_string()))?;
+        Ok(modes.into_iter().map(Into::into).collect())
+    }
+
+    /// Arm a user-started workout (open_oura `OuraClient::exercise_start`).
+    pub async fn exercise_start(
+        &self,
+        key_hex: String,
+        activity_id: u16,
+        resting_hr: u8,
+        max_hr: u8,
+    ) -> Result<ExerciseStart, SyncError> {
+        let client = self.authenticated_client(&key_hex).await?;
+        let r = client
+            .exercise_start(activity_id, resting_hr, max_hr)
+            .await
+            .map_err(|e| SyncError::Failed(e.to_string()))?;
+        Ok(ExerciseStart { previous_mode: r.previous_mode, mode_after: r.mode_after, parameter_result: r.parameter_result })
+    }
+
+    /// End a workout and restore the exercise heart rate mode (open_oura `OuraClient::exercise_stop`).
+    pub async fn exercise_stop(&self, key_hex: String, restore_mode: u8) -> Result<Option<u8>, SyncError> {
+        let client = self.authenticated_client(&key_hex).await?;
+        client.exercise_stop(restore_mode).await.map_err(|e| SyncError::Failed(e.to_string()))
+    }
+
+    /// Measure drain throughput without touching real data: authenticate, then drain
+    /// from `days_back` days before the real database's cursor into the scratch database
+    /// at `scratch_path` (deleted by the caller). The real database is only read, so its
+    /// cursor and events are unaffected. Stops when drained or cancelled.
+    pub async fn bench_drain(
+        &self,
+        real_db_path: String,
+        scratch_path: String,
+        key_hex: String,
+        days_back: u32,
+        ble_mode: i32,
+        progress: Box<dyn SyncProgressListener>,
+    ) -> Result<SyncReport, SyncError> {
+        let mut stop = self.stop.subscribe();
+        if let Some(reason) = stop.borrow().clone() {
+            return Err(SyncError::Interrupted { reason });
+        }
+        tokio::select! {
+            biased;
+            _ = stop.changed() => Err(SyncError::Interrupted {
+                reason: stop.borrow().clone().unwrap_or_else(|| "cancelled".into()) }),
+            result = self.bench_inner(real_db_path, scratch_path, key_hex, days_back, ble_mode, progress) => result,
         }
     }
 
@@ -706,6 +955,68 @@ impl RingSession {
         })
     }
 
+    async fn bench_inner(
+        &self,
+        real_db_path: String,
+        scratch_path: String,
+        key_hex: String,
+        days_back: u32,
+        ble_mode: i32,
+        progress: Box<dyn SyncProgressListener>,
+    ) -> Result<SyncReport, SyncError> {
+        let fail = |e: String| SyncError::Failed(e);
+        let key = parse_key(&key_hex).ok_or_else(|| fail("auth key must be 32 hex chars".into()))?;
+        let client = OuraClient::new(FfiTransport {
+            tx: self.tx.clone(),
+            writer: self.writer.clone(),
+        });
+        client.authenticate(&key).await.map_err(|e| fail(e.to_string()))?;
+        let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
+        let real_cursor = Store::open_read_only(&real_db_path)
+            .and_then(|s| s.cursor(&serial))
+            .map_err(|e| storage_failure("bench_cursor", e, 0))?;
+        let start = real_cursor.saturating_sub(days_back.saturating_mul(864_000));
+        client.setup_app_stream().await.map_err(|e| fail(e.to_string()))?;
+        if (0..=255).contains(&ble_mode) {
+            let reply = oura_link::transport::transact(
+                client.transport(),
+                &[0x16, 0x01, ble_mode as u8],
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+            progress.on_note(format!("ble mode {ble_mode} reply {:?}", reply.map(|f| f.iter().map(hex_str).collect::<Vec<_>>())));
+        }
+        let store = Mutex::new(Store::open(&scratch_path).map_err(|e| storage_failure("open", e, 0))?);
+        progress.on_note(format!("bench start cursor={start} (real {real_cursor}, {days_back} days back)"));
+        let inserted = AtomicU32::new(0);
+        let db_err: Mutex<Option<SyncError>> = Mutex::new(None);
+        let began = std::time::Instant::now();
+        let drained = drain_into_store(&client, start, &serial, &store, &inserted, &db_err, progress.as_ref()).await;
+        if (1..=255).contains(&ble_mode) {
+            // Always return the ring to the normal BLE mode, success or not.
+            let _ = oura_link::transport::transact(
+                client.transport(),
+                &[0x16, 0x01, 0x00],
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+        }
+        let outcome = drained?;
+        let secs = began.elapsed().as_secs_f64().max(0.001);
+        progress.on_note(format!(
+            "bench done events={} in {:.1}s = {:.0} events/s",
+            outcome.events_synced,
+            secs,
+            outcome.events_synced as f64 / secs
+        ));
+        Ok(SyncReport {
+            serial,
+            events_synced: outcome.events_synced,
+            inserted: inserted.into_inner(),
+            next_cursor: outcome.next_cursor,
+        })
+    }
+
     async fn sync_inner(
         &self,
         db_path: String,
@@ -721,35 +1032,28 @@ impl RingSession {
         };
         let client = OuraClient::new(transport);
 
+        let t0 = std::time::Instant::now();
+        let step = |name: &str| progress.on_note(format!("step {name} at {}ms", t0.elapsed().as_millis()));
         progress.on_progress("auth".into(), 0, 0);
         client
             .authenticate(&key)
             .await
             .map_err(|e| fail(e.to_string()))?;
-        progress.on_progress("setup".into(), 0, 0);
-        client
-            .setup_app_stream()
-            .await
-            .map_err(|e| fail(e.to_string()))?;
-        // Push the phone's clock to the ring so this boot logs a `time_sync` anchor.
-        // Without one, a rebooted ring's nights have no bridge to wall-clock time:
-        // `time_sync` is the only wall-clock anchor in the event stream, and it is
-        // retroactive — one of them dates every event in the same boot epoch.
-        progress.on_progress("time".into(), 0, 0);
-        if let Err(error) = client.sync_time_app().await {
-            progress.on_progress(format!("time_sync skipped: {error}"), 0, 0);
-            // The app-layer command is refused by some firmware; the plain one is not.
-            let _ = client.sync_time().await;
-        }
-        // Ask the ring to run its sleep analysis before draining. Bedtime periods are
-        // the ONLY thing build_summary turns into nights, and the ring writes one when
-        // it postprocesses a sleep — not while it is recording one. Triggering it here
-        // gives the ring the whole drain to finish, so a fast postprocess lands in this
-        // sync rather than the next. Fire-and-forget: a refusal is not a sync failure.
-        let _ = client.check_sleep_analysis(false).await;
+        step("authenticated");
+
+        // Identity and charge first: three short requests, and the app can show them
+        // (and the device row is persisted) before the slow stream setup and drain.
+        // None of them is required for the history drain, so a refusal is not an error.
         let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
         let info = client.firmware().await.ok();
-
+        let battery = client.battery().await.ok();
+        progress.on_device(
+            serial.clone(),
+            info.as_ref()
+                .map(|i| i.firmware_version.clone())
+                .unwrap_or_default(),
+            battery.map(|b| b.percent),
+        );
         // Mutex<Store> keeps the future Send across the drain's awaits (rusqlite's
         // Connection is !Sync), while still writing incrementally (no buffering).
         let store = Mutex::new(Store::open(&db_path).map_err(|e| storage_failure("open", e, 0))?);
@@ -758,6 +1062,33 @@ impl RingSession {
             .unwrap()
             .upsert_device(&serial, None, info.as_ref())
             .map_err(|e| storage_failure("upsert_device", e, 0))?;
+
+        step("identity+store");
+        progress.on_progress("setup".into(), 0, 0);
+        client
+            .setup_app_stream()
+            .await
+            .map_err(|e| fail(e.to_string()))?;
+        step("app_stream");
+        // Push the phone's clock to the ring so this boot logs a `time_sync` anchor.
+        // Without one, a rebooted ring's nights have no bridge to wall-clock time:
+        // `time_sync` is the only wall-clock anchor in the event stream, and it is
+        // retroactive — one of them dates every event in the same boot epoch.
+        progress.on_progress("time".into(), 0, 0);
+        if let Err(error) = client.sync_time_app().await {
+            progress.on_note(format!("time_sync skipped: {error}"));
+            // The app-layer command is refused by some firmware; the plain one is not.
+            let _ = client.sync_time().await;
+        }
+        // Ask the ring to run its sleep analysis before draining. Bedtime periods are
+        // the ONLY thing build_summary turns into nights, and the ring writes one when
+        // it postprocesses a sleep — not while it is recording one. Triggering it here
+        // gives the ring the whole drain to finish, so a fast postprocess lands in this
+        // sync rather than the next. Fire-and-forget: a refusal is not a sync failure.
+        step("time_sync");
+        let _ = client.check_sleep_analysis(false).await;
+        step("sleep_analysis");
+
         let cursor = store
             .lock()
             .unwrap()
@@ -835,9 +1166,9 @@ impl RingSession {
         // Second, ring-independent anchor: the newest drained ring timestamp is at
         // most minutes old, so pairing it with the phone clock dates this boot even
         // when the firmware never emits time_sync/rtc_beacon events.
-        if let Some(anchor) = phone_anchor_event(outcome.events_synced, outcome.next_cursor, now_unix()) {
-            if let Err(error) = store.lock().unwrap().insert_event(&serial, &anchor) {
-                progress.on_progress(format!("phone anchor not saved: {error}"), 0, 0);
+        if let Some((ring_ts, unix)) = phone_anchor(outcome.events_synced, outcome.next_cursor, now_unix()) {
+            if let Err(error) = store.lock().unwrap().insert_phone_anchor(&serial, ring_ts, unix) {
+                progress.on_note(format!("phone anchor not saved: {error}"));
             }
         }
         Ok(SyncReport {
@@ -849,6 +1180,10 @@ impl RingSession {
     }
 }
 
+fn hex_str(frame: &Vec<u8>) -> String {
+    frame.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -856,24 +1191,14 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// A synthetic `time_sync` (0x42) row pairing the newest drained ring timestamp
-/// with the phone clock. Only meaningful when this sync actually observed new ring
-/// time; the body keeps the standard 4-byte unix prefix (so `redecode` still yields
-/// `unix_time`) followed by a "phone" marker, and `decoded.source` says so.
-fn phone_anchor_event(events_synced: u32, next_cursor: u32, now: u64) -> Option<RingEvent> {
+/// The `(ring_timestamp, unix_time)` pair of a phone anchor: the newest drained ring
+/// timestamp with the phone clock. Only meaningful when this sync actually observed
+/// new ring time. Stored in `phone_anchors`, not `events`: the ring never sent it.
+fn phone_anchor(events_synced: u32, next_cursor: u32, now: u64) -> Option<(u32, u32)> {
     if events_synced == 0 || next_cursor == 0 || now == 0 {
         return None;
     }
-    let unix = u32::try_from(now).ok()?;
-    let mut body = unix.to_le_bytes().to_vec();
-    body.extend_from_slice(b"phone");
-    Some(RingEvent {
-        tag: 0x42,
-        name: oura_protocol::events::event_name(0x42),
-        timestamp: next_cursor - 1,
-        body,
-        decoded: Some(json!({ "unix_time": unix, "source": "phone" })),
-    })
+    Some((next_cursor - 1, u32::try_from(now).ok()?))
 }
 
 /// A fresh 16-byte auth key from the system CSPRNG (`SecRandomCopyBytes` on Apple).
@@ -924,6 +1249,8 @@ mod tests {
     struct IgnoreProgress;
     impl SyncProgressListener for IgnoreProgress {
         fn on_progress(&self, _: String, _: u64, _: u32) {}
+        fn on_device(&self, _: String, _: String, _: Option<u8>) {}
+        fn on_note(&self, _: String) {}
     }
 
     #[tokio::test]
@@ -950,24 +1277,18 @@ mod tests {
 
     #[test]
     fn phone_anchor_requires_new_ring_time() {
-        assert!(phone_anchor_event(0, 500, 1_789_056_420).is_none());
-        assert!(phone_anchor_event(3, 0, 1_789_056_420).is_none());
-        let anchor = phone_anchor_event(3, 705_001, 1_789_056_420).unwrap();
-        assert_eq!(anchor.tag, 0x42);
-        assert_eq!(anchor.timestamp, 705_000);
-        assert_eq!(anchor.decoded.as_ref().unwrap()["source"], "phone");
-        assert_eq!(
-            oura_protocol::events::decode_event_body(0x42, &anchor.body).unwrap()["unix_time"],
-            1_789_056_420u32
-        );
+        assert!(phone_anchor(0, 500, 1_789_056_420).is_none());
+        assert!(phone_anchor(3, 0, 1_789_056_420).is_none());
+        assert_eq!(phone_anchor(3, 705_001, 1_789_056_420), Some((705_000, 1_789_056_420)));
     }
 
     #[test]
-    fn phone_anchor_round_trips_through_the_store() {
+    fn phone_anchor_reaches_the_clock_stream_not_the_events() {
         let store = Store::open_in_memory().unwrap();
-        let anchor = phone_anchor_event(1, 705_001, 1_789_056_420).unwrap();
-        assert!(store.insert_event("ring", &anchor).unwrap());
-        assert!(!store.insert_event("ring", &anchor).unwrap());
+        let (ts, unix) = phone_anchor(1, 705_001, 1_789_056_420).unwrap();
+        assert!(store.insert_phone_anchor("ring", ts, unix).unwrap());
+        assert!(!store.insert_phone_anchor("ring", ts, unix).unwrap());
+        assert_eq!(store.event_totals().unwrap(), (0, 0));
         let events = store.decoded_events().unwrap();
         assert_eq!(events.len(), 1);
         let (ds, tag, json, _) = &events[0];
@@ -982,9 +1303,9 @@ mod tests {
         let src = dir.join("oura.db");
         let out = dir.join("export.db");
         let store = Store::open(&src).unwrap();
-        let anchor = phone_anchor_event(1, 705_001, 1_789_056_420).unwrap();
-        store.insert_event("ring", &anchor).unwrap();
-        // Keep the writer open so the committed event is still in the WAL.
+        let (ts, unix) = phone_anchor(1, 705_001, 1_789_056_420).unwrap();
+        store.insert_phone_anchor("ring", ts, unix).unwrap();
+        // Keep the writer open so the committed row is still in the WAL.
         assert!(src.with_extension("db-wal").exists());
         std::fs::write(&out, b"stale").unwrap();
         export_database(src.to_string_lossy().into(), out.to_string_lossy().into()).unwrap();
@@ -1164,6 +1485,8 @@ mod raw_event_tests {
         struct NoProgress;
         impl SyncProgressListener for NoProgress {
             fn on_progress(&self, _: String, _: u64, _: u32) {}
+            fn on_device(&self, _: String, _: String, _: Option<u8>) {}
+            fn on_note(&self, _: String) {}
         }
         struct ScriptedWriter {
             tx: broadcast::Sender<Vec<u8>>,
@@ -1305,4 +1628,170 @@ mod raw_event_tests {
         assert_eq!(store2.lock().unwrap().cursor("S1").unwrap(), 202);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+// ---- on-device sleep stager (open_oura's bundled classifier) ----------------------------------------
+
+/// A bedtime window to stage: ring deciseconds and the capture time of its `bedtime_period`.
+#[derive(uniffi::Record)]
+pub struct StagerWindow {
+    pub start_ds: i64,
+    pub end_ds: i64,
+    pub captured_unix: i64,
+}
+
+/// The stager's inputs for one window, flattened for the torch bridge. `beats` holds
+/// `[ibi, amplitude, valid]` per beat, `acm` six statistics per epoch. `error` is set (and the
+/// arrays are empty) when the window cannot be staged.
+#[derive(uniffi::Record)]
+pub struct StagerInputsRecord {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub beat_ts: Vec<i64>,
+    pub beats: Vec<f32>,
+    pub acm_ts: Vec<i64>,
+    pub acm: Vec<f32>,
+    pub temp_ts: Vec<i64>,
+    pub temp: Vec<f32>,
+    pub scalars: Vec<f32>,
+    pub raw_beats: u32,
+    pub error: Option<String>,
+}
+
+impl StagerInputsRecord {
+    fn failed(message: impl Into<String>) -> Self {
+        StagerInputsRecord {
+            start_ms: 0,
+            end_ms: 0,
+            beat_ts: vec![],
+            beats: vec![],
+            acm_ts: vec![],
+            acm: vec![],
+            temp_ts: vec![],
+            temp: vec![],
+            scalars: vec![],
+            raw_beats: 0,
+            error: Some(message.into()),
+        }
+    }
+}
+
+/// Assembles the sleep stager's inputs for every window, reading the event log once. The
+/// result has one record per window, in order.
+#[uniffi::export]
+pub fn stager_inputs_batch(
+    db_path: String,
+    windows: Vec<StagerWindow>,
+    age: f64,
+    height_m: f64,
+    weight_kg: f64,
+    sex: String,
+) -> Vec<StagerInputsRecord> {
+    let events = match oura_store::Store::open_read_only(&db_path).and_then(|s| s.decoded_events()) {
+        Ok(e) => e,
+        Err(e) => {
+            return windows.iter().map(|_| StagerInputsRecord::failed(e.to_string())).collect();
+        }
+    };
+    let clock = oura_summary::ring_time::RingClock::from_events(&events);
+    let scalars = oura_summary::stager_inputs::profile_scalars(age, height_m, weight_kg, sex.chars().next().unwrap_or('?'));
+    windows
+        .iter()
+        .map(|w| {
+            match oura_summary::stager_inputs::collect(&events, &clock, w.start_ds, w.end_ds, w.captured_unix, scalars) {
+                Ok(i) => StagerInputsRecord {
+                    start_ms: i.start_ms,
+                    end_ms: i.end_ms,
+                    beat_ts: i.beats.iter().map(|b| b.0).collect(),
+                    beats: i.beats.iter().flat_map(|b| [b.1, b.2, b.3]).collect(),
+                    acm_ts: i.acm.iter().map(|a| a.0).collect(),
+                    acm: i.acm.iter().flat_map(|a| a.1).collect(),
+                    temp_ts: i.temp.iter().map(|t| t.0).collect(),
+                    temp: i.temp.iter().map(|t| t.1).collect(),
+                    scalars: i.scalars.to_vec(),
+                    raw_beats: i.raw_beats as u32,
+                    error: None,
+                },
+                Err(message) => StagerInputsRecord::failed(message),
+            }
+        })
+        .collect()
+}
+
+/// Stages one night with the ported sleep stager (`oura_analysis::ported::sleepstaging`)
+/// from inputs assembled by `stager_inputs_batch`. Returns one label per 30 s epoch (1 deep, 2
+/// light, 3 REM, 4 wake), or an empty list when the stager rejects the night. The classifier is the
+/// one bundled with open_oura's `oura-analysis`.
+#[uniffi::export]
+pub fn stage_night_rust(record: StagerInputsRecord) -> Vec<i32> {
+    use oura_analysis::ported::sleepstaging::pipeline::{stage_night_default, Inputs};
+    if record.error.is_some() || record.scalars.len() != 3 {
+        return vec![];
+    }
+    let beats: Vec<[f32; 3]> = record.beats.chunks_exact(3).map(|b| [b[0], b[1], b[2]]).collect();
+    let acm: Vec<[f32; 6]> = record.acm.chunks_exact(6).map(|a| [a[0], a[1], a[2], a[3], a[4], a[5]]).collect();
+    let inputs = Inputs {
+        acm_values: &acm,
+        acm_timestamps: &record.acm_ts,
+        ibi_values: &beats,
+        ibi_timestamps: &record.beat_ts,
+        temp_values: &record.temp,
+        temp_timestamps: &record.temp_ts,
+        scalars: [record.scalars[0], record.scalars[1], record.scalars[2]],
+        bedtime: [record.start_ms, record.end_ms],
+    };
+    match stage_night_default(&inputs, true, true) {
+        Ok(out) => out.stages.col(0).iter().map(|&x| x.round() as i32).collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// Tells the shared brain which files of the official sleep stager this build has (the TorchScript
+/// graph and the extracted classifier; `None` when the bundle lacks one). Returns whether the
+/// official stager is available.
+#[uniffi::export]
+pub fn set_official_sleep_stager_files(graph_path: Option<String>, classifier_path: Option<String>) -> bool {
+    oura_summary::sleep_stager::register_official_files(
+        graph_path.as_deref().map(std::path::Path::new),
+        classifier_path.as_deref().map(std::path::Path::new),
+    )
+}
+
+/// The stager in use for this database: `"official"` or `"xgb"`. Resolves the stored choice and the
+/// registered files, the same as the summary's `sleep_stager.effective`.
+#[uniffi::export]
+pub fn effective_sleep_stager(db_path: String) -> String {
+    oura_summary::sleep_stager::effective(std::path::Path::new(&db_path)).id().to_string()
+}
+
+/// The sleep stager status as JSON (the summary's `sleep_stager` object): stored choice, stager in
+/// use, and both options with availability and notices.
+#[uniffi::export]
+pub fn sleep_stager_status_json(db_path: String) -> String {
+    oura_summary::sleep_stager::status(std::path::Path::new(&db_path)).to_string()
+}
+
+impl RingSession {
+    async fn authenticated_client(&self, key_hex: &str) -> Result<OuraClient<FfiTransport>, SyncError> {
+        let fail = |e: String| SyncError::Failed(e);
+        let key = parse_key(key_hex).ok_or_else(|| fail("auth key must be 32 hex chars".into()))?;
+        let mut stop = self.stop.subscribe();
+        if let Some(reason) = stop.borrow().clone() {
+            return Err(SyncError::Interrupted { reason });
+        }
+        let client = OuraClient::new(FfiTransport {
+            tx: self.tx.clone(),
+            writer: self.writer.clone(),
+        });
+        tokio::select! {
+            biased;
+            _ = stop.changed() => Err(SyncError::Interrupted {
+                reason: stop.borrow().clone().unwrap_or_else(|| "cancelled".into()) }),
+            result = client.authenticate(&key) => {
+                result.map_err(|e| fail(e.to_string()))?;
+                Ok(client)
+            }
+        }
+    }
+
 }

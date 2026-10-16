@@ -73,7 +73,6 @@ pub fn venv_python(root: &Path) -> PathBuf {
 
 /// Locate one private desktop model in either the product checkout or the
 /// sibling protocol checkout used before the repository split.
-#[cfg(feature = "torch")]
 pub fn model_path(root: &Path, filename: &str) -> PathBuf {
     if let Some(dir) = std::env::var_os("OURA_MODELS_DIR") {
         return PathBuf::from(dir).join(filename);

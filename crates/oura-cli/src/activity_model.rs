@@ -2,7 +2,7 @@
 //! LibTorch (the `tch` crate) — the Rust-native alternative to shelling out to
 //! `tools/run_activity_model.py`. Compiled only under `--features torch`.
 //!
-//! This loads `notes/models/automatic_activity_detection_3_1_11.pt` and feeds it
+//! This loads `notes/models/automatic_activity_detection_3_1_15.pt` and feeds it
 //! the exact same met/motion/temperature/heartrate tensors the Python runner
 //! builds, so it returns bit-identical segments. See `docs/activity-model-runner.md`.
 
@@ -12,8 +12,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use oura_store::storage::Store;
 use tch::{CModule, IValue, Kind, Tensor};
 
-const MODEL_FILE: &str = "automatic_activity_detection_3_1_11.pt";
-const MODEL_VERSION: &str = "3.1.11";
+const MODEL_FILE: &str = "automatic_activity_detection_3_1_15.pt";
+const MODEL_VERSION: &str = "3.1.15";
 
 /// behavior-id -> name, from the model's behavior table (ActivityTypes.json).
 fn behavior(id: i64) -> String {

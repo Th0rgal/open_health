@@ -21,9 +21,10 @@ use oura_summary::{
     bedtime_overrides_path, feature_modes_path, profile_path, write_bedtime_override, ModelInputs,
     ModelOutputs, ModelRunner,
 };
+use oura_summary::sleep_stager::SleepStager;
 // Re-exported so `dashboard::Demographics` (main.rs) and the profile/feature
 // handlers keep working after the summary logic moved into `oura-summary`.
-pub use oura_summary::{read_profile, write_feature_mode, write_profile, Demographics};
+pub use oura_summary::{profile_json, write_feature_mode, write_profile, Demographics};
 
 const INDEX_HTML: &str = include_str!("../../../dashboard/web/index.html");
 const STYLES_CSS: &str = include_str!("../../../dashboard/web/styles.css");
@@ -169,6 +170,7 @@ impl ModelRunner for PythonRunner {
             tz,
             demo,
             sleep_ranges,
+            sleep_stager,
         } = input;
         let root = repo_root();
         let py = root.as_deref().map(python_bin);
@@ -203,8 +205,12 @@ impl ModelRunner for PythonRunner {
 
         let (mut sleep_batch, cva, activity, illness) = match (root.as_deref(), py.as_deref()) {
             (Some(r), Some(p)) => std::thread::scope(|s| {
+                // the official stager is the Python NSSA runner; the built-in one runs below, in process
                 let sh = s.spawn(|| {
-                    run_py_json_stdin(r, p, "tools/run_sleep_model.py", &sleep_args, &sleep_stdin)
+                    (sleep_stager == SleepStager::Official).then(|| {
+                        run_py_json_stdin(r, p, "tools/run_sleep_model.py", &sleep_args, &sleep_stdin)
+                    })
+                    .flatten()
                 });
                 let ch = s.spawn(|| run_py_json(r, p, "tools/run_cva_model.py", &cva_args));
                 let ah = s.spawn(|| run_py_json(r, p, "tools/run_activity_model.py", &act_args));
@@ -218,12 +224,16 @@ impl ModelRunner for PythonRunner {
             }),
             _ => (None, None, None, None),
         };
-        let needs_fallback = sleep_batch
-            .as_ref()
-            .and_then(|v| v.as_array())
-            .is_none_or(|a| a.is_empty());
-        if needs_fallback && !sleep_ranges.is_empty() {
-            sleep_batch = oura_summary::stage_nights_from_signals(db, sleep_ranges);
+        // Stager order: the chosen one, then the built-in tree ensemble (when the official
+        // runner is unavailable or fails), then the signal estimate for windows still unstaged.
+        let staged_any = |batch: &Option<Value>| {
+            batch.as_ref().and_then(|v| v.as_array()).is_some_and(|a| a.iter().any(Value::is_object))
+        };
+        if !sleep_ranges.is_empty() && !staged_any(&sleep_batch) {
+            sleep_batch = oura_summary::sleep_stager::stage_nights_xgb(db, sleep_ranges, demo);
+        }
+        if !sleep_ranges.is_empty() {
+            sleep_batch = Some(fill_with_signals(db, sleep_ranges, sleep_batch));
         }
         ModelOutputs {
             sleep_batch,
@@ -234,8 +244,39 @@ impl ModelRunner for PythonRunner {
     }
 }
 
+/// Windows the chosen stagers left empty get the signal-based estimate, so a night is not
+/// left without a hypnogram. `batch` is aligned with `ranges`.
+fn fill_with_signals(db: &Path, ranges: &[[i64; 3]], batch: Option<Value>) -> Value {
+    let mut out: Vec<Value> = batch
+        .and_then(|v| v.as_array().cloned())
+        .filter(|a| a.len() == ranges.len())
+        .unwrap_or_else(|| vec![Value::Null; ranges.len()]);
+    let missing: Vec<usize> = (0..out.len()).filter(|&i| !out[i].is_object()).collect();
+    if !missing.is_empty() {
+        let windows: Vec<[i64; 3]> = missing.iter().map(|&i| ranges[i]).collect();
+        let estimate = oura_summary::stage_nights_from_signals(db, &windows);
+        for (slot, est) in missing.iter().zip(estimate.and_then(|v| v.as_array().cloned()).unwrap_or_default()) {
+            out[*slot] = est;
+        }
+    }
+    Value::Array(out)
+}
+
+/// Reports to the shared brain which files of the official sleep stager exist on this machine,
+/// searched where the Python runners search for models.
+pub fn register_official_stager() {
+    use oura_summary::sleep_stager as stager;
+    let root = repo_root();
+    let find = |name: &str| root.as_deref().map(|r| crate::pyrunner::model_path(r, name));
+    stager::register_official_files(
+        find(&format!("{}.pt", stager::OFFICIAL_GRAPH)).as_deref(),
+        find(stager::OFFICIAL_CLASSIFIER).as_deref(),
+    );
+}
+
 /// `build_summary` for the web dashboard — runs the models via Python.
 fn build_summary(db: &Path, tz: f64) -> Result<Value> {
+    register_official_stager();
     oura_summary::build_summary(db, tz, &PythonRunner)
 }
 
@@ -325,12 +366,25 @@ pub async fn serve(
     name: String,
     key_file: Option<PathBuf>,
     seed: Demographics,
+    sleep_stager: Option<String>,
 ) -> Result<()> {
     // seed profile.json from the CLI demographics on first run; afterwards the
     // file is the editable source of truth.
     if !profile_path(&db).exists() {
         let _ = write_profile(&db, &seed.to_json());
     }
+    // `--sleep-stager` overrides the stored choice (profile.json); "auto" clears it
+    if let Some(choice) = sleep_stager.as_deref() {
+        oura_summary::sleep_stager::set_chosen(&db, Some(choice))?;
+    }
+    register_official_stager();
+    let status = oura_summary::sleep_stager::status(&db);
+    println!(
+        "sleep stager: {} (choice {}){}",
+        status["effective"].as_str().unwrap_or("?"),
+        status["choice"].as_str().unwrap_or("?"),
+        status["options"][0]["notice"].as_str().map(|n| format!("; official staging: {n}")).unwrap_or_default()
+    );
     let listener = TcpListener::bind(("127.0.0.1", port))
         .await
         .context("binding port")?;
@@ -727,11 +781,11 @@ async fn handle(
                 Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
             }
         }
-        ("GET", "/api/profile") => json_resp(&mut sock, &read_profile(&db).to_json()).await,
+        ("GET", "/api/profile") => json_resp(&mut sock, &profile_json(&db)).await,
         ("POST", "/api/profile") => {
             match serde_json::from_str::<Value>(body.trim_end_matches('\0')) {
                 Ok(v) => match write_profile(&db, &v) {
-                    Ok(d) => json_resp(&mut sock, &d.to_json()).await,
+                    Ok(_) => json_resp(&mut sock, &profile_json(&db)).await,
                     Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
                 },
                 Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
