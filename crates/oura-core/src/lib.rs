@@ -436,6 +436,9 @@ async fn drain_into_store(
                     Ok(count) => {
                         inserted.fetch_add(count, Ordering::Relaxed);
                         checkpoint.store(p.next_cursor, Ordering::Relaxed);
+                        for line in oura_link::transport::take_diag() {
+                            progress.on_note(line);
+                        }
                         progress.on_note(format!(
                             "batch events={} inserted={} receive_ms={} commit_ms={} bytes_left={}",
                             events.len(),
@@ -539,6 +542,31 @@ impl RingSession {
             _ = stop.changed() => Err(SyncError::Interrupted {
                 reason: stop.borrow().clone().unwrap_or_else(|| "cancelled".into()) }),
             result = self.sync_inner(db_path, key_hex, progress) => result,
+        }
+    }
+
+    /// Measure drain throughput without touching real data: authenticate, then drain
+    /// from `days_back` days before the real database's cursor into the scratch database
+    /// at `scratch_path` (deleted by the caller). The real database is only read, so its
+    /// cursor and events are unaffected. Stops when drained or cancelled.
+    pub async fn bench_drain(
+        &self,
+        real_db_path: String,
+        scratch_path: String,
+        key_hex: String,
+        days_back: u32,
+        ble_mode: i32,
+        progress: Box<dyn SyncProgressListener>,
+    ) -> Result<SyncReport, SyncError> {
+        let mut stop = self.stop.subscribe();
+        if let Some(reason) = stop.borrow().clone() {
+            return Err(SyncError::Interrupted { reason });
+        }
+        tokio::select! {
+            biased;
+            _ = stop.changed() => Err(SyncError::Interrupted {
+                reason: stop.borrow().clone().unwrap_or_else(|| "cancelled".into()) }),
+            result = self.bench_inner(real_db_path, scratch_path, key_hex, days_back, ble_mode, progress) => result,
         }
     }
 
@@ -685,6 +713,68 @@ impl RingSession {
         })
     }
 
+    async fn bench_inner(
+        &self,
+        real_db_path: String,
+        scratch_path: String,
+        key_hex: String,
+        days_back: u32,
+        ble_mode: i32,
+        progress: Box<dyn SyncProgressListener>,
+    ) -> Result<SyncReport, SyncError> {
+        let fail = |e: String| SyncError::Failed(e);
+        let key = parse_key(&key_hex).ok_or_else(|| fail("auth key must be 32 hex chars".into()))?;
+        let client = OuraClient::new(FfiTransport {
+            tx: self.tx.clone(),
+            writer: self.writer.clone(),
+        });
+        client.authenticate(&key).await.map_err(|e| fail(e.to_string()))?;
+        let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
+        let real_cursor = Store::open_read_only(&real_db_path)
+            .and_then(|s| s.cursor(&serial))
+            .map_err(|e| storage_failure("bench_cursor", e, 0))?;
+        let start = real_cursor.saturating_sub(days_back.saturating_mul(864_000));
+        client.setup_app_stream().await.map_err(|e| fail(e.to_string()))?;
+        if (0..=255).contains(&ble_mode) {
+            let reply = oura_link::transport::transact(
+                client.transport(),
+                &[0x16, 0x01, ble_mode as u8],
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+            progress.on_note(format!("ble mode {ble_mode} reply {:?}", reply.map(|f| f.iter().map(hex_str).collect::<Vec<_>>())));
+        }
+        let store = Mutex::new(Store::open(&scratch_path).map_err(|e| storage_failure("open", e, 0))?);
+        progress.on_note(format!("bench start cursor={start} (real {real_cursor}, {days_back} days back)"));
+        let inserted = AtomicU32::new(0);
+        let db_err: Mutex<Option<SyncError>> = Mutex::new(None);
+        let began = std::time::Instant::now();
+        let drained = drain_into_store(&client, start, &serial, &store, &inserted, &db_err, progress.as_ref()).await;
+        if (1..=255).contains(&ble_mode) {
+            // Always return the ring to the normal BLE mode, success or not.
+            let _ = oura_link::transport::transact(
+                client.transport(),
+                &[0x16, 0x01, 0x00],
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+        }
+        let outcome = drained?;
+        let secs = began.elapsed().as_secs_f64().max(0.001);
+        progress.on_note(format!(
+            "bench done events={} in {:.1}s = {:.0} events/s",
+            outcome.events_synced,
+            secs,
+            outcome.events_synced as f64 / secs
+        ));
+        Ok(SyncReport {
+            serial,
+            events_synced: outcome.events_synced,
+            inserted: inserted.into_inner(),
+            next_cursor: outcome.next_cursor,
+        })
+    }
+
     async fn sync_inner(
         &self,
         db_path: String,
@@ -700,11 +790,14 @@ impl RingSession {
         };
         let client = OuraClient::new(transport);
 
+        let t0 = std::time::Instant::now();
+        let step = |name: &str| progress.on_note(format!("step {name} at {}ms", t0.elapsed().as_millis()));
         progress.on_progress("auth".into(), 0, 0);
         client
             .authenticate(&key)
             .await
             .map_err(|e| fail(e.to_string()))?;
+        step("authenticated");
 
         // Identity and charge first: three short requests, and the app can show them
         // (and the device row is persisted) before the slow stream setup and drain.
@@ -728,11 +821,13 @@ impl RingSession {
             .upsert_device(&serial, None, info.as_ref())
             .map_err(|e| storage_failure("upsert_device", e, 0))?;
 
+        step("identity+store");
         progress.on_progress("setup".into(), 0, 0);
         client
             .setup_app_stream()
             .await
             .map_err(|e| fail(e.to_string()))?;
+        step("app_stream");
         // Push the phone's clock to the ring so this boot logs a `time_sync` anchor.
         // Without one, a rebooted ring's nights have no bridge to wall-clock time:
         // `time_sync` is the only wall-clock anchor in the event stream, and it is
@@ -748,7 +843,9 @@ impl RingSession {
         // it postprocesses a sleep — not while it is recording one. Triggering it here
         // gives the ring the whole drain to finish, so a fast postprocess lands in this
         // sync rather than the next. Fire-and-forget: a refusal is not a sync failure.
+        step("time_sync");
         let _ = client.check_sleep_analysis(false).await;
+        step("sleep_analysis");
 
         let cursor = store
             .lock()
@@ -839,6 +936,10 @@ impl RingSession {
             next_cursor: outcome.next_cursor,
         })
     }
+}
+
+fn hex_str(frame: &Vec<u8>) -> String {
+    frame.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn now_unix() -> u64 {

@@ -312,6 +312,11 @@ void uniffi_oura_core_fn_free_ringsession(void*_Nonnull ptr, RustCallStatus *_No
 void*_Nonnull uniffi_oura_core_fn_constructor_ringsession_new(uint64_t writer, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_METHOD_RINGSESSION_BENCH_DRAIN
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_METHOD_RINGSESSION_BENCH_DRAIN
+uint64_t uniffi_oura_core_fn_method_ringsession_bench_drain(void*_Nonnull ptr, RustBuffer real_db_path, RustBuffer scratch_path, RustBuffer key_hex, uint32_t days_back, int32_t ble_mode, uint64_t progress
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_METHOD_RINGSESSION_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_METHOD_RINGSESSION_CANCEL
 void uniffi_oura_core_fn_method_ringsession_cancel(void*_Nonnull ptr, RustBuffer reason, RustCallStatus *_Nonnull out_status
@@ -724,6 +729,12 @@ uint16_t uniffi_oura_core_checksum_func_rmssd(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_FUNC_SUMMARY_JSON
 #define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_FUNC_SUMMARY_JSON
 uint16_t uniffi_oura_core_checksum_func_summary_json(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_RINGSESSION_BENCH_DRAIN
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_RINGSESSION_BENCH_DRAIN
+uint16_t uniffi_oura_core_checksum_method_ringsession_bench_drain(void
     
 );
 #endif

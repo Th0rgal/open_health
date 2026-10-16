@@ -873,6 +873,13 @@ struct RootView: View {
         let args = CommandLine.arguments
         if args.contains("-openSync") { showSync = true }
         if args.contains("-openAllDays") { showAllDays = true }
+        if args.contains("-syncNow"), let key = Keychain.loadKey() {
+            Task { _ = await ring.run(keyHex: key, source: "launch-argument") }
+        }
+        if let index = args.firstIndex(of: "-benchDrain"), index + 1 < args.count, let days = UInt32(args[index + 1]) {
+            let mode = args.firstIndex(of: "-bleMode").flatMap { $0 + 1 < args.count ? Int32(args[$0 + 1]) : nil } ?? -1
+            Task { await ring.benchDrain(days: days, bleMode: mode) }
+        }
         if let index = args.firstIndex(of: "-openDay"), index + 1 < args.count {
             report = ReportSel(day: args[index + 1], sleep: !args.contains("activity"))
         }
@@ -993,6 +1000,11 @@ struct RootView: View {
         automaticSyncRequested = true
         Task {
             defer { automaticSyncRequested = false }
+            // At cold launch the app can still report itself inactive when onAppear
+            // fires, and no later scene change follows; wait briefly for it.
+            for _ in 0..<5 where !WorkCoordinator.shared.available {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
             _ = await ring.syncAutomaticallyIfNeeded()
             if WorkCoordinator.shared.available { load(force: true, clearCurrent: false) }
         }

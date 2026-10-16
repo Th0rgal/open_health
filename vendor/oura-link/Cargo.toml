@@ -1,0 +1,24 @@
+[package]
+name = "oura-link"
+description = "BLE transport, connection, auth handshake and sync drain for Oura rings"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Th0rgal/open_oura"
+
+[dependencies]
+oura-protocol = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
+thiserror = "1"
+hex = "0.4"
+tracing = "0.1"
+uuid = "1"
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+async-trait = "0.1"
+futures = "0.3"
+# BLE backend. Optional so the auth + sync logic (OuraClient, transport-generic)
+# can build for iOS, where CoreBluetooth implements the `Transport` trait instead.
+btleplug = { version = "0.11", optional = true }
+
+[features]
+default = ["ble"]
+ble = ["dep:btleplug"]

@@ -601,6 +601,14 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol RingSessionProtocol : AnyObject {
     
     /**
+     * Measure drain throughput without touching real data: authenticate, then drain
+     * from `days_back` days before the real database's cursor into the scratch database
+     * at `scratch_path` (deleted by the caller). The real database is only read, so its
+     * cursor and events are unaffected. Stops when drained or cancelled.
+     */
+    func benchDrain(realDbPath: String, scratchPath: String, keyHex: String, daysBack: UInt32, bleMode: Int32, progress: SyncProgressListener) async throws  -> SyncReport
+    
+    /**
      * Interrupts even an idle Rust receive; a finished Swift AsyncStream cannot do this.
      */
     func cancel(reason: String) 
@@ -714,6 +722,29 @@ public convenience init(writer: BleWriter) {
 
     
 
+    
+    /**
+     * Measure drain throughput without touching real data: authenticate, then drain
+     * from `days_back` days before the real database's cursor into the scratch database
+     * at `scratch_path` (deleted by the caller). The real database is only read, so its
+     * cursor and events are unaffected. Stops when drained or cancelled.
+     */
+open func benchDrain(realDbPath: String, scratchPath: String, keyHex: String, daysBack: UInt32, bleMode: Int32, progress: SyncProgressListener)async throws  -> SyncReport {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oura_core_fn_method_ringsession_bench_drain(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(realDbPath),FfiConverterString.lower(scratchPath),FfiConverterString.lower(keyHex),FfiConverterUInt32.lower(daysBack),FfiConverterInt32.lower(bleMode),FfiConverterCallbackInterfaceSyncProgressListener.lower(progress)
+                )
+            },
+            pollFunc: ffi_oura_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_oura_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_oura_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncReport.lift,
+            errorHandler: FfiConverterTypeSyncError.lift
+        )
+}
     
     /**
      * Interrupts even an idle Rust receive; a finished Swift AsyncStream cannot do this.
@@ -1709,6 +1740,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_func_summary_json() != 27782) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_method_ringsession_bench_drain() != 24384) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_method_ringsession_cancel() != 11635) {

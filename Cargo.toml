@@ -20,3 +20,4 @@ strip = true
 
 [patch."https://github.com/Th0rgal/open_oura"]
 oura-store = { path = "vendor/oura-store" }
+oura-link = { path = "vendor/oura-link" }

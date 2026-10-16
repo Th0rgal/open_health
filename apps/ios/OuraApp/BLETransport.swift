@@ -107,6 +107,9 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     private var historyBuffer = Data()
     private var historyFrames = 0
     private var historyBytes = 0
+    // arrival timing of the raw notifications in the current history burst (diagnostics)
+    private var burstTimes: [Double] = []
+    private var burstSizes: [Int] = []
     private static let historyFlushBytes = 32 * 1024
 
     private var connectCont: CheckedContinuation<Void, Error>?
@@ -494,6 +497,8 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             return
         }
         if Self.isHistoryPayload(v) {
+            burstTimes.append(ProcessInfo.processInfo.systemUptime)
+            burstSizes.append(v.count)
             historyBuffer.append(v)
             historyFrames += 1
             historyBytes += v.count
@@ -508,6 +513,7 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         // compact diagnostic line instead of tens of thousands of raw payload lines.
         flushHistoryPayload()
         if historyFrames > 0 {
+            logBurst()
             dlog("recv", "history payload omitted; \(historyFrames) BLE frames, \(historyBytes)B")
             historyFrames = 0
             historyBytes = 0
@@ -534,6 +540,19 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             offset = end
         }
         return offset > 0
+    }
+
+    /// One line per history burst: how the ring paced its notifications.
+    private func logBurst() {
+        guard burstTimes.count > 1 else { burstTimes.removeAll(); burstSizes.removeAll(); return }
+        let gaps = zip(burstTimes.dropFirst(), burstTimes).map { ($0 - $1) * 1000 }
+        let sorted = gaps.sorted()
+        let span = (burstTimes.last! - burstTimes.first!) * 1000
+        let sizes = burstSizes
+        dlog("burst", String(format: "n=%d span=%.0fms gap p10=%.0f p50=%.0f p90=%.0f max=%.0fms size min=%d max=%d bytes=%d",
+                             sizes.count, span, sorted[sorted.count / 10], sorted[sorted.count / 2],
+                             sorted[sorted.count * 9 / 10], sorted.last!, sizes.min()!, sizes.max()!, sizes.reduce(0, +)))
+        burstTimes.removeAll(keepingCapacity: true); burstSizes.removeAll(keepingCapacity: true)
     }
 
     private func deliver(_ data: Data) {

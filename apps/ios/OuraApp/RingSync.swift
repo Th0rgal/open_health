@@ -664,6 +664,45 @@ final class RingSync: ObservableObject {
         }
     }
 
+    /// Debug: time a drain of the last `days` days into a scratch database. The real
+    /// database is only read, so its cursor and events are untouched; the ring does not
+    /// discard what it sends. Results are in the diagnostics log (`[rust] batch …`,
+    /// `bench done …`). Start with the launch argument `-benchDrain <days>`.
+    func benchDrain(days: UInt32, bleMode: Int32 = -1) async {
+        while busy { try? await Task.sleep(nanoseconds: 500_000_000) }
+        guard let key = Keychain.loadKey(), syncAllowed else { return }
+        busy = true; paused = false
+        defer { busy = false }
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("bench-\(UUID().uuidString).db")
+        defer { for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: scratch.path + suffix) } }
+        dlog("bench", "start days=\(days)")
+        let t = BLETransport(nameContains: "Oura", preferredPeripheralID: preferredPeripheralID)
+        transport = t
+        defer { pump?.cancel(); pump = nil; t.disconnect(); transport = nil; session = nil }
+        do { try await t.connect() } catch { dlog("bench", "connect FAILED: \(error)"); return }
+        let s = RingSession(writer: RingWriter(t))
+        session = s
+        let frames = t.notifications
+        pump = Task {
+            for await frame in frames { s.pushFrame(data: frame) }
+            s.cancel(reason: "transport closed")
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        var lastBytes: UInt64 = 0
+        let progress = SyncProgressBridge({ _, bytesLeft, events in
+            if bytesLeft > 0 { lastBytes = bytesLeft }
+            _ = events
+        })
+        do {
+            let report = try await s.benchDrain(realDbPath: DB.url.path, scratchPath: scratch.path,
+                                                keyHex: key, daysBack: days, bleMode: bleMode, progress: progress)
+            let secs = ProcessInfo.processInfo.systemUptime - started
+            dlog("bench", "OK events=\(report.eventsSynced) wall=\(String(format: "%.1f", secs))s lastBytesLeft=\(lastBytes)")
+        } catch {
+            dlog("bench", "FAILED after \(String(format: "%.1f", ProcessInfo.processInfo.systemUptime - started))s: \(error)")
+        }
+    }
+
     @discardableResult
     func run(keyHex: String, maxAttempts: Int = 6, source: String = "manual") async -> SyncReport? {
         guard !busy else { return nil }
