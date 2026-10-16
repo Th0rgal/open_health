@@ -16,6 +16,12 @@ oura dashboard --tz-offset 1 --age 30 --sex M --height 1.78 --weight 75
 
 Default port `8090`; loopback-only.
 
+Sleep staging has two stagers: the official one (Oura's `sleepstaging_2_6_0` graph and its
+extracted classifier, which must be in the models directory; `$OURA_MODELS_DIR` overrides it) and a built-in
+Rust one that needs no files. `--sleep-stager auto|official|xgb` sets the choice (stored in
+`profile.json`; "Your details" has the same selector). Automatic uses the official stager when
+its files are present. The server prints the stager in use at startup.
+
 ## In the dashboard
 
 - **Sync button** (header): drains the ring over Bluetooth without leaving the page

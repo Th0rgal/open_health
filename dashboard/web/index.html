@@ -19,7 +19,7 @@
         </span>
       </div>
       <div class="actions">
-        <span id="batt" class="batt" title="Ring battery"></span>
+        <button id="batt" class="batt" title="Ring details" aria-label="Ring details" hidden></button>
         <button id="sync-btn" class="action" title="Sync the ring over Bluetooth">
           <span class="ic" style="--i:url(/icons/arrows-clockwise.svg)"></span>
           <span id="sync-label">Sync</span>
@@ -38,10 +38,6 @@
       </div>
     </header>
 
-    <section class="brief" aria-labelledby="brief-label">
-      <span id="brief-label" class="brief-label">Latest interpretation</span>
-      <p id="digest" class="digest skeleton skeleton-text">&nbsp;</p>
-    </section>
 
     <main class="dashboard-grid">
       <div class="dashboard-main">
@@ -59,6 +55,13 @@
             <div class="skeleton skeleton-block"></div>
           </div>
         </section>
+
+        <section class="scores" id="scores" aria-label="Daily scores"></section>
+
+    <section class="brief" aria-labelledby="brief-label">
+      <span id="brief-label" class="brief-label">Latest interpretation</span>
+      <p id="digest" class="digest skeleton skeleton-text">&nbsp;</p>
+    </section>
 
         <section class="tiles" id="tiles" aria-label="Key vitals">
           <article class="tile skeleton"></article>
@@ -108,11 +111,6 @@
           <div id="illness" class="illness"><div class="skeleton skeleton-block"></div></div>
         </section>
 
-        <section class="panel" id="device-panel">
-          <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/cpu.svg)"></span>Device &amp; data health</h2></div>
-          <div id="device" class="device"><div class="skeleton skeleton-block"></div></div>
-        </section>
-
         <section class="panel" id="research-panel">
           <div class="panel-head"><h2><span class="ic" style="--i:url(/icons/cpu.svg)"></span>Research export</h2></div>
           <form id="research-form" class="research">
@@ -142,6 +140,15 @@
     </footer>
   </div>
 
+  <!-- ring details: battery, firmware, data health -->
+  <dialog id="device-dialog" class="dialog device-dialog">
+    <div class="dd-head">
+      <h3>Ring</h3>
+      <button type="button" id="device-close" class="btn-text">Close</button>
+    </div>
+    <div id="device" class="device"><div class="skeleton skeleton-block"></div></div>
+  </dialog>
+
   <!-- profile editor -->
   <dialog id="profile-dialog" class="dialog">
     <form id="profile-form" method="dialog">
@@ -162,6 +169,14 @@
         <div class="field"><label for="f-height">Height (m)</label><input id="f-height" name="height_m" type="number" min="1" max="2.3" step="0.01" /></div>
         <div class="field"><label for="f-weight">Weight (kg)</label><input id="f-weight" name="weight_kg" type="number" min="20" max="250" step="1" /></div>
       </div>
+      <div class="field-row">
+        <div class="field"><label for="f-midpoint">Ideal sleep midpoint</label><input id="f-midpoint" name="ideal_midpoint" type="text" inputmode="numeric" placeholder="HH:MM, from Body Clock" pattern="-?[0-9]{1,2}:[0-9]{2}" /></div>
+      </div>
+      <p class="dialog-sub">Sets the timing part of the sleep score. Read it from the Oura app's Body Clock screen; use a minus sign before midnight (-01:00). Leave empty to use the default curve.</p>
+      <div class="field-row">
+        <div class="field"><label for="f-stager">Sleep staging</label><select id="f-stager" name="sleep_stager"></select></div>
+      </div>
+      <p class="dialog-sub" id="f-stager-note"></p>
       <div class="dialog-actions">
         <button type="button" id="profile-cancel" class="btn-text">Cancel</button>
         <button type="submit" id="profile-save" class="btn-primary">Save</button>

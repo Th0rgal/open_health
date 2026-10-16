@@ -19,6 +19,7 @@ const cap = (s) => esc(s).replace(/^./, (c) => c.toUpperCase());
 const kfmt = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(Math.round(n)));
 
 let CURRENT_PROFILE = null;
+let CURRENT_STAGER = null; // summary.sleep_stager: stored choice, stager in use, options with notices
 let CURRENT_TZ = 0; // hours from UTC, as the summary reports it
 let LAST_DEVICE_SERIAL = null;
 const browserTzOffset = () => {
@@ -1086,7 +1087,7 @@ function sleepSection(d, ymd, axis, cursor) {
     const st5 = n.stages_5min, t0 = n.stages_t0_unix || n.start_unix;
     const a5 = axis.frac(t0), b5 = axis.frac(t0 + st5.length * 300);
     rows.push({
-      label: "Stages · 5 min (Oura app)", summary: "", height: 96, html: hypnoSvg(st5, W, 92, [a5, b5]),
+      label: n.staging_source === "nssa" ? "Stages · 5 min (Oura app)" : "Stages · 5 min", summary: "", height: 96, html: hypnoSvg(st5, W, 92, [a5, b5]),
       valueAt: (t) => {
         const f = axis.frac(t);
         return f < a5 || f >= b5 ? "—" : (STAGE[st5[Math.floor(((f - a5) / Math.max(1e-9, b5 - a5)) * st5.length)]] || {}).name || "";
@@ -1235,6 +1236,16 @@ function activitySection(d, ymd, axis, cursor) {
     mc("Peak intensity", peakMet.toFixed(1) + " MET") +
     mc("Sessions", sessions.length);
   sec.append(mg);
+
+  if (ds && ds.contributors) {
+    const c = ds.contributors;
+    const names = ["Meet daily targets", "Stay active", "Move every hour", "Training frequency", "Training volume", "Recovery time"];
+    const vals = [c[0], c[1], c[2], c[3], c[4], (10 * c[5] + 15 * c[6]) / 25];
+    sec.append(el("p", "subhead", `Activity score ${ds.score}`));
+    const cg = el("div", "metric-grid");
+    cg.innerHTML = names.map((n, i) => mc(n, Math.round(vals[i]))).join("");
+    sec.append(cg);
+  }
 
   sec.append(el("p", "subhead", "Sessions"));
   if (sessions.length) {
@@ -1979,17 +1990,37 @@ function placeFormat(modules, reserved, ecl, mask) {
   for (let i = 8; i < 15; i++) set(8, 24 - (14 - i), i);
 }
 
+// Sleep / readiness / activity for the latest day with scores: a ring filled to the score.
+function renderScores(d) {
+  const box = $("scores");
+  const day = Object.keys(d.scores || {}).sort().pop();
+  const s = (d.scores || {})[day] || {};
+  const C = 2 * Math.PI * 28;
+  box.innerHTML = ["sleep", "readiness", "activity"].map((k) => {
+    const v = s[k];
+    const arc = v != null ? (Math.min(Math.max(v, 0), 100) / 100) * C : 0;
+    return `<div class="score"><svg viewBox="0 0 64 64" width="64" height="64" aria-hidden="true">` +
+      `<circle cx="32" cy="32" r="28" class="s-track"/>` +
+      `<circle cx="32" cy="32" r="28" class="s-arc" stroke-dasharray="${arc} ${C}" transform="rotate(-90 32 32)"/>` +
+      `<text x="32" y="38" text-anchor="middle" class="s-val">${v != null ? v : "—"}</text></svg>` +
+      `<span class="s-label">${k}</span></div>`;
+  }).join("");
+}
+
 function renderActions(d) {
   const dev = d.device || {};
   const b = $("batt");
-  if (dev.battery_pct != null) {
-    b.innerHTML = icon("battery-high") + `<span>${dev.battery_pct}%</span>`;
-    b.classList.toggle("low", dev.battery_pct < 20);
-    b.hidden = false;
-    b.title = `Ring battery ${dev.battery_pct}%${dev.battery_v ? " · " + dev.battery_v + " V" : ""}`;
-  } else {
-    b.hidden = true;
-  }
+  const pct = dev.battery_pct;
+  // the ring glyph's border is the battery gauge: arc length = charge
+  const C = 2 * Math.PI * 10;
+  const arc = pct != null ? (Math.min(Math.max(pct, 0), 100) / 100) * C : 0;
+  b.style.setProperty("--batt", pct == null ? "var(--muted)" : pct < 15 ? "#e0715a" : pct < 30 ? "#d9b04a" : "#4cb894");
+  b.innerHTML = `<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">` +
+    `<circle cx="12" cy="12" r="10" class="g-track"/>` +
+    `<circle cx="12" cy="12" r="10" class="g-arc" stroke-dasharray="${arc} ${C}" transform="rotate(-90 12 12)"/>` +
+    `<circle cx="12" cy="12" r="4" class="g-ring"/></svg>`;
+  b.hidden = false;
+  b.title = pct != null ? `Ring battery ${pct}%${dev.battery_v ? " · " + dev.battery_v + " V" : ""}` : "Ring details";
   $("foot-meta").textContent = `${dev.nights || 0} nights · ${(dev.total_events || 0).toLocaleString()} events`;
 }
 
@@ -2000,7 +2031,38 @@ function openProfile() {
   $("f-age").value = p.age ?? 30;
   $("f-height").value = p.height_m ?? 1.78;
   $("f-weight").value = p.weight_kg ?? 75;
+  $("f-midpoint").value = p.ideal_midpoint || "";
+  renderStagerChoice();
   $("profile-dialog").showModal();
+}
+
+// The sleep stager selector. Options whose model files are missing are disabled and say so,
+// the same notice the summary carries. "Automatic" means official when present, else built-in.
+function renderStagerChoice() {
+  const st = CURRENT_STAGER, sel = $("f-stager"), note = $("f-stager-note");
+  sel.replaceChildren();
+  if (!st) { sel.disabled = true; note.textContent = ""; return; }
+  sel.disabled = false;
+  const add = (value, text, disabled) => {
+    const o = el("option", "", text);
+    o.value = value;
+    o.disabled = !!disabled;
+    sel.append(o);
+  };
+  add("auto", "Automatic");
+  for (const o of st.options) add(o.id, o.available ? o.label : `${o.label} (not available)`, !o.available);
+  sel.value = st.choice;
+  const text = () => {
+    const lines = [];
+    const picked = st.options.find((o) => o.id === sel.value);
+    if (sel.value === "auto") lines.push("Uses the official staging when its model files are present, otherwise the built-in staging.");
+    else if (picked) lines.push(picked.detail);
+    for (const o of st.options) if (o.notice) lines.push(`${o.label}: ${o.notice}`);
+    if (st.notice) lines.push(st.notice);
+    note.textContent = lines.join(" ");
+  };
+  sel.onchange = text;
+  text();
 }
 async function saveProfile(e) {
   e.preventDefault();
@@ -2009,8 +2071,10 @@ async function saveProfile(e) {
     age: +$("f-age").value,
     height_m: +$("f-height").value,
     weight_kg: +$("f-weight").value,
+    ideal_midpoint: $("f-midpoint").value.trim(),
     ring_size: (CURRENT_PROFILE && CURRENT_PROFILE.ring_size) || 10, // not on the ring; kept default
   };
+  if (CURRENT_STAGER) body.sleep_stager = $("f-stager").value;
   $("profile-save").disabled = true;
   try {
     const r = await postDash("/api/profile", body);
@@ -2185,12 +2249,14 @@ async function load() {
     return;
   }
   CURRENT_PROFILE = d.profile || null;
+  CURRENT_STAGER = d.sleep_stager || null;
   CURRENT_TZ = d.tz || 0;
   LAST_DEVICE_SERIAL = d.device && d.device.serial;
   $("digest").classList.remove("skeleton", "skeleton-text");
   $("digest").classList.add("reveal");
   $("digest").innerHTML = (d.digest || "").replace(/([+-]?\d[\d.]*\s?(?:%|bpm|ms|m\/s))/g, '<span class="metric">$1</span>');
   renderActions(d);
+  renderScores(d);
   renderTiles(d);
   HR_QUARTER_LOAD = null;
   renderDay(d);
@@ -2208,6 +2274,8 @@ async function load() {
 $("sync-btn").addEventListener("click", doSync);
 $("live-btn").addEventListener("click", toggleLive);
 $("profile-btn").addEventListener("click", openProfile);
+$("batt").addEventListener("click", () => $("device-dialog").showModal());
+$("device-close").addEventListener("click", () => $("device-dialog").close());
 $("profile-form").addEventListener("submit", saveProfile);
 $("profile-cancel").addEventListener("click", () => $("profile-dialog").close());
 load();
