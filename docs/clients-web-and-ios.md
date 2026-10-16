@@ -156,6 +156,11 @@ which is why Oura's own app has no per-night HRV trend either.
 Now on both: the model-free Symptom Radar (`symptoms`, used when the Python runner
 has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only:
 
+- **On-phone ring sync UX**: the ring's own battery and firmware are read right after
+  authentication (`SyncProgressListener.on_device`) and shown at once (`RingInfo`,
+  `ringCard`, battery button). Sync continues in the background, reconnects to the saved
+  ring by identifier, and a paired ring shows a status card with the key collapsed. The web
+  dashboard reads a local database and has no BLE sync.
 - **Sleep report without a hypnogram**: iOS still draws the time-in-bed strip and the
   signal lanes; the web returns early.
 - **Sleep score + breathing rate** (`nights[].sleep_score`, `breath_rate`).

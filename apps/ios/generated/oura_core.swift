@@ -399,6 +399,22 @@ fileprivate class UniffiHandleMap<T> {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
+    typealias FfiType = UInt8
+    typealias SwiftType = UInt8
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt8 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: UInt8, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
     typealias FfiType = UInt16
     typealias SwiftType = UInt16
@@ -1237,6 +1253,18 @@ public protocol SyncProgressListener : AnyObject {
     
     func onProgress(stage: String, bytesLeft: UInt64, eventsSynced: UInt32) 
     
+    /**
+     * Ring identity and charge, read right after authentication so the UI can show
+     * them before the history drain starts. `battery_pct` is `None` when the ring
+     * did not answer the battery request.
+     */
+    func onDevice(serial: String, firmware: String, batteryPct: UInt8?) 
+    
+    /**
+     * Free-form diagnostic line (timings, skipped optional steps). Never affects control flow.
+     */
+    func onNote(message: String) 
+    
 }
 
 
@@ -1264,6 +1292,58 @@ fileprivate struct UniffiCallbackInterfaceSyncProgressListener {
                      stage: try FfiConverterString.lift(stage),
                      bytesLeft: try FfiConverterUInt64.lift(bytesLeft),
                      eventsSynced: try FfiConverterUInt32.lift(eventsSynced)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onDevice: { (
+            uniffiHandle: UInt64,
+            serial: RustBuffer,
+            firmware: RustBuffer,
+            batteryPct: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceSyncProgressListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onDevice(
+                     serial: try FfiConverterString.lift(serial),
+                     firmware: try FfiConverterString.lift(firmware),
+                     batteryPct: try FfiConverterOptionUInt8.lift(batteryPct)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onNote: { (
+            uniffiHandle: UInt64,
+            message: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceSyncProgressListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onNote(
+                     message: try FfiConverterString.lift(message)
                 )
             }
 
@@ -1330,6 +1410,30 @@ extension FfiConverterCallbackInterfaceSyncProgressListener : FfiConverter {
 #endif
     public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
         writeInt(&buf, lower(v))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt8: FfiConverterRustBuffer {
+    typealias SwiftType = UInt8?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt8.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt8.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
     }
 }
 
@@ -1629,6 +1733,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_method_syncprogresslistener_on_progress() != 32063) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_method_syncprogresslistener_on_device() != 41245) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_method_syncprogresslistener_on_note() != 15792) {
         return InitializationResult.apiChecksumMismatch
     }
 

@@ -175,6 +175,8 @@ struct SyncView: View {
     @ObservedObject private var store = DiagStore.shared
     @State private var diagnosticFile: URL?
     @State private var showKey = false
+    @State private var keyExpanded = false
+    @State private var keyCopied = false
     @State private var clockReport: String?
     @State private var confirmReset = false
     @State private var confirmWipeRing = false
@@ -217,15 +219,26 @@ struct SyncView: View {
         }
     }
 
+    /// A sync or pairing has succeeded and the key is stored: the setup instructions and
+    /// the key field give way to the ring's status and a single sync button.
+    private var paired: Bool { ring.knownSerial != nil && validKey }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     header
-                    if ring.connectionIssue != nil { syncStatus }
-                    else { preparation }
-                    if !ring.busy { pairingKey }
-                    connection
+                    if paired {
+                        ringCard
+                        connection
+                        if ring.connectionIssue != nil { preparation }
+                        if !ring.busy { keyDisclosure }
+                    } else {
+                        if ring.connectionIssue != nil { syncStatus }
+                        else { preparation }
+                        if !ring.busy { pairingKey }
+                        connection
+                    }
                     support
                     BuildStamp()
                 }
@@ -288,9 +301,69 @@ struct SyncView: View {
     }
 
     private var header: some View {
-        Text("Pair your ring")
+        Text(paired ? "Your ring" : "Pair your ring")
             .font(Obs.serif(28))
             .foregroundStyle(Obs.ink)
+    }
+
+    /// Identity and charge as the ring reported them at the start of the latest sync.
+    private var ringCard: some View {
+        let info = ring.info
+        return VStack(spacing: 0) {
+            ringCardRow("Serial", info?.serial ?? ring.knownSerial ?? "–")
+            SupportDivider()
+            ringCardRow("Firmware", info.map { $0.firmware.isEmpty ? "–" : $0.firmware } ?? "–")
+            SupportDivider()
+            ringCardRow("Battery", info?.batteryPct.map { "\($0)%" } ?? "–",
+                        tint: (info?.batteryPct ?? 100) < 20 ? Obs.alert : Obs.ink)
+            SupportDivider()
+            ringCardRow("Last synced", ring.lastSuccessfulSyncAt.map(Self.relative) ?? "Never")
+        }
+        .padding(.horizontal, 16)
+        .background(Obs.rule.opacity(0.3), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func ringCardRow(_ label: String, _ value: String, tint: Color = Obs.ink) -> some View {
+        HStack {
+            Text(label).font(.subheadline).foregroundStyle(Obs.ink2)
+            Spacer()
+            Text(value).font(Obs.mono(13)).foregroundStyle(tint)
+        }
+        .padding(.vertical, 12)
+    }
+
+    private static func relative(_ date: Date) -> String {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return f.localizedString(for: date, relativeTo: Date())
+    }
+
+    /// The stored key, one tap away: for a backup, or to replace it.
+    private var keyDisclosure: some View {
+        DisclosureGroup(isExpanded: $keyExpanded) {
+            VStack(alignment: .leading, spacing: 12) {
+                pairingKey
+                Button {
+                    UIPasteboard.general.setItems([[UIPasteboard.typeAutomatic: key]],
+                                                  options: [.expirationDate: Date().addingTimeInterval(60)])
+                    keyCopied = true
+                } label: {
+                    Label(keyCopied ? "Copied for 60 seconds" : "Copy key", systemImage: keyCopied ? "checkmark" : "doc.on.doc")
+                        .font(.footnote.weight(.medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Obs.ink)
+                .disabled(!validKey)
+            }
+            .padding(.top, 10)
+        } label: {
+            Text("Pairing key")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(Obs.ink)
+        }
+        .tint(Obs.ink2)
+        .onChange(of: keyExpanded) { _, open in
+            if !open { showKey = false; keyCopied = false; keyFocused = false }
+        }
     }
 
     private var preparation: some View {
@@ -392,7 +465,7 @@ struct SyncView: View {
                         .font(.subheadline).foregroundStyle(Obs.ink2)
                         .fixedSize(horizontal: false, vertical: true)
                     if ring.busy {
-                        Text("Keep the app open. If the connection drops, sync resumes automatically.")
+                        Text("Sync continues if you switch apps and resumes after a dropped connection. Saved data is never discarded.")
                             .font(.footnote).foregroundStyle(Obs.ink2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -424,8 +497,8 @@ struct SyncView: View {
                     }
                 } label: {
                     HStack(spacing: 10) {
-                        Text("Connect & sync")
-                        Image(systemName: "arrow.right")
+                        Text(paired ? "Sync now" : "Connect & sync")
+                        Image(systemName: paired ? "arrow.triangle.2.circlepath" : "arrow.right")
                     }
                     .font(.body.weight(.semibold))
                     .frame(maxWidth: .infinity, minHeight: 54)
@@ -434,9 +507,11 @@ struct SyncView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!validKey)
-                Text("Your first sync may take a few minutes.")
-                    .font(.footnote).foregroundStyle(Obs.ink2)
-                    .fixedSize(horizontal: false, vertical: true)
+                if ring.lastSuccessfulSyncAt == nil {
+                    Text("Your first sync may take a few minutes.")
+                        .font(.footnote).foregroundStyle(Obs.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
@@ -859,7 +934,7 @@ struct RootView: View {
             SyncView(ring: ring, onSynced: refreshAfterSync, onReset: resetAndReload)
         }
         .sheet(isPresented: $showProfile) { ProfileSettingsView(profile: s?.profile, onSaved: refreshDerivedData) }
-        .sheet(isPresented: $showRing) { if let s { RingDetailView(s: s) } }
+        .sheet(isPresented: $showRing) { if let s { RingDetailView(s: s, info: ring.info) } }
         .sheet(isPresented: $showSleepDebt) { if let debt = s?.sleepDebt { SleepDebtDetail(debt: debt) } }
         .sheet(item: $vital) { kind in if let s { VitalTrendView(s: s, kind: kind) } }
         #if TORCH
@@ -1096,7 +1171,7 @@ struct RootView: View {
                                 .font(.system(size: 17)).foregroundStyle(Obs.ink2)
                                 .frame(width: 31, height: 31)
                         }
-                        RingBatteryButton(pct: s.device?.battery_pct) { showRing = true }
+                        RingBatteryButton(pct: ring.info?.batteryPct ?? s.device?.battery_pct) { showRing = true }
                         SyncIndicatorButton(ring: ring) { showSync = true }
                     }
 
@@ -1248,6 +1323,8 @@ struct RingBatteryButton: View {
 /// Ring identity, battery, sync and data health.
 struct RingDetailView: View {
     let s: Summary
+    /// The ring's own report from the latest sync; fresher than the stored events.
+    var info: RingInfo? = nil
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {
@@ -1258,11 +1335,11 @@ struct RingDetailView: View {
                         // device & data health
                         ObsTag("device", icon: "cpu")
                         VStack(spacing: 10) {
-                            ObsStat(label: "serial", value: s.device?.serial ?? "–")
-                            ObsStat(label: "firmware", value: s.device?.firmware ?? "–")
+                            ObsStat(label: "serial", value: info?.serial ?? s.device?.serial ?? "–")
+                            ObsStat(label: "firmware", value: info.flatMap { $0.firmware.isEmpty ? nil : $0.firmware } ?? s.device?.firmware ?? "–")
                             ObsStat(label: "battery",
-                                    value: s.device?.battery_pct.map { "\($0)%" } ?? "–",
-                                    accent: (s.device?.battery_pct ?? 100) < 20 ? Obs.bad : Obs.ink)
+                                    value: (info?.batteryPct ?? s.device?.battery_pct).map { "\($0)%" } ?? "–",
+                                    accent: (info?.batteryPct ?? s.device?.battery_pct ?? 100) < 20 ? Obs.bad : Obs.ink)
                             if let raw = s.device?.raw_events ?? s.device?.total_events {
                                 ObsStat(label: "events",
                                         value: s.device?.decoded_events.map { "\(raw) raw · \($0) decoded" } ?? "\(raw)")

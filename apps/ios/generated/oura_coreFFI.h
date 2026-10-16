@@ -265,6 +265,20 @@ typedef void (*UniffiCallbackInterfaceSyncProgressListenerMethod0)(uint64_t, Rus
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SYNC_PROGRESS_LISTENER_METHOD1
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SYNC_PROGRESS_LISTENER_METHOD1
+typedef void (*UniffiCallbackInterfaceSyncProgressListenerMethod1)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SYNC_PROGRESS_LISTENER_METHOD2
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SYNC_PROGRESS_LISTENER_METHOD2
+typedef void (*UniffiCallbackInterfaceSyncProgressListenerMethod2)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLE_WRITER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLE_WRITER
 typedef struct UniffiVTableCallbackInterfaceBleWriter {
@@ -277,6 +291,8 @@ typedef struct UniffiVTableCallbackInterfaceBleWriter {
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SYNC_PROGRESS_LISTENER
 typedef struct UniffiVTableCallbackInterfaceSyncProgressListener {
     UniffiCallbackInterfaceSyncProgressListenerMethod0 _Nonnull onProgress;
+    UniffiCallbackInterfaceSyncProgressListenerMethod1 _Nonnull onDevice;
+    UniffiCallbackInterfaceSyncProgressListenerMethod2 _Nonnull onNote;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceSyncProgressListener;
 
@@ -756,6 +772,18 @@ uint16_t uniffi_oura_core_checksum_method_blewriter_write(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_SYNCPROGRESSLISTENER_ON_PROGRESS
 #define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_SYNCPROGRESSLISTENER_ON_PROGRESS
 uint16_t uniffi_oura_core_checksum_method_syncprogresslistener_on_progress(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_SYNCPROGRESSLISTENER_ON_DEVICE
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_SYNCPROGRESSLISTENER_ON_DEVICE
+uint16_t uniffi_oura_core_checksum_method_syncprogresslistener_on_device(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_SYNCPROGRESSLISTENER_ON_NOTE
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_METHOD_SYNCPROGRESSLISTENER_ON_NOTE
+uint16_t uniffi_oura_core_checksum_method_syncprogresslistener_on_note(void
     
 );
 #endif

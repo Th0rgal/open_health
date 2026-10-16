@@ -298,12 +298,39 @@ final class RingWriter: BleWriter, @unchecked Sendable {
 /// main actor for the UI. Weakly captured so a dead RingSync just drops updates.
 final class SyncProgressBridge: SyncProgressListener, @unchecked Sendable {
     private let update: @MainActor (String, UInt64, UInt32) -> Void
-    init(_ update: @escaping @MainActor (String, UInt64, UInt32) -> Void) {
+    private let device: @MainActor (String, String, UInt8?) -> Void
+    init(_ update: @escaping @MainActor (String, UInt64, UInt32) -> Void,
+         device: @escaping @MainActor (String, String, UInt8?) -> Void = { _, _, _ in }) {
         self.update = update
+        self.device = device
     }
     func onProgress(stage: String, bytesLeft: UInt64, eventsSynced: UInt32) {
         Task { @MainActor in self.update(stage, bytesLeft, eventsSynced) }
     }
+    func onDevice(serial: String, firmware: String, batteryPct: UInt8?) {
+        Task { @MainActor in self.device(serial, firmware, batteryPct) }
+    }
+    func onNote(message: String) {
+        dlog("rust", message)
+    }
+}
+
+/// What the ring itself reported at the start of the latest sync. Shown at once, long
+/// before the history drain finishes, and kept so the last values survive a relaunch.
+struct RingInfo: Codable, Equatable {
+    var serial: String
+    var firmware: String
+    var batteryPct: Int?
+    var readAt: Date
+
+    private static let key = "ring.info"
+    static func load() -> RingInfo? {
+        UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(RingInfo.self, from: $0) }
+    }
+    func save() {
+        if let data = try? JSONEncoder().encode(self) { UserDefaults.standard.set(data, forKey: Self.key) }
+    }
+    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
 }
 
 /// Orchestrates a sync and exposes progress to the UI.
@@ -317,6 +344,10 @@ final class RingSync: ObservableObject {
     @Published var connectionIssue: String?
     @Published var lastReport: SyncReport?
     @Published private(set) var lastSuccessfulSyncAt: Date?
+    /// Identity and charge as the ring reported them at the start of the latest sync.
+    @Published private(set) var info: RingInfo? = RingInfo.load()
+    /// Events committed to the database so far in the current sync.
+    @Published private(set) var committedEvents: UInt32 = 0
     /// Serial of the ring this phone last talked to — used to confirm a factory reset
     /// targets THIS ring and not one that merely won the scan.
     @Published private(set) var knownSerial: String? = UserDefaults.standard.string(forKey: "ring.serial")
@@ -363,18 +394,29 @@ final class RingSync: ObservableObject {
     }
 
     init() {
-        for name in [UIApplication.didEnterBackgroundNotification, UIApplication.protectedDataWillBecomeUnavailableNotification] {
-            lifecycleObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self, self.busy else { return }
-                    WorkCoordinator.shared.beginCleanup()
-                    self.pause()
-                }
-            })
-        }
+        // A sync keeps running when the app is backgrounded: the bluetooth-central
+        // background mode keeps CoreBluetooth callbacks flowing, and a short background
+        // task covers the hand-off. Nothing here is required for safety: every batch
+        // commits its events and cursor in one transaction, so a suspension or kill at
+        // any instant resumes from the last committed batch.
+        let center = NotificationCenter.default
+        lifecycleObservers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                BLEEnvironment.isBackground = true
+                guard let self, self.busy else { return }
+                WorkCoordinator.shared.beginCleanup()
+                dlog("sync", "app backgrounded; sync continues")
+            }
+        })
+        lifecycleObservers.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in BLEEnvironment.isBackground = false }
+        })
         let timestamp = UserDefaults.standard.double(forKey: Self.lastSuccessfulSyncKey)
         lastSuccessfulSyncAt = timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
     }
+
+    /// Sync may run in the background; it only needs the database to be readable.
+    private var syncAllowed: Bool { UIApplication.shared.isProtectedDataAvailable }
 
     var wasRecentlySynced: Bool {
         lastSuccessfulSyncAt.map { Date().timeIntervalSince($0) < Self.automaticSyncCooldown } ?? false
@@ -540,6 +582,7 @@ final class RingSync: ObservableObject {
             let serial = try await s.factoryReset(keyHex: keyHex, confirmSerial: confirmSerial)
             Keychain.clearKey()
             UserDefaults.standard.removeObject(forKey: Self.preferredPeripheralKey)
+            RingInfo.clear(); info = nil
             lastReport = nil
             dlog("reset", "wiped \(serial)")
             status = "\(serial) wiped. Its old key is gone — pair it again to start over."
@@ -639,13 +682,14 @@ final class RingSync: ObservableObject {
             status = "key must be 32 hex characters"
             return nil
         }
-        guard WorkCoordinator.shared.available else { status = "Sync paused. Open the app to resume."; return nil }
+        guard syncAllowed else { status = "Sync paused. Unlock your iPhone to resume."; return nil }
         busy = true
         paused = false
+        committedEvents = 0
         WorkCoordinator.shared.invalidateAnalysis()
         await WorkGate.shared.acquire()
         defer { Task { await WorkGate.shared.release() }; WorkCoordinator.shared.endCleanup() }
-        guard !paused, WorkCoordinator.shared.available else { busy = false; return nil }
+        guard !paused, syncAllowed else { busy = false; return nil }
         markedIncompleteThisRun = false
         // A multi-hour first sync must not die because the screen locked; SyncView
         // refreshes this when the app becomes active again.
@@ -671,7 +715,7 @@ final class RingSync: ObservableObject {
         var attempt = 1
         var totalBudget = max(1, maxAttempts)
         while attempt <= totalBudget {
-            if paused || Task.isCancelled || !WorkCoordinator.shared.available { status = "Sync paused. Return to the app to resume."; return nil }
+            if paused || Task.isCancelled || !syncAllowed { status = "Sync paused. Return to the app to resume."; return nil }
             attemptID = UUID().uuidString
             dlog("sync", "attempt=\(attempt) id=\(attemptID) run=\(runID)")
             if attempt > 1 {
@@ -681,7 +725,7 @@ final class RingSync: ObservableObject {
                     status = "Connection lost. Retrying (\(attempt) of \(totalBudget))…"
                 }
                 do { try await Task.sleep(nanoseconds: delayNs) } catch { return nil }
-                guard !paused, WorkCoordinator.shared.available else { return nil }
+                guard !paused, syncAllowed else { return nil }
             }
 
             if excludedPeripherals.isEmpty {
@@ -750,6 +794,9 @@ final class RingSync: ObservableObject {
                         self?.rememberPeripheral(t.connectedPeripheralID)
                     }
                     self?.showProgress(stage: stage, bytesLeft: bytesLeft, events: events)
+                } device: { [weak self] serial, firmware, battery in
+                    guard self?.attemptID == expectedAttempt, self?.busy == true else { return }
+                    self?.adoptInfo(serial: serial, firmware: firmware, battery: battery)
                 }
                 let report = try await s.sync(dbPath: DB.url.path, keyHex: key, progress: progress)
                 Keychain.saveKey(key)
@@ -805,6 +852,20 @@ final class RingSync: ObservableObject {
         return nil
     }
 
+    /// Publish what the ring reported right after authentication. A missing battery
+    /// reading keeps the previous one rather than blanking a value that is still true.
+    private func adoptInfo(serial: String, firmware: String, battery: UInt8?) {
+        rememberSerial(serial)
+        let previous = info?.serial == serial ? info : nil
+        let updated = RingInfo(serial: serial,
+                               firmware: firmware.isEmpty ? (previous?.firmware ?? "") : firmware,
+                               batteryPct: battery.map(Int.init) ?? previous?.batteryPct,
+                               readAt: Date())
+        info = updated
+        updated.save()
+        dlog("sync", "ring info serial=\(serial) fw=\(updated.firmware) battery=\(updated.batteryPct.map { "\($0)%" } ?? "unknown")")
+    }
+
     /// Render Rust-side progress into the status line.
     private func showProgress(stage: String, bytesLeft: UInt64, events: UInt32) {
         let now = ProcessInfo.processInfo.systemUptime
@@ -812,6 +873,7 @@ final class RingSync: ObservableObject {
             dlog("progress", "run=\(runID) stage=\(stage) bytesLeft=\(bytesLeft) committedEvents=\(events)")
             progressStage = stage; progressLogAt = now
         }
+        committedEvents = max(committedEvents, events)
         // Real drain progress means data is mid-transfer: from here until the sync
         // completes, an interruption should resume eagerly on return to the app.
         if events > 0, !markedIncompleteThisRun {

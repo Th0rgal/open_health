@@ -292,6 +292,12 @@ pub trait BleWriter: Send + Sync {
 #[uniffi::export(callback_interface)]
 pub trait SyncProgressListener: Send + Sync {
     fn on_progress(&self, stage: String, bytes_left: u64, events_synced: u32);
+    /// Ring identity and charge, read right after authentication so the UI can show
+    /// them before the history drain starts. `battery_pct` is `None` when the ring
+    /// did not answer the battery request.
+    fn on_device(&self, serial: String, firmware: String, battery_pct: Option<u8>);
+    /// Free-form diagnostic line (timings, skipped optional steps). Never affects control flow.
+    fn on_note(&self, message: String);
 }
 
 #[derive(uniffi::Record)]
@@ -410,6 +416,7 @@ async fn drain_into_store(
 ) -> Result<oura_link::client::SyncOutcome, SyncError> {
     let batch = Mutex::new(Vec::new());
     let checkpoint = AtomicU32::new(cursor);
+    let batch_started = Mutex::new(std::time::Instant::now());
     let outcome = client
         .drain_events(
             cursor,
@@ -419,6 +426,8 @@ async fn drain_into_store(
             },
             |p| {
                 let mut events = batch.lock().unwrap();
+                let received_ms = batch_started.lock().unwrap().elapsed().as_millis();
+                let commit_started = std::time::Instant::now();
                 match store
                     .lock()
                     .unwrap()
@@ -427,8 +436,17 @@ async fn drain_into_store(
                     Ok(count) => {
                         inserted.fetch_add(count, Ordering::Relaxed);
                         checkpoint.store(p.next_cursor, Ordering::Relaxed);
+                        progress.on_note(format!(
+                            "batch events={} inserted={} receive_ms={} commit_ms={} bytes_left={}",
+                            events.len(),
+                            count,
+                            received_ms,
+                            commit_started.elapsed().as_millis(),
+                            p.bytes_left
+                        ));
                         events.clear();
                         progress.on_progress("sync".into(), p.bytes_left as u64, p.events_synced);
+                        *batch_started.lock().unwrap() = std::time::Instant::now();
                         true
                     }
                     Err(error) => {
@@ -687,6 +705,29 @@ impl RingSession {
             .authenticate(&key)
             .await
             .map_err(|e| fail(e.to_string()))?;
+
+        // Identity and charge first: three short requests, and the app can show them
+        // (and the device row is persisted) before the slow stream setup and drain.
+        // None of them is required for the history drain, so a refusal is not an error.
+        let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
+        let info = client.firmware().await.ok();
+        let battery = client.battery().await.ok();
+        progress.on_device(
+            serial.clone(),
+            info.as_ref()
+                .map(|i| i.firmware_version.clone())
+                .unwrap_or_default(),
+            battery.map(|b| b.percent),
+        );
+        // Mutex<Store> keeps the future Send across the drain's awaits (rusqlite's
+        // Connection is !Sync), while still writing incrementally (no buffering).
+        let store = Mutex::new(Store::open(&db_path).map_err(|e| storage_failure("open", e, 0))?);
+        store
+            .lock()
+            .unwrap()
+            .upsert_device(&serial, None, info.as_ref())
+            .map_err(|e| storage_failure("upsert_device", e, 0))?;
+
         progress.on_progress("setup".into(), 0, 0);
         client
             .setup_app_stream()
@@ -698,7 +739,7 @@ impl RingSession {
         // retroactive — one of them dates every event in the same boot epoch.
         progress.on_progress("time".into(), 0, 0);
         if let Err(error) = client.sync_time_app().await {
-            progress.on_progress(format!("time_sync skipped: {error}"), 0, 0);
+            progress.on_note(format!("time_sync skipped: {error}"));
             // The app-layer command is refused by some firmware; the plain one is not.
             let _ = client.sync_time().await;
         }
@@ -708,17 +749,7 @@ impl RingSession {
         // gives the ring the whole drain to finish, so a fast postprocess lands in this
         // sync rather than the next. Fire-and-forget: a refusal is not a sync failure.
         let _ = client.check_sleep_analysis(false).await;
-        let serial = client.serial().await.unwrap_or_else(|_| "unknown".into());
-        let info = client.firmware().await.ok();
 
-        // Mutex<Store> keeps the future Send across the drain's awaits (rusqlite's
-        // Connection is !Sync), while still writing incrementally (no buffering).
-        let store = Mutex::new(Store::open(&db_path).map_err(|e| storage_failure("open", e, 0))?);
-        store
-            .lock()
-            .unwrap()
-            .upsert_device(&serial, None, info.as_ref())
-            .map_err(|e| storage_failure("upsert_device", e, 0))?;
         let cursor = store
             .lock()
             .unwrap()
@@ -798,7 +829,7 @@ impl RingSession {
         // when the firmware never emits time_sync/rtc_beacon events.
         if let Some(anchor) = phone_anchor_event(outcome.events_synced, outcome.next_cursor, now_unix()) {
             if let Err(error) = store.lock().unwrap().insert_event(&serial, &anchor) {
-                progress.on_progress(format!("phone anchor not saved: {error}"), 0, 0);
+                progress.on_note(format!("phone anchor not saved: {error}"));
             }
         }
         Ok(SyncReport {
@@ -885,6 +916,8 @@ mod tests {
     struct IgnoreProgress;
     impl SyncProgressListener for IgnoreProgress {
         fn on_progress(&self, _: String, _: u64, _: u32) {}
+        fn on_device(&self, _: String, _: String, _: Option<u8>) {}
+        fn on_note(&self, _: String) {}
     }
 
     #[tokio::test]
@@ -1125,6 +1158,8 @@ mod raw_event_tests {
         struct NoProgress;
         impl SyncProgressListener for NoProgress {
             fn on_progress(&self, _: String, _: u64, _: u32) {}
+            fn on_device(&self, _: String, _: String, _: Option<u8>) {}
+            fn on_note(&self, _: String) {}
         }
         struct ScriptedWriter {
             tx: broadcast::Sender<Vec<u8>>,
