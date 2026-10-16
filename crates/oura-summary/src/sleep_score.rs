@@ -327,6 +327,53 @@ pub fn score_night(input: NightInput) -> Value {
     })
 }
 
+/// Oura's sleep score (`oura_analysis::ported::sleep_inputs`): the library's epoch scan over a
+/// night's 30-second stages and motion, then its seven contributors.
+///
+/// `stages` holds one code per equal slice of `[start_unix, end_unix]` (1 deep, 2 light, 3 REM,
+/// 4 awake) and `motion` `(unix, motion_seconds)` points. `None` for nights under 5 minutes.
+pub fn oura_night(
+    age: f64,
+    tz_hours: f64,
+    start_unix: f64,
+    end_unix: f64,
+    stages: &[i64],
+    motion: &[(f64, f64)],
+    chronotype: Option<(u8, i32)>,
+) -> Option<Value> {
+    use oura_analysis::ported::sleep_inputs::night_from_stages;
+    let (start_s, end_s) = (start_unix.round() as i64, end_unix.round() as i64);
+    let codes: Vec<u8> = stages.iter().map(|&s| s.clamp(0, 15) as u8).collect();
+    let r = night_from_stages(
+        age.round().clamp(0.0, 255.0) as u8,
+        start_s,
+        end_s,
+        (tz_hours * 60.0).round() as i32,
+        &codes,
+        motion,
+        chronotype,
+    )?;
+    let c = r.contributors;
+    let sc = r.scan;
+    // the period record the daily functions take, as the scan builds it
+    let p = oura_analysis::ported::sleep_inputs::period_from_scan(&sc, start_s, (tz_hours * 60.0).round() as i32, 1);
+    let period = json!({
+        "start": p.start, "tz": p.tz,
+        "time_in_bed": p.time_in_bed, "total_sleep": p.total_sleep,
+        "rem": p.rem, "deep": p.deep, "efficiency": p.efficiency,
+        "latency": p.latency, "wake_ups": p.wake_ups, "restless": p.restless,
+        "got_up": p.got_up, "midpoint": p.midpoint,
+    });
+    Some(json!({
+        "score": r.total,
+        "period": period,
+        "contributors": {
+            "total": c[0], "deep": c[1], "rem": c[2], "efficiency": c[3],
+            "latency": c[4], "restfulness": c[5], "timing": c[6],
+        },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

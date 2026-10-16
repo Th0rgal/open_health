@@ -237,6 +237,12 @@ impl RingClock {
         self.resolve(ds, captured_unix).unix
     }
 
+    /// Unix seconds of an event, or `None` when its boot clock cannot be trusted.
+    pub fn dated_unix_s(&self, ds: i64, captured_unix: i64) -> Option<f64> {
+        let r = self.resolve(ds, captured_unix);
+        (r.source != ClockSource::Undated).then_some(r.unix)
+    }
+
     pub(crate) fn is_in_latest_unanchored_epoch(&self, ds: i64, captured_unix: i64) -> bool {
         let Some(last) = self.epochs.last() else {
             return false;

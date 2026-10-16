@@ -14,6 +14,10 @@
 use std::path::Path;
 
 fn main() {
+    // `OURA_STEP_COUNTER=/path/step_counter_1_3_0.bin` installs the step counter's weights
+    if let Ok(path) = std::env::var("OURA_STEP_COUNTER") {
+        eprintln!("step counter loaded: {}", oura_summary::real_steps::load_step_counter(&path));
+    }
     let mut args = std::env::args().skip(1);
     let db = match args.next() {
         Some(path) => path,
