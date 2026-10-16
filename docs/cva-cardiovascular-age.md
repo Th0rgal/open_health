@@ -25,7 +25,7 @@ Validation that the decode is correct: the reconstructed waveform is pulsatile a
 its **pulse rate matches the independent IBI-derived heart rate** (e.g. 38 bpm from
 PPG peaks vs 41 bpm from IBI in the same window).
 
-## The model (`cva_2_1_0`, `CardiovascularAgeV2Model`)
+## The model (`cva_2_1_5`, `CardiovascularAgeV2Model`)
 
 ```
 forward(ppg_segments [n, 1500] f32, demographics [1, 5] f32)

@@ -88,3 +88,15 @@ The fixtures are synthetic. Personal ring data stays local.
 - **Profile.** Age and BMI buckets of 5 and sex must equal the Oura account profile. Ours is `profile.json` or HealthKit.
 - **`exp`.** The softmax was checked against the host libm, not bionic's `exp`. This can only flip an argmax on an exact tie.
 - **ecore slot rounding.** ecore's re-grid places phase i at round30(bedtimeStart_s + 30·i). When the start's sub-30 s offset is ≥ 15 s, the stored string might shift by one slot. This was not disassembled to the end.
+
+## Choosing the stager
+
+The clients can stage with the NSSA graph above or with the built-in Rust stager (open_oura's
+`sleepstaging` port with a compiled-in tree ensemble trained privately by the author). The choice
+is `"sleep_stager"` in `profile.json`, resolved by `oura_summary::sleep_stager` and set from the
+profile screen of either client or `oura dashboard --sleep-stager`. NSSA needs
+`sleepstaging_2_6_0` (`.pt` on desktop, `.ptl` on iOS) and `sleepstaging_2_6_0_classifier.bin`.
+When either is missing the option is disabled with a notice and automatic mode uses the built-in
+stager. The built-in stager reads the same bedtime inputs (`stager_inputs`) and its classifier
+format differs from the extracted forest, so the Rust pipeline does not load the NSSA classifier.
+Both stagers feed the same 30 s grid, the 5-minute lane and the sleep score.

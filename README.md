@@ -28,6 +28,6 @@ Ring communication and portable algorithms are powered by
 cargo run --release -p oura-cli -- dashboard
 ```
 
-[Dashboard guide](dashboard/README.md) · [Algorithms](docs/algorithms/README.md) · [Architecture](docs/clients-web-and-ios.md)
+[Dashboard guide](dashboard/README.md) · [Algorithms](docs/algorithms/README.md) · [Architecture](docs/clients-web-and-ios.md) · [open_oura boundary](docs/open-oura-boundary.md)
 
 MIT licensed. See [LICENSE](LICENSE).

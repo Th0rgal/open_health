@@ -1,7 +1,7 @@
 # Running Oura's activity-detection model on our data
 
 `tools/run_activity_model.py` feeds our stored ring events into Oura's decrypted
-TorchScript `automatic_activity_detection_3_1_11.pt` and prints detected activity
+TorchScript activity-detection model and prints detected activity
 segments — **no raw IMU / RData needed**, it runs on the windowed signals we
 already sync.
 
@@ -47,7 +47,7 @@ there is **no 2.8 release**. The venv torch must match the `tch` pin, and torch
 
 ## Android parity
 
-The decompiled Android app uses this same 3.1.11 model. Its important preprocessing
+Both runners use the same model version. Its important preprocessing
 steps are now mirrored here and in iOS:
 
 - one inference per local calendar day; model time is minutes since local midnight;
@@ -62,7 +62,7 @@ an immersion interval is classified `swimming` 0.99.
 
 ## Days the model cannot evaluate
 
-Two input shapes make AAD 3.1.11 throw inside its preprocessor instead of returning no
+Two input shapes make the activity model throw inside its preprocessor instead of returning no
 workouts, so both runners (`tools/run_activity_model.py` and iOS `ActivityModel`) guard
 them identically:
 

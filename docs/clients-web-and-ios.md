@@ -8,7 +8,7 @@ add or change a feature, you almost always have to touch **both**. This is the m
 | Where | `dashboard/web/` (vanilla HTML/CSS/JS) served by `crates/oura-cli/src/dashboard.rs` | `apps/ios/OuraApp/` (SwiftUI) on `crates/oura-core` (UniFFI) |
 | Entry | `oura dashboard` → `http://127.0.0.1:8090` | `apps/ios/OuraApp/build_run.sh` (model-free) / `build_run_torch.sh` (on-device models) |
 | Render code | `app.js`, `styles.css`, `index.html` | `OuraApp.swift`, `Theme.swift` |
-| Models run via | Python torch runners (`tools/run_*_model.py`) | on-device `.ptl` (`TorchBridge.{h,mm}` + `SleepStaging`/`CvaModel`/`ActivityModel.swift`) |
+| Models run via | Python torch runners (`tools/run_*_model.py`) | sleep staging in Rust (`SleepStaging.swift` calls `oura-core`); activity, illness and CVA run as on-device `.ptl` (`TorchBridge.{h,mm}` + `ActivityModel`/`IllnessModel`/`CvaModel.swift`) |
 
 ## The one shared brain: `crates/oura-summary`
 
@@ -53,16 +53,26 @@ metric there once and both clients receive it in the JSON.
 | Movement ridge | `ridgeSvg` | `MovementRidge` | `activity_profile` | — (MET, model-free) |
 | **Activity sessions / workouts** | `openActDetail` (session) | workouts section | `activity` | AAD (web: Python · iOS: `ActivityModel`) |
 | Steps / active calories / **distance** | activity report stats | activity day stats | `activity_daily` (incl. `distance_m`) | — |
-| Previous days browser | `openDaysBrowser` → `openDayPage` | `AllDaysView` → `DayDetailView` | day keys | — |
-| Device & data health | `renderDevice` | device section | `device`, `streams` | — |
+| Readiness (ported `readiness_calculate`, baseline carried night to night), breathing rate (ported from IBI) | `scores.readiness` | `scores.readiness` | `nights[].oura_readiness`, `breath_rate`, `breath_rate_port` | no contributor display yet; rest mode not wired (rest-mode ring events are not stored) |
+| Ideal sleep midpoint (sleep score timing) | profile dialog, `f-midpoint` | `ProfileSettingsView` | `profile.ideal_midpoint`, `profile.json` `chronotype` | — |
+| **Sleep stager choice** (official NSSA staging, built-in tree-ensemble staging, or automatic; an option whose model files are missing is disabled with a notice) | profile dialog, `f-stager` (`renderStagerChoice`); `oura dashboard --sleep-stager` | `ProfileSettingsView` `sleepStagingCard` (`SleepStagerStatus`) | `sleep_stager` (`choice`, `effective`, `options[]`), `profile.json` `sleep_stager`; resolved once in `oura_summary::sleep_stager` | NSSA (`sleepstaging_2_6_0` + extracted classifier) or the built-in stager |
+| Activity score + contributors (ported `actinfo` and activity score) | `activitySection` | `ActivityReport` | `activity_daily` (`score`, `contributors`, `class_min`) | — |
+| **Daily scores and contributors** (readiness 9, sleep 7, activity 6 sub-scores; band colors; history) | — | `TodayTab` contributors, `ScoreDetailView`, `Heatmap` (`Home.swift`, `Detail.swift`, `Viz.swift`) | `scores`, `nights[].{oura_readiness,oura_sleep_score}.contributors`, `activity_daily[].contributors` | ported daily scorer |
+| **Vitals tiles and metric history** (value, change vs 14-day mean, series; scrubbable chart, daily table) | — | `VitalsTab`, `MetricDetailView` | `nights[]`, `vitals`, `activity_daily`, `cardio`, `fitness` | — |
+| **Trends** (period scores, contributor heatmap, body averages) | — | `TrendsTab`, `ScoreTrendCard` | same | — |
+| Previous days browser | `openDaysBrowser` → `openDayPage` | `HistoryView` (table of scores, sleep, steps; a row selects the day on Today/Vitals) | day keys | — |
+| **Live heart rate** (start, plot beats, average / low / high / RMSSD) | `POST /api/live-hr` panel | `LiveHeartRateCard` (`LiveHR.swift`) → `RingSession.live_heart_rate` (FFI) → `OuraClient::live_heart_rate` | — (not stored) | — |
+| **Symptom radar history** (4 biomarkers over 14-90 days against the personal range) | — (flagged biomarkers only) | `RadarDetailView`, `RadarCard` | `symptoms` / `illness`, `nights[]` | Radar |
+| **Sleep debt history** (debt and sleep series, daily table) | `openSleepDebt` | `DebtDetailView` | `sleep_debt` | SleepNet |
+| Device & data health (opened from the top-bar ring button, whose border is the battery gauge) | `renderDevice` in `#device-dialog` | `RingBatteryButton` → `SyncView` ("Your ring") | `device`, `streams` | — |
 | **Battery history** (level over the days with readings; charging runs drawn apart) | `renderDevice`→`batteryChart` | — | `device.battery_history` (`[unix, percent]`, 14 days) | — |
 
 ## The day is one unit — pair night + activity by *wake date*
 
 Both clients render **one "day" = last night's sleep + that day's activity**, drillable
 into either half and browsable back through previous days. The hero on each home screen is
-the most recent day; "show all N days" (web: `openDaysBrowser`; iOS: `AllDaysView`) opens
-the rest, each as a combined night+activity detail.
+the most recent day; "show all N days" (web: `openDaysBrowser`; iOS: the calendar button, `HistoryView`) opens
+the rest. iOS swipes between days on Today and Vitals (`DayPages`).
 
 The **pairing rule matters and must stay identical across clients**: nights are labelled by
 their **onset** date (the evening you went to bed), so an overnight sleep that crosses
@@ -125,25 +135,40 @@ a nap doesn't shadow the real sleep.
 ## Sleep metrics: two code paths, one algorithm — keep them in sync
 
 The clinical sleep metrics (onset/REM latency, WASO, awakenings, cycles, fragmentation) and
-sleep debt are computed **twice** and must stay identical: once in Rust (`oura-summary`
-`sleep_metrics` / `smooth_stages` / `count_bouts` / `count_periods` + `sleep_debt_summary`)
-for the web, and once in Swift (`Reports.swift` `Sleep.metrics` / `Sleep.smooth` +
-`Summary.stagedSleepDebt`) for iOS. Sleep debt groups every sleep session by wake-date,
+sleep debt are computed in Rust (`oura-summary` `sleep_metrics` / `smooth_stages` /
+`count_bouts` / `count_periods` + `sleep_debt_summary`) for the web and mirrored in Swift
+(`Reports.swift` `Sleep.metrics` / `Sleep.smooth`) for iOS. Sleep debt is Rust only: iOS
+writes its on-device hypnograms to the staged sidecar and reads the rebuilt summary. The
+debt algorithm itself is open_oura's `sleep_debt`. Sleep debt groups every sleep session by wake-date,
 including naps in that day's total, then evaluates 14 calendar days with at least five
 valid days; this matches the decompiled Android input and UI. The nightly **sleep need**
 is personalized like Oura's (`SleepDebtInput.longTermSleepTimeAvgSeconds` ← the long-term
 `sleepTimeAvg` baseline): each day's need is the mean of that user's daily totals over the
 previous 90 days, IQR-outlier-filtered, clamped to 7–9 h, rounded to 15 min, causal (a
-night never sets its own need), with an 8 h fallback below 14 valid history days — see
-Rust `sleep_need_s` and its Swift mirror `needS(on:)` in `stagedSleepDebt`. The web reads it from the
-summary JSON; iOS recomputes from the
+night never sets its own need), except that a day with fewer than 14 valid days before it uses
+all of the user's valid days, with an 8 h fallback below 14 valid days in total — see
+Rust `sleep_need_s`. Both clients read it from the summary JSON. iOS stages sleep from the
 **on-device** SleepNet hypnogram (`NightRow.stages`), because iOS runs `build_summary` with
 `NoModelRunner` (no server-side staging), so the FFI `stages_full`/`metrics` are empty there.
 The raw signal series (`nights[].series`) DO come from the FFI on both. If you change the
 smoothing window or a metric definition, change **both** implementations. Oura's own stagings
 (`staging_source` `nssa` or `ring`) are never smoothed or deep-refined (`is_oura_staging` /
 `Sleep.isOuraStaging`); only the signal-derived estimate is. Both clients also draw
-`stages_5min`, the official app's 5-minute chart (`aggregate_30s_to_5min` / `Sleep.aggregate5Min`).
+`stages_5min`, the official app's 5-minute chart (`aggregate_30s_to_5min` / `Sleep.aggregate5Min`),
+for whichever stager ran. Only an NSSA night carries the "Oura app" label on that lane.
+
+**Sleep stager choice.** `oura_summary::sleep_stager` is the single place that resolves it.
+`profile.json` holds `"sleep_stager": "official" | "xgb"` (absent means automatic). The official
+stager is Oura's `sleepstaging_2_6_0` graph plus its extracted classifier
+`sleepstaging_2_6_0_classifier.bin`. Both files are gitignored model files, so a build can lack
+them. The built-in stager (`xgb`) is open_oura's Rust pipeline with a tree ensemble trained
+privately by the author, compiled in, and always available. Automatic picks official when its
+files are present, otherwise built-in. Each client reports which files it found
+(`register_official_files`; web: the models directory or `$OURA_MODELS_DIR`, iOS: the app bundle
+through `set_official_sleep_stager_files`), and the summary's `sleep_stager` object carries the
+choice, the stager in use and a notice per unavailable option. iOS keeps one staging cache file per
+stager; the sidecar `staged_hypnograms.json` carries each night's `source` so the brain treats
+NSSA nights verbatim (`is_oura_staging`) and built-in nights as before.
 
 **Autonomic-by-stage** (mean HR/HRV per sleep stage) is the same story: Rust
 `autonomic_by_stage` fills `nights[].autonomic` for the web; iOS recomputes in Swift
@@ -157,14 +182,51 @@ which is why Oura's own app has no per-night HRV trend either.
 
 ## Known gaps (iOS-only, not yet on the web)
 
+- **Today / Vitals / Trends tabs** (iOS, `Home.swift`): the home is three tabs over the same summary.
+  Today shows one day (day strip, three scores, the selected score's contributors, sleep,
+  activity, body). Vitals is a tile per metric. Trends covers 14, 30 or 90 days with a
+  contributor heatmap. A score opens `ScoreDetailView`, a metric opens `MetricDetailView`,
+  and a day in either opens the day report. The web dashboard still has its single-page home
+  and does not render contributors.
+
+- **Ring capture settings** (iOS, `CaptureSettings.swift`, in the Profile sheet): reads the ring's
+  capture mode for daytime HR, exercise HR, SpO2, resting HR and two unnamed features
+  (`RingSession.capture_settings`) and sets them off or automatic
+  (`apply_capture_settings`). The web dashboard has no ring link for this.
+
 Now on both: the model-free Symptom Radar (`symptoms`, used when the Python runner
 has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only:
 
+- **On-phone ring sync UX**: the ring's own battery and firmware are read right after
+  authentication (`SyncProgressListener.on_device`) and shown at once (`RingInfo`,
+  `ringCard`, battery button). Sync continues in the background, reconnects to the saved
+  ring by identifier, registers the app stream (`16 01 02`) on every ring so it asks for a
+  15 ms connection interval (a Gen 3 batch arrives in ~420 ms instead of ~850 ms; the mode
+  lasts one connection), and a paired ring shows a status card with the key collapsed. The web
+  dashboard reads a local database and has no BLE sync.
+- **Sleep staging on desktop**: the web dashboard stages with the same two stagers as iOS (the
+  NSSA runner `tools/run_sleep_model.py`, or the built-in Rust stager in
+  `oura_summary::sleep_stager::stage_nights_xgb`, cached in `xgb_stage_cache.json`). The
+  official stager needs Python with torch and the model files; if the runner returns nothing the
+  built-in stager runs, and nights it cannot stage fall back to the signal estimate. With
+  `steps_source = model`, desktop has no step counter weights loader and falls back to the
+  ring's step count.
+- **Official stager coverage**: on the web the official stager stages every night (about 60 s for a
+  full database, cached in `nssa_cache.json`). iOS stages only the latest night automatically
+  with it, as the built-in stager covers every night; older nights are staged on demand or by
+  "Recompute everything". Switching the stager on iOS re-stages from that stager's own cache.
+- **Third stager**: there are two stagers, not three. The Rust port cannot load the extracted NSSA
+  classifier (a different forest format), so "NSSA features with the vendor classifier in Rust"
+  does not exist; the official stager always runs the vendor graph.
 - **Sleep report without a hypnogram**: iOS still draws the time-in-bed strip and the
   signal lanes; the web returns early.
 - **Sleep score + breathing rate** (`nights[].sleep_score`, `breath_rate`).
 - **Skin temperature / latest HR vitals and trend pages**, **hourly heart rate**
   (`hourly_hr` is FFI-only; no `/api` endpoint yet).
+- **Swipeable home day**: the iOS home pages through days with a horizontal swipe, and the
+  vitals and sleep debt follow the selected day (`homeDay` in `OuraApp.swift`); the web home
+  shows the latest day. A dashed "now" line marks the current time on today's movement chart
+  (`MovementRidge`, `MetProfile`); the web movement chart has none.
 - **Symptom Radar details**: all four biomarkers with their personal band
   (`lower`/`upper`); the web lists only the flagged ones.
 
@@ -172,14 +234,15 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
 
 - **One-page day view**: web shows Sleep, Activity and Heart rate on one scrolling page, every
   chart on one time axis (`dayAxis`) with a shared cursor (`dayCursor`), plus ‹ › / ← → to step
-  through days with data; iOS `DayReportView` keeps tabs and reaches days via `AllDaysView`.
+  through days with data; iOS `DayReportView` keeps tabs and reaches days via `HistoryView`.
 - **Time-true overnight lanes**: web draws the polysomnograph lanes from `nights[].series_t`
   (`[unix, value]` points, gaps kept). iOS still spreads `nights[].series` evenly over the
   night, which mis-times a lane whose stream stops early (the 5-min HR averages end at wake).
 - **15-minute heart-rate slots**: the web Heart rate tab defaults to 15-minute bars
   (`hr_bins`, with a 15 min / 1 h switch); iOS `HeartRate.swift` still shows hourly bars.
-- **Live heart rate** panel: `POST /api/live-hr` streams beats from `oura live-hr`
-  (one minute per session, stoppable) as newline-delimited JSON.
+- **Live heart rate**: now on both. The web streams beats from `oura live-hr` over
+  `POST /api/live-hr`; iOS runs the same `OuraClient::live_heart_rate` through the FFI and does
+  not store the beats (the CLI writes `heart_rate_live` readings).
 
 - **Advanced & debugging**: on-ring feature toggles (`/api/feature`) and the per-type
   event stream. Profile editing is now native on iOS, including optional Apple Health
@@ -259,9 +322,23 @@ downloaded in one go with no anchor). Nights whose bounds are not `anchor`/`proj
 download would put a 23:00→08:00 sleep at 07:00→15:00 on the wrong day. To make anchors
 exist for every boot, the iOS sync (`oura-core` `sync_inner`) now sends the phone clock to
 the ring (`sync_time_app`, which makes the ring log a `time_sync`) and, after a drain that saw
-new ring time, inserts a synthetic `time_sync` row (`decoded_json.source = "phone"`, body =
-unix LE + "phone") pairing the newest drained ds with the phone clock. This lives in
-**three places that must stay in sync**:
+new ring time, records a **phone anchor** pairing the newest drained ds with the phone clock.
+Phone anchors live in the `phone_anchors` table (`ring_timestamp`, `unix_time`,
+`captured_unix`), not in `events`: the ring never sent them, and anything that replays,
+exports or counts `events` must not see them.
+The view `events_with_anchors` unions `events` with the anchors as `time_sync` rows
+(`{"unix_time":..,"source":"phone"}`) in the `(captured_unix, id)` order the clock needs;
+every reader that builds a `RingClock` reads that relation (`Store::decoded_events`,
+`clock_events_relation`, `clock_rows`, `EventStore.relation`, `_common.clock_events_relation`),
+and falls back to `events` on a database that never had the table. Earlier builds wrote the
+anchors into `events` (tag 0x42, body = unix LE + "phone"); `Store::open` and
+`migrate_if_writable` move those rows once (`store_meta.phone_anchors_migrated`).
+
+`sync_time_app` sends `12 09 <u64 unix s> <tz half hours>`. Builds
+before this change sent `<token> <unix/256>` and set the clock early or late by up to 255 s;
+Details: open_oura `docs/sync-orchestration.md`.
+
+The clock logic lives in **three places that must stay in sync**:
 
 - `crates/oura-summary/src/ring_time.rs` — the shared `RingClock`; fixes night/activity/
   movement **dates for both clients** at once.

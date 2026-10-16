@@ -29,7 +29,7 @@ than inferring a cause from a missing termination callback.
 - Successful summary caches now also preserve workouts and illness results.
 
 The changed upstream storage crate is vendored for a reproducible review build.
-See `vendor/oura-store/README.md`; no dependency publication is required to build.
+The store changes it describes are in open_oura (`crates/oura-store`).
 No health-data schema columns or medical model definitions were changed. Two
 indexes are built on the first writable open after upgrading; a large existing
 history can make that first initialization slower.
