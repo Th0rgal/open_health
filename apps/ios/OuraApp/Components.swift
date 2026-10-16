@@ -53,10 +53,10 @@ struct SessionRow: View {
         HStack(spacing: 10) {
             Image(systemName: activitySymbol(label)).font(.system(size: 14))
                 .foregroundStyle(Obs.ink2).frame(width: 20)
-            Text(actLabel(label)).font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
+            Text(actLabel(label)).font(Obs.sans(13, .medium)).foregroundStyle(Obs.ink)
             Spacer()
-            Text("\(durationMin) min").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-            Text(startHM).font(Obs.mono(11)).foregroundStyle(Obs.muted)
+            Text("\(durationMin) min").font(Obs.sans(12)).foregroundStyle(Obs.ink2)
+            Text(startHM).font(Obs.sans(11)).foregroundStyle(Obs.muted)
         }
     }
 }
@@ -101,6 +101,14 @@ struct Sparkline: View {
             // Monotone cubic interpolation rounds the joins without overshooting the
             // measured points. It is smoother than a polyline but does not invent peaks.
             let path = monotonePath(points)
+            // the soft shadow under the line, fading toward the baseline
+            var area = path
+            area.addLine(to: CGPoint(x: points[points.count - 1].x, y: size.height))
+            area.addLine(to: CGPoint(x: points[0].x, y: size.height))
+            area.closeSubpath()
+            ctx.fill(area, with: .linearGradient(Gradient(colors: [accent.opacity(0.20), accent.opacity(0)]),
+                                                 startPoint: CGPoint(x: 0, y: points.map(\.y).min() ?? 0),
+                                                 endPoint: CGPoint(x: 0, y: size.height)))
             ctx.stroke(path, with: .color(accent.opacity(0.10)),
                        style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
             ctx.stroke(path, with: .color(accent.opacity(0.86)),
@@ -201,16 +209,16 @@ struct VitalCell: View {
                 }
             }
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(value).font(Obs.mono(26, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
-                Text(unit).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                Text(value).font(Obs.sans(26, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
+                Text(unit).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
             }
             if let d = delta {
                 Text("\(d >= 0 ? "+" : "")\(d, specifier: "%.0f")% vs base")
-                    .font(Obs.mono(10))
+                    .font(Obs.sans(11))
                     .foregroundStyle(tone)
             }
             if let detail {
-                Text(detail).font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                Text(detail).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
             }
             if series.count > 1 {
                 Sparkline(series: series, accent: tone, baseline: baseline)
@@ -306,14 +314,14 @@ struct VitalTrendView: View {
                         .pickerStyle(.segmented)
                         if let last = points.last {
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Text(format(last.value)).font(Obs.mono(34, .medium)).foregroundStyle(Obs.ink)
-                                Text(kind.unit).font(Obs.mono(14)).foregroundStyle(Obs.ink2)
+                                Text(format(last.value)).font(Obs.sans(34, .medium)).foregroundStyle(Obs.ink)
+                                Text(kind.unit).font(Obs.sans(14)).foregroundStyle(Obs.ink2)
                             }
                             HStack(spacing: 8) {
-                                Text(last.date).font(Obs.mono(12)).foregroundStyle(Obs.muted)
+                                Text(last.date).font(Obs.sans(12)).foregroundStyle(Obs.muted)
                                 if let d = deltaPct {
                                     Text("\(d >= 0 ? "+" : "")\(d, specifier: "%.0f")% vs base")
-                                        .font(Obs.mono(12)).foregroundStyle(accent)
+                                        .font(Obs.sans(12)).foregroundStyle(accent)
                                 }
                             }
                         }
@@ -332,10 +340,10 @@ struct VitalTrendView: View {
                             .obsCard()
                         } else if all.isEmpty {
                             Text("No readings yet.")
-                                .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                                .font(Obs.sans(12)).foregroundStyle(Obs.ink2)
                         } else {
                             Text("Not enough nights in this period yet.")
-                                .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                                .font(Obs.sans(12)).foregroundStyle(Obs.ink2)
                         }
                     }
                     .padding(24)
@@ -387,11 +395,11 @@ private struct VitalTrendChart: View {
         return VStack(spacing: 8) {
             HStack(alignment: .top, spacing: 8) {
                 VStack(alignment: .trailing, spacing: 0) {
-                    Text(tick(domainHi)).font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                    Text(tick(domainHi)).font(Obs.sans(11)).foregroundStyle(Obs.muted)
                     Spacer()
-                    Text(tick((domainLo + domainHi) / 2)).font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                    Text(tick((domainLo + domainHi) / 2)).font(Obs.sans(11)).foregroundStyle(Obs.muted)
                     Spacer()
-                    Text(tick(domainLo)).font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                    Text(tick(domainLo)).font(Obs.sans(11)).foregroundStyle(Obs.muted)
                 }
                 .frame(width: 36)
                 Canvas { ctx, size in
@@ -435,18 +443,18 @@ private struct VitalTrendChart: View {
                 .accessibilityLabel("Trend from \(YMD.short(start)) to \(YMD.short(end))")
             }
             HStack {
-                Text(YMD.short(start)).font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                Text(YMD.short(start)).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                 Spacer()
                 if let mid = midpoint {
-                    Text(YMD.short(mid)).font(Obs.mono(10)).foregroundStyle(Obs.muted)
+                    Text(YMD.short(mid)).font(Obs.sans(11)).foregroundStyle(Obs.muted)
                     Spacer()
                 }
-                Text(YMD.short(end)).font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                Text(YMD.short(end)).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
             }
             if baseline != nil {
                 HStack(spacing: 5) {
                     Rectangle().fill(Obs.ink.opacity(0.35)).frame(width: 16, height: 1)
-                    Text("baseline").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                    Text("baseline").font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                 }
             }
         }
@@ -491,6 +499,8 @@ struct Hypnogram: View {
 struct MovementRidge: View {
     let profile: [Double]
     var height: CGFloat = 44
+    /// Hour of day to mark with a dashed line (today only), where the data ends.
+    var nowHour: Double? = nil
     var body: some View {
         Canvas { ctx, size in
             guard profile.count > 1 else { return }
@@ -507,6 +517,11 @@ struct MovementRidge: View {
             var line = Path(); line.move(to: pt(0))
             for i in 1..<n { line.addLine(to: pt(i)) }
             ctx.stroke(line, with: .color(Obs.chart.opacity(0.85)), style: .init(lineWidth: 1.2, lineJoin: .round))
+            if let nowHour {
+                let x = size.width * min(1, nowHour * 4 / CGFloat(n - 1))
+                ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) },
+                           with: .color(Obs.ink2), style: .init(lineWidth: 1, dash: [3, 3]))
+            }
         }
         .frame(height: height)
     }

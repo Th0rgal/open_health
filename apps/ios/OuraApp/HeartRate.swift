@@ -118,12 +118,12 @@ struct HourlyHeartRateSection: View {
             .onChange(of: window) { _, _ in selected = nil; reload() }
 
             if let error = result.error {
-                Text(error).font(Obs.mono(12)).foregroundStyle(Obs.bad)
+                Text(error).font(Obs.sans(12)).foregroundStyle(Obs.bad)
                     .fixedSize(horizontal: false, vertical: true)
             } else if visible.isEmpty {
                 Text(loading ? "Reading the ring database…"
                              : "No beats stored for this window yet. Sync the ring.")
-                    .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                    .font(Obs.sans(12)).foregroundStyle(Obs.ink2)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 readout
@@ -143,22 +143,22 @@ struct HourlyHeartRateSection: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("\(Int(bar.low.rounded()))–\(Int(bar.high.rounded()))")
-                        .font(Obs.mono(30, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
-                    Text("bpm").font(Obs.mono(13)).foregroundStyle(Obs.ink2)
+                        .font(Obs.sans(30, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
+                    Text("bpm").font(Obs.sans(13)).foregroundStyle(Obs.ink2)
                 }
                 Text("\(Self.dayLabel(bar)) · \(String(format: "%02d:00", bar.hour)) · median \(Int(bar.median.rounded())) · range \(Int(bar.min.rounded()))–\(Int(bar.max.rounded())) · \(bar.count) beats")
-                    .font(Obs.mono(10)).foregroundStyle(Obs.muted)
+                    .font(Obs.sans(11)).foregroundStyle(Obs.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
         } else if let latest = result.latest {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("\(Int(latest.bpm.rounded()))")
-                        .font(Obs.mono(30, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
-                    Text("bpm").font(Obs.mono(13)).foregroundStyle(Obs.ink2)
-                    Text("latest").font(Obs.mono(10)).foregroundStyle(Obs.muted)
+                        .font(Obs.sans(30, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
+                    Text("bpm").font(Obs.sans(13)).foregroundStyle(Obs.ink2)
+                    Text("latest").font(Obs.sans(11)).foregroundStyle(Obs.muted)
                 }
-                Text(Self.stamp(latest.unix)).font(Obs.mono(10)).foregroundStyle(Obs.muted)
+                Text(Self.stamp(latest.unix)).font(Obs.sans(11)).foregroundStyle(Obs.muted)
             }
         }
     }
@@ -167,14 +167,14 @@ struct HourlyHeartRateSection: View {
         HStack {
             if let first = visible.first {
                 Text(Self.dayLabel(first) + " " + String(format: "%02d:00", first.hour))
-                    .font(Obs.mono(9)).foregroundStyle(Obs.ink2)
+                    .font(Obs.sans(11)).foregroundStyle(Obs.ink2)
             }
             Spacer()
-            Text("touch a bar for that hour").font(Obs.mono(9)).foregroundStyle(Obs.muted)
+            Text("touch a bar for that hour").font(Obs.sans(11)).foregroundStyle(Obs.muted)
             Spacer()
             if let last = visible.last {
                 Text(Self.dayLabel(last) + " " + String(format: "%02d:00", last.hour))
-                    .font(Obs.mono(9)).foregroundStyle(Obs.ink2)
+                    .font(Obs.sans(11)).foregroundStyle(Obs.ink2)
             }
         }
     }
@@ -236,11 +236,11 @@ private struct HourlyRangeChart: View {
 
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .trailing, spacing: 0) {
-                Text("\(Int(domainHi.rounded()))").font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                Text("\(Int(domainHi.rounded()))").font(Obs.sans(11)).foregroundStyle(Obs.muted)
                 Spacer()
-                Text("\(Int(((domainLo + domainHi) / 2).rounded()))").font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                Text("\(Int(((domainLo + domainHi) / 2).rounded()))").font(Obs.sans(11)).foregroundStyle(Obs.muted)
                 Spacer()
-                Text("\(Int(domainLo.rounded()))").font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                Text("\(Int(domainLo.rounded()))").font(Obs.sans(11)).foregroundStyle(Obs.muted)
             }
             .frame(width: 30)
 
@@ -290,14 +290,11 @@ private struct HourlyRangeChart: View {
                     }
                 }
                 .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { g in
-                            let i = Int(g.location.x / max(slotWidth, 0.001))
-                            guard slots.indices.contains(i) else { return }
-                            selected = byHour[slots[i]]
-                        }
-                )
+                .overlay(HorizontalScrub(onChange: { x in
+                    let i = Int(x / max(slotWidth, 0.001))
+                    guard slots.indices.contains(i) else { return }
+                    selected = byHour[slots[i]]
+                }))
                 .accessibilityLabel("Hourly heart rate band, \(bars.count) hours with data")
             }
         }

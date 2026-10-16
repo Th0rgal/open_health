@@ -76,11 +76,21 @@ targets:
       - path: Core.swift
       - path: WorkCoordinator.swift
       - path: Components.swift
+      - path: CaptureSettings.swift
+      - path: CaptureNeeds.swift
+      - path: ActivityLog.swift
+      - path: ActivityViews.swift
+      - path: ModelFiles.swift
       - path: Reports.swift
       - path: DayExport.swift
       - path: RawData.swift
       - path: ResearchExport.swift
       - path: HeartRate.swift
+      - path: Scores.swift
+      - path: Viz.swift
+      - path: Home.swift
+      - path: Detail.swift
+      - path: LiveHR.swift
       - path: Theme.swift
       - path: BLETransport.swift
       - path: RingSync.swift
@@ -106,20 +116,28 @@ targets:
       - path: Assets.xcassets
       # bundled models + data (gitignored local files). oura.db is temporary until the
       # on-device BLE sync lands — then the app builds its own DB from your ring.
-      # NSSA sleep stager + its tree-ensemble classifier (tools/extract_nssa_classifier.py)
+      - path: ../../../notes/models/mobile/cva_2_1_5.ptl
+        optional: true
+        buildPhase: resources
+      # NSSA sleep stager + its tree-ensemble classifier (tools/extract_nssa_classifier.py).
+      # Optional: without them the app offers only the built-in stager.
       - path: ../../../notes/models/mobile/sleepstaging_2_6_0.ptl
+        optional: true
         buildPhase: resources
       - path: ../../../notes/models/mobile/sleepstaging_2_6_0_classifier.bin
+        optional: true
         buildPhase: resources
-      - path: ../../../notes/models/mobile/cva_2_1_0.ptl
-        buildPhase: resources
-      - path: ../../../notes/models/mobile/automatic_activity_detection_3_1_11.ptl
-        buildPhase: resources
-      - path: ../../../notes/models/mobile/steps_motion_decoder_2_0_0.ptl
+      - path: ../../../notes/models/mobile/automatic_activity_detection_3_1_15.ptl
+        optional: true
         buildPhase: resources
       - path: ../../../notes/models/mobile/illness_detection_0_5_1.ptl
+        optional: true
+        buildPhase: resources
+      - path: ../../../notes/models/step_counter_1_3_0.bin
+        optional: true
         buildPhase: resources
       - path: ../../../oura.db
+        optional: true
         buildPhase: resources
     dependencies:
       - sdk: HealthKit.framework

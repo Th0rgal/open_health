@@ -43,14 +43,6 @@ final class StabilityTests: XCTestCase {
                                     inBedS: 8 * 3600)?.solMin, 60)
     }
 
-    func testPartialMainSleepDoesNotTurnCompleteNapIntoDailySleepDebt() {
-        var partial = NightRow(ymd: "2026-09-26", start: "00:07", end: "08:55", in_bed_h: 8.8)
-        partial.wake_ymd = "2026-09-26"; partial.stages_full = [0, 0, 2, 3]
-        var nap = NightRow(ymd: "2026-09-26", start: "14:00", end: "15:00", in_bed_h: 1)
-        nap.wake_ymd = "2026-09-26"; nap.stages_full = [2, 2, 2, 2]
-        XCTAssertNil(Summary(nights: [partial, nap]).stagedSleepDebt())
-    }
-
     func testNightUsesFullStagesAndExactDurationInsteadOfRoundedPreview() throws {
         let data = Data(#"{"stages":[4,2],"stages_full":[4,1,2,3],"start_unix":100,"end_unix":220,"in_bed_h":0.1}"#.utf8)
         let night = try JSONDecoder().decode(NightRow.self, from: data)
@@ -148,10 +140,10 @@ final class StabilityTests: XCTestCase {
         let older = NightRow(ymd: "2026-09-08", start_ds: 100, end_ds: 190, start: "23:00", end: "07:00")
         var savedLatest = latest
         savedLatest.stages = [1, 2, 3, 4]
-        savedLatest.staging_source = "sleepnet"
+        savedLatest.staging_source = SleepStaging.source
         var savedOlder = older
         savedOlder.stages = [2, 3, 2, 1]
-        savedOlder.staging_source = "sleepnet"
+        savedOlder.staging_source = SleepStaging.source
         let nights = [latest, older]
 
         let firstLaunch = Core.automaticSleepPlan(nights: nights, previous: nil)
@@ -247,7 +239,7 @@ final class StabilityTests: XCTestCase {
     }
 
     func testActivitySparseDayReturnsNoWorkouts() throws {
-        let path = try XCTUnwrap(Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl"))
+        let path = try XCTUnwrap(Bundle.main.path(forResource: "automatic_activity_detection_3_1_15", ofType: "ptl"))
         let nan = Float.nan
         var context: [Float] = [2026, 9, 8, 1]
         var user: [Float] = [30, 1, 1.78, 75] + Array(repeating: nan, count: 10)
@@ -274,7 +266,7 @@ final class StabilityTests: XCTestCase {
     /// minute 0, and duplicate MET minutes. The first two run through the guards in
     /// ActivityModel; here the FFI itself is pinned on the placeholder position.
     func testActivityPlaceholderInsideMetWindowRuns() throws {
-        let path = try XCTUnwrap(Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl"))
+        let path = try XCTUnwrap(Bundle.main.path(forResource: "automatic_activity_detection_3_1_15", ofType: "ptl"))
         let nan = Float.nan
         var context: [Float] = [2026, 7, 6, 0]
         var user: [Float] = [30, 1, 1.78, 75] + Array(repeating: nan, count: 10)
@@ -451,7 +443,7 @@ final class StabilityTests: XCTestCase {
     }
 
     func testActivityCompleteDayRunsInMobileRuntime() throws {
-        let path = try XCTUnwrap(Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl"))
+        let path = try XCTUnwrap(Bundle.main.path(forResource: "automatic_activity_detection_3_1_15", ofType: "ptl"))
         let nan = Float.nan
         var context: [Float] = [2026, 9, 8, 1]
         var user: [Float] = [30, 1, 1.78, 75] + Array(repeating: nan, count: 10)

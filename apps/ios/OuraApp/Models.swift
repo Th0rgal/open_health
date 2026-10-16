@@ -83,6 +83,10 @@ struct NightRow: Codable, Identifiable {
     /// Nightly respiratory rate (breaths/min), the ring's own per-window estimate.
     var breath_rate: Double? = nil
     var sleep_score: SleepScore? = nil
+    /// The app's own daily sleep score and readiness with their contributors (0 to 100),
+    /// attached to the night that is its wake date's main sleep.
+    var oura_sleep_score: ScoreContributors? = nil
+    var oura_readiness: ScoreContributors? = nil
     var id: String { (date ?? "") + (start ?? "") }
     var hasHypnogram: Bool { (hypnogram?.count ?? 0) > 1 }
     var isBedtimeManual: Bool { bedtime_manual ?? false }
@@ -90,6 +94,11 @@ struct NightRow: Codable, Identifiable {
         !(series_t?.hr.isEmpty ?? true) || !(series?.hr.isEmpty ?? true)
             || !(series_t?.motion.isEmpty ?? true) || !(series?.motion.isEmpty ?? true)
     }
+}
+/// A daily score with the sub-scores that make it up, keyed as the shared core names them.
+struct ScoreContributors: Codable {
+    var score: Double?
+    var contributors: [String: Double]?
 }
 /// One component of the literature-based sleep score, with the paper behind it.
 struct SleepScoreComponent: Codable, Identifiable {
@@ -158,8 +167,16 @@ enum JSONValue: Codable {
     }
 }
 
-struct DailyStat: Codable { var active_kcal: Double?; var total_kcal: Double?; var steps: Double?; var distance_m: Double? }
-struct Profile: Codable { var sex: String?; var age: Double?; var height_m: Double?; var weight_kg: Double?; var ring_size: Double? }
+struct DailyStat: Codable {
+    var active_kcal: Double?; var total_kcal: Double?; var steps: Double?; var distance_m: Double?
+    var target_steps: Double? = nil; var target_kcal: Double? = nil
+    /// Minutes by intensity class: rest, sedentary, light, moderate, vigorous.
+    var class_min: [String: Double]? = nil
+    var score: Double?
+    /// Seven activity-score contributors, 0 to 100 (targets, stay active, move every hour, training frequency, training volume, recovery load, recovery run).
+    var contributors: [Double]?
+}
+struct Profile: Codable { var sex: String?; var age: Double?; var height_m: Double?; var weight_kg: Double?; var ring_size: Double?; var ideal_midpoint: String? }
 // a detected activity session (on-device automatic_activity_detection)
 struct WorkoutSession: Identifiable, Codable {
     let start: String; let end: String; let durationMin: Int; let label: String; let isWorkout: Double
@@ -175,6 +192,7 @@ struct SleepDebtDay: Codable, Identifiable {
     var sleep_need_min: Double
     var shortfall_min: Double?
     var cumulative_debt_min: Double?
+    var state: String?
     var valid_days: Int
     var id: String { date }
 }
@@ -187,6 +205,17 @@ struct SleepDebtSummary: Codable {
     var window_days: Int = 14
     var state: String = "none"
     var days: [SleepDebtDay] = []
+
+    /// The debt as it stood at the end of `day`, or nil outside the summarized window.
+    func asOf(_ day: String) -> SleepDebtSummary? {
+        guard let entry = days.first(where: { $0.date == day }) else { return nil }
+        var debt = self
+        debt.debt_min = entry.cumulative_debt_min ?? 0
+        debt.valid = entry.cumulative_debt_min != nil
+        debt.valid_days = entry.valid_days
+        debt.state = entry.state ?? "none"
+        return debt
+    }
 }
 struct Device: Codable {
     var serial: String?; var firmware: String?
@@ -287,6 +316,12 @@ struct UndatedNight: Codable {
     var captured_unix: Int64?; var source: String?
     var reason: String?; var recoverable: Bool?
 }
+/// Estimated daily scores (0-100) from `oura-summary::scores`; each is nil without its inputs.
+struct DayScores: Codable {
+    var sleep: Double?
+    var readiness: Double?
+    var activity: Double?
+}
 struct Summary: Codable {
     var analysis_digest: String? = nil
     var analysis_version: Int? = nil
@@ -297,6 +332,7 @@ struct Summary: Codable {
     var vitals = Vitals()
     var activity_profile: [String: [Double]] = [:]   // date → 96 × 15-min mean MET-above-rest
     var activity_daily: [String: DailyStat] = [:]     // date → steps / active-kcal / total-kcal
+    var scores: [String: DayScores] = [:]             // wake date → sleep / readiness / activity
     var profile: Profile?
     var cardio: Cardio?
     var fitness: Fitness?
@@ -312,7 +348,7 @@ struct Summary: Codable {
     // out of decoding.
     enum CodingKeys: String, CodingKey {
         case analysis_digest, analysis_version
-        case digest, device, nights, clock, vitals, activity_profile, activity_daily, profile, cardio, fitness, error
+        case digest, device, nights, clock, vitals, activity_profile, activity_daily, scores, profile, cardio, fitness, error
         case symptoms
         case sleepDebt = "sleep_debt"
     }
@@ -332,6 +368,7 @@ struct Summary: Codable {
         vitals = (try? c.decodeIfPresent(Vitals.self, forKey: .vitals)) ?? Vitals()
         activity_profile = (try? c.decodeIfPresent([String: [Double]].self, forKey: .activity_profile)) ?? [:]
         activity_daily = (try? c.decodeIfPresent([String: DailyStat].self, forKey: .activity_daily)) ?? [:]
+        scores = (try? c.decodeIfPresent([String: DayScores].self, forKey: .scores)) ?? [:]
         profile = try? c.decodeIfPresent(Profile.self, forKey: .profile)
         cardio = try? c.decodeIfPresent(Cardio.self, forKey: .cardio)
         fitness = try? c.decodeIfPresent(Fitness.self, forKey: .fitness)
@@ -389,6 +426,11 @@ extension Summary {
     }
     func workoutsOn(_ day: String) -> [WorkoutSession] {
         workouts.filter { $0.isWorkout >= 0.5 && $0.dayLabel == day }
+    }
+
+    /// The last 14 nightly values up to and including `day`, oldest first.
+    func recentNightly(upTo day: String, _ pick: (NightRow) -> Double?) -> [DatedVital] {
+        Array(nightlySeries(pick).filter { $0.date <= day }.suffix(14))
     }
 
     /// One value per wake-date (longest night wins), oldest first — feeds vital trend charts.
@@ -562,6 +604,14 @@ private func median(_ values: [Double]) -> Double? {
 private func localDay(_ date: Date) -> String {
     let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
     return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+}
+
+/// The hour of the local day (0 to 24) when `day` is today, else nil: where that day's
+/// data ends.
+func hourNow(on day: String, now: Date = Date()) -> Double? {
+    guard day == localDay(now) else { return nil }
+    let c = Calendar.current.dateComponents([.hour, .minute], from: now)
+    return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60
 }
 
 private func nextDay(after day: String) -> String? {

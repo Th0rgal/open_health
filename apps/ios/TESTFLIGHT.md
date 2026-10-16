@@ -19,7 +19,7 @@ Current upload version is configured as **0.1.1 (41)** in
 
 # 2. rebuild the activity model's mobile export (requires Python with torch 2.9)
 #    fixes sparse-day peak detection; .pt/.ptl files are local, gitignored inputs
-python tools/export_mobile.py automatic_activity_detection_3_1_11
+python tools/export_mobile.py <activity model name>
 
 # 3. generate the Xcode project from project.yml
 cd apps/ios/OuraApp && xcodegen generate

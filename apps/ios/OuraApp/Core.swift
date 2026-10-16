@@ -61,6 +61,7 @@ enum Core {
         // sub-hour zones like IST +5:30).
         let secs = TimeZone.current.secondsFromGMT()
         let tzOffset = Int64((Double(secs) / 3600).rounded())
+        _ = ModelFiles.stepCounter   // installs the step counter's weights when the build has them
         let json = summaryJson(dbPath: path, tzOffset: tzOffset)
         guard let data = json.data(using: .utf8) else { return Summary(error: "decode failed") }
         do { return try JSONDecoder().decode(Summary.self, from: data) }
@@ -81,7 +82,7 @@ enum Core {
                 $0.start_ds == night.start_ds && $0.end_ds == night.end_ds
                     && $0.ymd == night.ymd && $0.start == night.start && $0.end == night.end
                     && $0.start_unix == night.start_unix && $0.end_unix == night.end_unix
-            }), old.staging_source == "sleepnet", let stages = old.hypnogram, !stages.isEmpty {
+            }), old.staging_source == SleepStaging.source, let stages = old.hypnogram, !stages.isEmpty {
                 saved[night.stagingKey] = stages
             }
         }
@@ -169,7 +170,13 @@ enum Core {
     /// also serializes `forward()`). Concurrent inference raced the interpreter and
     /// peaked RAM on hiking-heavy histories. Each reports a per-model error for
     /// genuine failures; those surface in `modelErrors`.
-    static func withModels(_ base: Summary, previous: Summary?,
+    ///
+    /// With `pending`, the symptom radar (the slowest model) is left out when it is not cached
+    /// and `pending.illness` is set; the caller publishes this summary first and then calls
+    /// `withIllness`.
+    final class Pending { var illness = false }
+
+    static func withModels(_ base: Summary, previous: Summary?, pending: Pending? = nil,
                            progress: @escaping @Sendable (String) -> Void = { _ in }) -> Summary {
         var s = base
         let profile = base.profile
@@ -201,7 +208,9 @@ enum Core {
         var staged = SleepStaging.cachedStages(nights: base.nights)
         staged.merge(sleepPlan.saved) { _, fresh in fresh }
         var sleepPending = sleepPlan.pending
-        for night in base.nights.prefix(7) {
+        // The built-in stager takes about a second a night, so it covers every night (the readiness
+        // baselines read the whole history). The official one stages the latest night here.
+        for night in (SleepStaging.coversEveryNight ? base.nights[...] : base.nights[0..<0]) {
             guard night.start_ds != nil, night.end_ds != nil, night.hasSignals,
                   staged[night.stagingKey] == nil,
                   !sleepPending.contains(where: { $0.stagingKey == night.stagingKey }) else { continue }
@@ -250,10 +259,20 @@ enum Core {
                 workouts = rAct.sessions; actErr = rAct.error
                 stageFinished("activity")
                 if AnalysisRun.cancelled { return previous ?? base }
-                progress("Analyzing symptom radar")
-                let rIll = IllnessModel.run(profile: profile, events: events, clock: clock, knownDigest: storeDigest)
-                illness = rIll.result; illErr = rIll.error
-                stageFinished("illness")
+                if let pending {
+                    if let cached = IllnessModel.cachedRun(profile: profile, storeDigest: storeDigest) {
+                        illness = cached.result; illErr = cached.error
+                    } else {
+                        illness = previous?.illness
+                        pending.illness = true
+                    }
+                    stageFinished("illness deferred")
+                } else {
+                    progress("Analyzing symptom radar")
+                    let rIll = IllnessModel.run(profile: profile, events: events, clock: clock, knownDigest: storeDigest)
+                    illness = rIll.result; illErr = rIll.error
+                    stageFinished("illness")
+                }
             } else if let readErr {
                 // The shared read failed: every event-fed model is unavailable this
                 // pass. Surface one error; the publish below falls back to `previous`.
@@ -268,6 +287,18 @@ enum Core {
         cva = rCva.result; cvaErr = rCva.error
         stageFinished("cva")
 
+        // The sleep, readiness and daily scores are computed in Rust from the nights' hypnograms.
+        // Hand it the staged ones (a sidecar beside the database) and rebuild the base summary
+        // when they changed, so the scores describe the hypnograms that are displayed.
+        if writeStagedSidecar(staged, nights: base.nights, meta: SleepStaging.cachedEntries(nights: base.nights)) {
+            let rebuilt = Core.base()
+            if rebuilt.error == nil {
+                var next = rebuilt
+                next.analysis_digest = s.analysis_digest
+                next.analysis_version = s.analysis_version
+                s = next
+            }
+        }
         // fold SleepNet's hypnogram + stage breakdown into each night, keyed by the exact
         // bedtime start and absolute epoch so rebooted counters cannot collide.
         applySleepStages(staged, to: &s)
@@ -288,13 +319,57 @@ enum Core {
         return s
     }
 
+    /// The symptom radar pass deferred by `withModels`: reads the events again and folds the
+    /// result into the already published summary.
+    static func withIllness(_ summary: Summary, progress: @escaping @Sendable (String) -> Void = { _ in }) -> Summary {
+        defer { oura_torch_release() }
+        progress("Analyzing symptom radar")
+        let digest = summary.analysis_digest ?? EventStore.Events(path: DB.readPath()).digest()
+        guard let events = try? EventStore.decodedEvents(dbPath: DB.readPath()), !events.isEmpty, events.error == nil,
+              !AnalysisRun.cancelled else { return summary }
+        let clock = EventStore.RingClock(events: events)
+        if AnalysisRun.cancelled { return summary }
+        let started = ProcessInfo.processInfo.systemUptime
+        let r = IllnessModel.run(profile: summary.profile, events: events, clock: clock, knownDigest: digest)
+        dlog("models", "stage=illness duration=\(String(format: "%.2f", ProcessInfo.processInfo.systemUptime - started))s")
+        var out = summary
+        out.illness = (r.error == nil || r.result != nil) ? r.result : summary.illness
+        if let error = r.error, !out.modelErrors.contains(error) { out.modelErrors.append(error); dlog("models", "failed: \(error)") }
+        return out
+    }
+
+    /// Writes `staged_hypnograms.json` beside the database (see `oura_summary::staged_path`).
+    /// Returns true when the file's content changed.
+    private static func writeStagedSidecar(_ staged: [String: [Int]], nights: [NightRow],
+                                           meta: [String: StagedNightEntry]) -> Bool {
+        let entries: [[String: Any]] = nights.compactMap { night in
+            guard let start = night.start_ds, let captured = night.captured_unix,
+                  let stages = staged[night.stagingKey], !stages.isEmpty else { return nil }
+            // the stager that staged the night decides how the brain treats it (is_oura_staging)
+            let entry = meta[night.stagingKey]
+            var row: [String: Any] = ["start_ds": start, "captured_unix": captured, "stages": stages,
+                                      "source": entry?.source ?? SleepStaging.source]
+            if let t0 = entry?.t0Unix { row["stages_t0_unix"] = t0 }
+            return row
+        }.sorted { ($0["start_ds"] as? Int64 ?? 0) < ($1["start_ds"] as? Int64 ?? 0) }
+        guard !entries.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: entries, options: [.sortedKeys]) else { return false }
+        let dir = URL(fileURLWithPath: DB.readPath()).deletingLastPathComponent()
+        guard dir.path != Bundle.main.bundlePath else { return false }
+        let url = dir.appendingPathComponent("staged_hypnograms.json")
+        if let old = try? Data(contentsOf: url), old == data { return false }
+        do { try data.write(to: url, options: .atomic) } catch { dlog("models", "staged sidecar: \(error)"); return false }
+        dlog("models", "staged sidecar written nights=\(entries.count)")
+        return true
+    }
+
     private static func applySleepStages(_ staged: [String: [Int]], to s: inout Summary) {
         // Source + first-epoch time of each staged night (NSSA, or the signal estimate).
         let meta = SleepStaging.cachedEntries(nights: s.nights)
         for i in s.nights.indices {
             guard s.nights[i].start_ds != nil, var stages = staged[s.nights[i].stagingKey], !stages.isEmpty else { continue }
             let entry = meta[s.nights[i].stagingKey]
-            let source = entry?.source ?? "nssa"
+            let source = entry?.source ?? SleepStaging.source
             // Oura's own hypnograms are used verbatim (oura-summary is_oura_staging);
             // only the signal estimate gets the deep-sleep recovery.
             if !Sleep.isOuraStaging(source) && !stages.contains(1) {
@@ -303,7 +378,7 @@ enum Core {
             s.nights[i].stages = stages
             s.nights[i].stages_full = stages
             s.nights[i].staging_source = source
-            s.nights[i].stages_5min = Sleep.isOuraStaging(source) ? Sleep.aggregate5Min(stages) : nil
+            s.nights[i].stages_5min = Sleep.aggregate5Min(stages)
             s.nights[i].stages_t0_unix = entry?.t0Unix
             s.nights[i].staging_complete = stages.allSatisfy { (1...4).contains($0) }
             s.nights[i].staging_coverage_pct = Double(stages.filter { (1...4).contains($0) }.count) / Double(stages.count) * 100
@@ -315,13 +390,6 @@ enum Core {
             s.nights[i].efficiency = s.nights[i].stagingComplete ? (asleep / total * 100).rounded() : nil
             s.nights[i].autonomic = Sleep.autonomic(night: s.nights[i], stages: s.nights[i].analysisStages)
             s.nights[i].sleep_score = nil // The base score describes a different hypnogram.
-        }
-        // Staging can be partial while model inputs are still arriving. Never replace
-        // a more complete model-free debt window with a transient "0 of 5" result;
-        // prefer staged sleep only when it covers at least as many distinct days.
-        if let stagedDebt = s.stagedSleepDebt(),
-           stagedDebt.valid_days >= (s.sleepDebt?.valid_days ?? 0) {
-            s.sleepDebt = stagedDebt
         }
     }
     #endif

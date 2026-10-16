@@ -603,86 +603,6 @@ enum Sleep {
     }
 }
 
-extension Summary {
-    /// iOS stages sleep on-device after the shared JSON is built. Rebuild the same
-    /// Android-compatible 14-day result after staging, grouping main sleep + naps by
-    /// wake date. The web receives this exact shape directly from `oura-summary`.
-    func stagedSleepDebt() -> SleepDebtSummary? {
-        let defaultNeedS = 8.0 * 3600.0
-        var byDay: [String: Double] = [:]
-        var incompleteDays = Set<String>()
-        for n in nights {
-            guard let day = wakeYmd(n) else { continue }
-            guard n.stagingComplete else { incompleteDays.insert(day); continue }
-            let actual = Double(Sleep.asleepS(n.analysisStages,
-                                              inBedS: n.durationS))
-            if actual > 0 { byDay[day, default: 0] += actual }
-        }
-        byDay = byDay.filter { !incompleteDays.contains($0.key) }
-        guard let anchor = byDay.keys.max() else { return nil }
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(identifier: "UTC")!
-        let fmt = DateFormatter()
-        fmt.calendar = cal; fmt.timeZone = cal.timeZone; fmt.dateFormat = "yyyy-MM-dd"
-        guard let anchorDate = fmt.date(from: anchor) else { return nil }
-
-        func date(_ offset: Int, from base: Date) -> String {
-            fmt.string(from: cal.date(byAdding: .day, value: offset, to: base)!)
-        }
-        // Personalized daily need — the mirror of oura-summary's `sleep_need_s`
-        // (typical sleep over the last 90 days, IQR-filtered, clamped to 7–9 h,
-        // causal so a night never sets its own need). Keep the two in sync.
-        func needS(on day: Date) -> Double {
-            var vals: [Double] = (1...90).compactMap { byDay[date(-$0, from: day)] }.filter { $0 > 0 }
-            guard vals.count >= 14 else { return defaultNeedS }
-            vals.sort()
-            func quantile(_ p: Double) -> Double {
-                let idx = p * Double(vals.count - 1)
-                let lo = Int(idx.rounded(.down)), hi = Int(idx.rounded(.up))
-                return vals[lo] + (vals[hi] - vals[lo]) * (idx - Double(lo))
-            }
-            let q1 = quantile(0.25), q3 = quantile(0.75), fence = 1.5 * (q3 - q1)
-            let kept = vals.filter { $0 >= q1 - fence && $0 <= q3 + fence }
-            let mean = kept.reduce(0, +) / Double(kept.count)
-            return (min(max(mean, 7 * 3600), 9 * 3600) / 900).rounded() * 900
-        }
-        func score(ending end: Date) -> (debt: Double, recent: Double, valid: Bool, count: Int) {
-            let actual = (0..<14).map { byDay[date(-$0, from: end)] ?? 0 }
-            let needs = (0..<14).map { needS(on: cal.date(byAdding: .day, value: -$0, to: end)!) }
-            let count = actual.filter { $0 > 0 }.count
-            guard actual[0] > 0 else { return (0, 0, false, count) }
-            let decay = 0.75 / 13.0
-            var debt = 0.0
-            for i in actual.indices where actual[i] > 0 {
-                debt += (1.0 - decay * Double(i)) * (needs[i] - actual[i])
-            }
-            debt = min(max(debt, 0), 36_000)
-            debt = (debt / 2700).rounded() * 2700
-            return (debt, needs[0] - actual[0], count >= 5, count)
-        }
-        let days: [SleepDebtDay] = (-13...0).map { offset in
-            let d = cal.date(byAdding: .day, value: offset, to: anchorDate)!
-            let key = fmt.string(from: d), total = byDay[key]
-            let need = needS(on: d)
-            let result = score(ending: d)
-            return SleepDebtDay(date: key, total_sleep_min: total.map { ($0 / 60).rounded() },
-                                sleep_need_min: (need / 60).rounded(),
-                                shortfall_min: total.map { ((need - $0) / 60).rounded() },
-                                cumulative_debt_min: result.valid ? (result.debt / 60).rounded() : nil,
-                                valid_days: result.count)
-        }
-        let current = score(ending: anchorDate)
-        let minutes = current.valid ? (current.debt / 60).rounded() : 0
-        let state = minutes >= 540 ? "high" : minutes >= 360 ? "moderate" : minutes >= 180 ? "low" : "none"
-        return SleepDebtSummary(debt_min: minutes,
-                                recent_shortfall_min: current.valid ? (current.recent / 60).rounded() : 0,
-                                valid: current.valid,
-                                need_h: (needS(on: anchorDate) / 36).rounded() / 100,
-                                valid_days: current.count,
-                                window_days: 14, state: state, days: days)
-    }
-}
-
 // ── research-grade primitives ────────────────────────────────────────────────
 // A section rule: a hairline with a small all-caps mono label riding it.
 struct Rule: View {
@@ -690,7 +610,7 @@ struct Rule: View {
     init(_ text: String) { self.text = text }
     var body: some View {
         HStack(spacing: 10) {
-            Text(text.uppercased()).font(Obs.mono(10, .medium)).tracking(2).foregroundStyle(Obs.ink2)
+            Text(text).font(Obs.sans(11, .medium)).foregroundStyle(Obs.ink2)
             Rectangle().fill(Obs.trace.opacity(0.5)).frame(height: 0.5)
         }
     }
@@ -703,8 +623,8 @@ struct Readout: View {
     var accent: Color = Obs.ink
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(value).font(Obs.mono(20, .medium)).foregroundStyle(accent).monospacedDigit()
-            Text(caption.uppercased()).font(Obs.mono(9)).tracking(1.2).foregroundStyle(Obs.ink2)
+            Text(value).font(Obs.sans(20, .medium)).foregroundStyle(accent).monospacedDigit()
+            Text(caption).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -736,7 +656,7 @@ struct Polysomnograph: View {
             let t0 = night.stages_t0_unix ?? Double(s0)
             let span = Double(e0 - s0)
             let a = (t0 - Double(s0)) / span, b = (t0 + Double(st5.count) * 300 - Double(s0)) / span
-            out.append(Lane(label: "Hypnogram · 5 min (Oura app)", unit: "", signal: nil, stages: st5, stageSpan: [a, b]))
+            out.append(Lane(label: night.staging_source == "nssa" ? "Hypnogram · 5 min (Oura app)" : "Hypnogram · 5 min", unit: "", signal: nil, stages: st5, stageSpan: [a, b]))
         }
         if let st = night.hypnogram, st.count > 1 { out.append(Lane(label: "Hypnogram", unit: "", signal: nil, stages: night.analysisStages)) }
         func sig(_ label: String, _ unit: String, _ v: [Double]?, _ color: Color,
@@ -794,7 +714,7 @@ struct Polysomnograph: View {
                     Rectangle().fill(Obs.ink.opacity(0.85)).frame(width: 1, height: totalH - axisH)
                         .offset(x: gutterW + CGFloat(f) * plotW)
                         .allowsHitTesting(false)
-                    Text(clockAt(win, f)).font(Obs.mono(10, .medium)).foregroundStyle(Obs.paper)
+                    Text(clockAt(win, f)).font(Obs.sans(11, .medium)).foregroundStyle(Obs.paper)
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(Obs.ink, in: RoundedRectangle(cornerRadius: 4))
                         .offset(x: gutterW + CGFloat(f) * plotW - 18, y: -2)
@@ -802,9 +722,8 @@ struct Polysomnograph: View {
                 }
             }
             .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { g in cursorF = Double(max(0, min(1, (g.location.x - gutterW) / plotW))) }
-                .onEnded { _ in cursorF = nil })
+            .overlay(HorizontalScrub(onChange: { x in cursorF = Double(max(0, min(1, (x - gutterW) / plotW))) },
+                                     onEnd: { cursorF = nil }))
         }
         .frame(height: totalH)
     }
@@ -813,8 +732,8 @@ struct Polysomnograph: View {
         let h = lane.stages != nil ? hypH : laneH
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(lane.label).font(Obs.mono(10)).foregroundStyle(Obs.ink2)
-                Text(gutterValue(lane)).font(Obs.mono(12, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
+                Text(lane.label).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
+                Text(gutterValue(lane)).font(Obs.sans(12, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
             }
             .frame(width: gutterW, alignment: .leading)
             Group {
@@ -865,7 +784,7 @@ struct Polysomnograph: View {
             GeometryReader { g in
                 ForEach(hourTicks(win), id: \.self) { t in
                     Text(String(format: "%02d", (t % 1440) / 60))
-                        .font(Obs.mono(9)).foregroundStyle(Obs.ink2)
+                        .font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                         .position(x: CGFloat(Double(t - win.a) / Double(win.span)) * g.size.width, y: 8)
                 }
             }.frame(width: plotW, height: axisH)
@@ -1027,47 +946,6 @@ private func debtDuration(_ minutes: Double) -> String {
     return m >= 60 ? "\(m / 60)h \(m % 60)m" : "\(m)m"
 }
 
-private func debtStateCopy(_ state: String) -> String {
-    switch state {
-    case "high": return "Your sleep debt is high right now. Prioritize several consistent nights with enough sleep."
-    case "moderate": return "You’ve built up a moderate amount of sleep debt. A few longer nights can help you recover."
-    case "low": return "You’re mostly meeting your sleep need, with a small amount left to recover."
-    default: return "You’ve met your sleep need consistently over the past two weeks."
-    }
-}
-
-struct SleepDebtCard: View {
-    let debt: SleepDebtSummary
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    ObsTag("sleep debt", icon: "moon.zzz.fill")
-                    Spacer()
-                    Text("past \(debt.window_days) days").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
-                    Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
-                }
-                if debt.valid {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(debtDuration(debt.debt_min)).font(Obs.mono(26, .medium)).foregroundStyle(Obs.debt(debt.state))
-                        Text(debt.state).font(Obs.mono(11, .medium)).foregroundStyle(Obs.debt(debt.state)).textCase(.uppercase)
-                    }
-                    Text(debtStateCopy(debt.state)).font(Obs.prose(14)).foregroundStyle(Obs.ink2)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text("\(debt.valid_days) of 5 nights").font(Obs.mono(14, .medium)).foregroundStyle(Obs.ink2)
-                    Text("Needs 5 nights of sleep in the past 2 weeks.")
-                        .font(Obs.mono(11)).foregroundStyle(Obs.muted)
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// A readable summary first; personal ranges are available on demand.
 /// The literature-based sleep score, with its components opened up.
 ///
 /// The number matters less than the breakdown: every component names the paper its
@@ -1089,18 +967,18 @@ struct SleepScoreCard: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("\(Int(score.score))")
-                    .font(Obs.mono(38, .medium)).foregroundStyle(tint).monospacedDigit()
+                    .font(Obs.sans(38, .medium)).foregroundStyle(tint).monospacedDigit()
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("/ 100").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                    Text("/ 100").font(Obs.sans(12)).foregroundStyle(Obs.ink2)
                     Text(score.basis ?? "published norms")
-                        .font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                        .font(Obs.sans(11)).foregroundStyle(Obs.muted)
                 }
                 Spacer()
                 if let breathRate {
                     VStack(alignment: .trailing, spacing: 2) {
                         Text(String(format: "%.1f", breathRate))
-                            .font(Obs.mono(15, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
-                        Text("br/min").font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                            .font(Obs.sans(15, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
+                        Text("br/min").font(Obs.sans(11)).foregroundStyle(Obs.muted)
                     }
                 }
             }
@@ -1108,10 +986,10 @@ struct SleepScoreCard: View {
             ForEach(score.components) { component in
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
-                        Text(component.label).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                        Text(component.label).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                         Spacer()
                         Text("\(Int(component.score))")
-                            .font(Obs.mono(11, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
+                            .font(Obs.sans(11, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
                     }
                     // bar width is the component score; opacity is how much it counted
                     GeometryReader { geo in
@@ -1124,14 +1002,14 @@ struct SleepScoreCard: View {
                     }
                     .frame(height: 3)
                     if expanded, let source = component.source {
-                        Text(source).font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                        Text(source).font(Obs.sans(11)).foregroundStyle(Obs.muted)
                     }
                 }
             }
 
             Button { expanded.toggle() } label: {
                 Text(expanded ? "hide sources" : "show sources")
-                    .font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                    .font(Obs.sans(11)).foregroundStyle(Obs.ink2)
             }
             .buttonStyle(.plain)
         }
@@ -1139,243 +1017,10 @@ struct SleepScoreCard: View {
     }
 }
 
-struct IllnessCard: View {
-    let illness: IllnessResult
-    @State private var showDetails = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private static let names = [
-        "AverageBreath": "Breathing rate", "LowestHeartRate": "Lowest heart rate",
-        "AverageHrv": "Heart rate variability", "TemperatureDeviation": "Temperature change",
-    ]
-    private static let units = [
-        "AverageBreath": "br/min", "LowestHeartRate": "bpm", "AverageHrv": "ms", "TemperatureDeviation": "°C",
-    ]
-    private static let order = ["AverageBreath", "LowestHeartRate", "AverageHrv", "TemperatureDeviation"]
-    private var tint: Color {
-        switch illness.trafficLight {
-        case "NO_SIGNS": return Obs.good
-        case "MINOR_SIGNS": return Obs.bad
-        case "MAJOR_SIGNS": return Obs.alert
-        default: return Obs.muted
-        }
-    }
-    private var status: String {
-        switch illness.trafficLight {
-        case "NO_SIGNS": return "No signs"
-        case "MINOR_SIGNS": return "Minor signs"
-        case "MAJOR_SIGNS": return "Major signs"
-        default: return "No result yet"
-        }
-    }
-    private var explanation: String {
-        switch illness.status {
-        case "NO_SIGNS":
-            // The decision comes from the model's overall score, not a count of flags:
-            // a night can have biometrics out of range and still not add up to strain.
-            let flagged = illness.biomarkers.filter(\.indicatesSymptoms).count
-            return flagged == 0
-                ? "Your overnight biometrics are within their usual ranges."
-                : "\(flagged == 1 ? "One overnight biometric is" : "\(flagged) overnight biometrics are") outside your usual range, but together they don’t match the pattern of your body fighting something."
-        case "MINOR_SIGNS": return "Some overnight biometrics are outside your usual ranges."
-        case "MAJOR_SIGNS": return "Several overnight biometrics are outside your usual ranges."
-        case "MISSING_LAST_NIGHT_SLEEP": return "Wear your ring overnight, then sync to see your latest result."
-        default: return "Your radar needs at least 7 nights of data from the last 14 days."
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline) {
-                ObsTag("symptom radar", icon: "waveform.path.ecg")
-                Spacer(minLength: 12)
-                Text(illness.date).font(Obs.mono(10)).foregroundStyle(Obs.ink2)
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                Label(illness.available ? status : "Getting to know you",
-                      systemImage: illness.available ? (illness.trafficLight == "NO_SIGNS" ? "checkmark.circle" : "waveform.path.ecg") : "moon")
-                    .font(Obs.mono(18, .medium))
-                    .foregroundStyle(illness.available ? tint : Obs.ink2)
-                Text(explanation).font(Obs.prose(14)).foregroundStyle(Obs.ink2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if illness.available {
-                Button {
-                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
-                        showDetails.toggle()
-                    }
-                } label: {
-                    HStack {
-                        Text(showDetails ? "Hide details" : "View details")
-                        Spacer()
-                        Image(systemName: showDetails ? "chevron.up" : "chevron.down")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .font(Obs.mono(12, .medium))
-                    .foregroundStyle(Obs.ink)
-                    .frame(minHeight: 32)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityValue(showDetails ? "Expanded" : "Collapsed")
-                .accessibilityHint("Shows overnight measurements and personal ranges")
-            }
-            if illness.available && showDetails {
-                Rectangle().fill(Obs.rule).frame(height: 1)
-                Text("Overnight measurements")
-                    .font(.subheadline.weight(.medium)).foregroundStyle(Obs.ink)
-                VStack(alignment: .leading, spacing: 18) {
-                    ForEach(Self.order, id: \.self) { type in
-                        if let biomarker = illness.biomarkers.first(where: { $0.type == type }) {
-                            BiomarkerRow(name: Self.names[type] ?? type,
-                                         unit: Self.units[type] ?? "", biomarker: biomarker)
-                        }
-                    }
-                }
-                if illness.biomarkers.isEmpty {
-                    Text("Measurement details aren’t available for this result.")
-                        .font(.subheadline).foregroundStyle(Obs.muted)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Based on \(illness.daysWithData) nights in the past 30 days")
-                        .font(.caption).foregroundStyle(Obs.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct BiomarkerRow: View {
-    let name: String
-    let unit: String
-    let biomarker: IllnessBiomarker
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    private var change: String {
-        switch biomarker.reason {
-        case "ELEVATED": return "Above usual"
-        case "DECREASED": return "Below usual"
-        default: return "Outside usual range"
-        }
-    }
-    private func formatted(_ value: Double) -> String {
-        guard value.isFinite else { return "–" }
-        return unit == "°C"
-            ? value.formatted(.number.precision(.fractionLength(1)))
-            : value.formatted(.number.precision(.fractionLength(0...1)))
-    }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            let layout = dynamicTypeSize.isAccessibilitySize
-                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
-                : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 12))
-            layout {
-                Text(name).font(.subheadline).foregroundStyle(Obs.ink2)
-                    .fixedSize(horizontal: false, vertical: true)
-                if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 0) }
-                Text("\(formatted(biomarker.value)) \(unit)")
-                    .font(.subheadline.weight(.medium)).monospacedDigit()
-                    .foregroundStyle(biomarker.indicatesSymptoms ? Obs.alert : Obs.ink)
-                    .fixedSize()
-            }
-            if biomarker.indicatesSymptoms {
-                Text(change).font(.caption).foregroundStyle(Obs.alert)
-            }
-            if biomarker.lower.isFinite && biomarker.upper.isFinite && biomarker.lower <= biomarker.upper {
-                Text("Personal range: \(formatted(biomarker.lower)) to \(formatted(biomarker.upper)) \(unit)")
-                    .font(.caption).foregroundStyle(Obs.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("Personal range unavailable").font(.caption).foregroundStyle(Obs.muted)
-            }
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private enum DebtGraph: String, CaseIterable { case debt = "Cumulative debt", sleep = "Total sleep" }
-
-private struct SleepDebtChart: View {
-    let debt: SleepDebtSummary
-    let mode: DebtGraph
-    var body: some View {
-        VStack(spacing: 8) {
-            Canvas { context, size in
-                let values: [Double?] = debt.days.map {
-                    mode == .debt ? $0.cumulative_debt_min : $0.total_sleep_min
-                }
-                let maxValue = mode == .debt ? 600.0 : max(720, values.compactMap { $0 }.max() ?? 0)
-                let x = { (i: Int) in CGFloat(i) / CGFloat(max(1, values.count - 1)) * size.width }
-                let y = { (v: Double) in size.height - CGFloat(min(max(v / maxValue, 0), 1)) * size.height }
-                for fraction in [0.25, 0.5, 0.75] {
-                    var grid = Path(); let yy = size.height * CGFloat(1 - fraction)
-                    grid.move(to: CGPoint(x: 0, y: yy)); grid.addLine(to: CGPoint(x: size.width, y: yy))
-                    context.stroke(grid, with: .color(Obs.trace.opacity(0.35)), lineWidth: 0.5)
-                }
-                if mode == .sleep {
-                    var need = Path(); let yy = y(debt.need_h * 60)
-                    need.move(to: CGPoint(x: 0, y: yy)); need.addLine(to: CGPoint(x: size.width, y: yy))
-                    context.stroke(need, with: .color(Obs.ink.opacity(0.45)), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                }
-                var line = Path(), started = false
-                for (i, value) in values.enumerated() {
-                    guard let value else { started = false; continue }
-                    let point = CGPoint(x: x(i), y: y(value))
-                    if started { line.addLine(to: point) } else { line.move(to: point); started = true }
-                }
-                context.stroke(line, with: .color(Obs.chart), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-            }
-            .frame(height: 180)
-            HStack {
-                Text(debt.days.first.map { String($0.date.suffix(5)) } ?? "").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
-                Spacer()
-                if mode == .sleep {
-                    HStack(spacing: 5) { Rectangle().fill(Obs.ink.opacity(0.45)).frame(width: 16, height: 1); Text("sleep need").font(Obs.mono(10)).foregroundStyle(Obs.ink2) }
-                }
-                Spacer()
-                Text(debt.days.last.map { String($0.date.suffix(5)) } ?? "").font(Obs.mono(10)).foregroundStyle(Obs.ink2)
-            }
-        }
-    }
-}
-
-struct SleepDebtDetail: View {
-    let debt: SleepDebtSummary
-    @Environment(\.dismiss) private var dismiss
-    @State private var graph = DebtGraph.debt
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                Obs.canvas.ignoresSafeArea()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        if debt.valid {
-                            Text(debtDuration(debt.debt_min)).font(Obs.mono(34, .medium)).foregroundStyle(Obs.debt(debt.state))
-                            Text(debtStateCopy(debt.state)).font(Obs.prose(16)).foregroundStyle(Obs.ink2)
-                        } else {
-                            Text("Not enough data yet").font(Obs.prose(22, .semibold)).foregroundStyle(Obs.ink)
-                            Text("\(debt.valid_days) of 5 sleep days available within the past 2 weeks.")
-                                .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-                        }
-                        Picker("Graph", selection: $graph) {
-                            ForEach(DebtGraph.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                        }.pickerStyle(.segmented)
-                        SleepDebtChart(debt: debt, mode: graph)
-                        Rule("how it works")
-                        Text("Sleep debt estimates missed sleep over the past 14 days. Total sleep combines main sleep and naps, recent days carry more weight, and your sleep need (\(debtDuration(debt.need_h * 60))) is personalized from your typical sleep over the past 3 months, ignoring unusually short or long days.")
-                            .font(Obs.prose(14)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
-                    }.padding(24)
-                }
-            }
-            .navigationTitle("sleep debt").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-        }
-    }
-}
 
 // ── the full-page report (sleep ⇄ activity) ──────────────────────────────────
+extension Notification.Name { static let summaryNeedsReload = Notification.Name("summaryNeedsReload") }
+
 struct DayAnalysisContext {
     var summary: Summary?
     var isBusy: Bool
@@ -1419,7 +1064,7 @@ struct DayReportView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Back")
-                    Text(day).font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
+                    Text(day).font(Obs.sans(13, .medium)).foregroundStyle(Obs.ink)
                         .lineLimit(1).fixedSize()
                     Spacer(minLength: 6)
                     Picker("", selection: $tab) {
@@ -1607,7 +1252,7 @@ struct SleepReport: View {
             if n.hasHypnogram {
                 if !n.stagingComplete && n.hasHypnogram {
                     Text("Incomplete sleep analysis. Gaps mean no data, not awake time; sleep metrics are withheld.")
-                        .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                        .font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                 }
                 Rule("Sleep stages & signals")
                 stageLegend
@@ -1617,8 +1262,8 @@ struct SleepReport: View {
                 StageBar(n: n)
                 HStack(spacing: 16) {
                     ForEach([("Deep", n.deep_pct), ("Light", n.light_pct), ("REM", n.rem_pct), ("Awake", n.wake_pct)], id: \.0) { name, pct in
-                        Text(name).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                            + Text(" \(Int(pct ?? 0))%").font(Obs.mono(11, .medium)).foregroundStyle(Obs.ink)
+                        Text(name).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
+                            + Text(" \(Int(pct ?? 0))%").font(Obs.sans(11, .medium)).foregroundStyle(Obs.ink)
                     }
                 }
                 if let m = metrics { clinicalGrid(m) }
@@ -1639,11 +1284,17 @@ struct SleepReport: View {
                     Polysomnograph(night: n)
                 }
                 Text("Sleep analysis is not available for this night yet.")
-                    .font(Obs.mono(12)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
+                    .font(Obs.sans(12)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
             }
         } else {
-            Text("No sleep recorded for this night.").font(Obs.mono(13)).foregroundStyle(Obs.ink2)
+            Text("No sleep recorded for this night.").font(Obs.sans(13)).foregroundStyle(Obs.ink2)
         }
+    }
+
+    /// Without the torch refresh (model-free builds) the root view just rebuilds the summary.
+    private func reloadSleep() async {
+        if let analysis { _ = await analysis.refresh(DayAnalysisRequest(day: day, kind: .sleep)) }
+        else { NotificationCenter.default.post(name: .summaryNeedsReload, object: nil) }
     }
 
     @ViewBuilder private func bedtimeEditor(_ n: NightRow) -> some View {
@@ -1651,13 +1302,13 @@ struct SleepReport: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 16) {
                 HStack(spacing: 6) {
-                    Text("BEDTIME").font(Obs.mono(9)).tracking(1.1).foregroundStyle(Obs.ink2)
+                    Text("Bedtime").font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                     DatePicker("Bedtime", selection: $bedtimeDate, displayedComponents: .hourAndMinute)
                         .labelsHidden()
                         .disabled(savingBedtime)
                 }
                 HStack(spacing: 6) {
-                    Text("WAKE-UP").font(Obs.mono(9)).tracking(1.1).foregroundStyle(Obs.ink2)
+                    Text("Wake-up").font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                     DatePicker("Wake-up", selection: $wakeupDate, displayedComponents: .hourAndMinute)
                         .labelsHidden()
                         .disabled(savingBedtime)
@@ -1671,13 +1322,13 @@ struct SleepReport: View {
                     savingBedtime = true
                     Task {
                         try? BedtimeOverrideStore.set(startHM: startHM, endHM: endHM, forNightKey: nightKey, night: n)
-                        _ = await analysis?.refresh(DayAnalysisRequest(day: day, kind: .sleep))
+                        await reloadSleep()
                         savingBedtime = false
                         editingBedtime = false
                     }
                 } label: {
                     Text(savingBedtime ? "saving…" : "apply")
-                        .font(Obs.mono(11, .medium))
+                        .font(Obs.sans(11, .medium))
                         .foregroundStyle(Obs.paper)
                         .padding(.horizontal, 12).padding(.vertical, 5)
                         .background(Obs.ink, in: RoundedRectangle(cornerRadius: 4))
@@ -1690,13 +1341,13 @@ struct SleepReport: View {
                         savingBedtime = true
                         Task {
                             try? BedtimeOverrideStore.clear(forNightKey: nightKey, night: n)
-                            _ = await analysis?.refresh(DayAnalysisRequest(day: day, kind: .sleep))
+                            await reloadSleep()
                             savingBedtime = false
                             editingBedtime = false
                         }
                     } label: {
                         Text("reset\(n.raw_start.map { " (\($0)–\(n.raw_end ?? ""))" } ?? "")")
-                            .font(Obs.mono(11))
+                            .font(Obs.sans(11))
                             .foregroundStyle(Obs.ink2)
                             .padding(.horizontal, 10).padding(.vertical, 5)
                             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Obs.trace.opacity(0.6), lineWidth: 0.8))
@@ -1708,7 +1359,7 @@ struct SleepReport: View {
                 Button {
                     editingBedtime = false
                 } label: {
-                    Text("cancel").font(Obs.mono(11)).foregroundStyle(Obs.muted)
+                    Text("cancel").font(Obs.sans(11)).foregroundStyle(Obs.muted)
                 }
                 .buttonStyle(.plain)
                 .disabled(savingBedtime)
@@ -1724,7 +1375,7 @@ struct SleepReport: View {
             ForEach([(1, "Deep"), (2, "Light"), (3, "REM"), (4, "Awake")], id: \.0) { code, name in
                 HStack(spacing: 5) {
                     RoundedRectangle(cornerRadius: 2).fill(Obs.stage(code)).frame(width: 9, height: 9)
-                    Text(name).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                    Text(name).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                 }
             }
         }
@@ -1793,12 +1444,12 @@ struct SleepReport: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label).font(Obs.prose(14)).foregroundStyle(Obs.ink2)
                 if let detail {
-                    Text(detail).font(Obs.mono(11)).foregroundStyle(Obs.muted)
+                    Text(detail).font(Obs.sans(11)).foregroundStyle(Obs.muted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: 12)
-            Text(value).font(Obs.mono(15, .medium)).foregroundStyle(tint).monospacedDigit()
+            Text(value).font(Obs.sans(15, .medium)).foregroundStyle(tint).monospacedDigit()
         }
         .padding(.vertical, 9)
         .overlay(alignment: .bottom) { Rectangle().fill(Obs.trace.opacity(0.5)).frame(height: 0.5) }
@@ -1845,7 +1496,7 @@ struct ActivityReport: View {
         }
 
         Rule("movement across the day")
-        MetProfile(timeline: s.wakingActivityTimeline(for: day))
+        MetProfile(timeline: s.wakingActivityTimeline(for: day), nowHour: hourNow(on: day))
 
         let bucketMin = prof.isEmpty ? 15.0 : 24.0 * 60.0 / Double(prof.count)
         let activeMin = Double(prof.filter { $0 >= 3 }.count) * bucketMin
@@ -1858,10 +1509,21 @@ struct ActivityReport: View {
             Readout(value: String(format: "%.1f MET", peak), caption: "peak intensity")
         }
 
+        if let c = st?.contributors, c.count == 7 {
+            let names = ["Meet daily targets", "Stay active", "Move every hour", "Training frequency", "Training volume", "Recovery time"]
+            let vals = [c[0], c[1], c[2], c[3], c[4], (10 * c[5] + 15 * c[6]) / 25]
+            Rule("activity score \(Int((st?.score ?? 0).rounded()))")
+            LazyVGrid(columns: cols, alignment: .leading, spacing: 18) {
+                ForEach(0..<6, id: \.self) { i in
+                    Readout(value: "\(Int(vals[i].rounded()))", caption: names[i])
+                }
+            }
+        }
+
         let ws = s.workoutsOn(day)
         Rule("sessions")
         if ws.isEmpty {
-            Text("No sessions detected this day.").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+            Text("No sessions detected this day.").font(Obs.sans(12)).foregroundStyle(Obs.ink2)
         } else {
             VStack(spacing: 14) {
                 ForEach(ws) { w in SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM) }
@@ -1880,6 +1542,8 @@ private func compactSteps(_ steps: Double?) -> (value: String, unit: String) {
 // window. The timeline can cross midnight and says when its bedtime is estimated.
 private struct MetProfile: View {
     let timeline: WakingActivityTimeline
+    /// Hour of day to mark with a dashed line (today only), where the data ends.
+    var nowHour: Double? = nil
 
     private var ticks: [Double] {
         var result = [timeline.startHour]
@@ -1899,7 +1563,7 @@ private struct MetProfile: View {
                 Spacer()
                 Text(timeline.endCaption)
             }
-            .font(Obs.mono(9, .medium))
+            .font(Obs.sans(11, .medium))
             .foregroundStyle(Obs.ink2)
 
             Canvas { ctx, size in
@@ -1911,6 +1575,11 @@ private struct MetProfile: View {
                     let x = x(hour)
                     ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) },
                                with: .color(Obs.trace.opacity(0.2)), lineWidth: 0.5)
+                }
+                if let nowHour, (timeline.startHour...timeline.endHour).contains(nowHour) {
+                    let x = x(nowHour)
+                    ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) },
+                               with: .color(Obs.ink2), style: .init(lineWidth: 1, dash: [3, 3]))
                 }
                 guard timeline.points.count > 1 else { return }
                 let peak = max(1, timeline.points.map(\.met).max() ?? 1)
@@ -1933,7 +1602,7 @@ private struct MetProfile: View {
                 ForEach(ticks, id: \.self) { hour in
                     let rawX = g.size.width * CGFloat((hour - timeline.startHour) / span)
                     Text(String(format: "%02d", Int(hour) % 24))
-                        .font(Obs.mono(9)).foregroundStyle(Obs.ink2)
+                        .font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                         .frame(width: 24)
                         .position(x: min(max(12, rawX), g.size.width - 12), y: 6)
                 }

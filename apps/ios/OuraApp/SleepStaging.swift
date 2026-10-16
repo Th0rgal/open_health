@@ -144,12 +144,35 @@ enum NssaInputs {
 #if TORCH
 // sqlite3 comes from the bridging header (TorchBridge.h includes <sqlite3.h>)
 
-// On-device sleep staging with Oura's NSSA model (sleepstaging_2_6_0), exactly as
-// the official app stages each ring bedtime — a twin of tools/run_sleep_model.py.
+/// Sleep staging on the phone. Two stagers produce the same per-30s stage arrays:
+/// - `official`: Oura's NSSA model (sleepstaging_2_6_0) and its extracted classifier, exactly as
+///   the official app stages each ring bedtime (a twin of tools/run_sleep_model.py). Needs the
+///   model files in the bundle.
+/// - `xgb`: open_oura's Rust port of the stager with a compiled-in tree ensemble. Always available.
+/// The shared brain (oura-summary `sleep_stager`) resolves which one runs from the profile choice
+/// and the registered files; each stager keeps its own cache file so switching never mixes results.
 enum SleepStaging {
+    enum Kind {
+        static let official = "official"
+        static let xgb = "xgb"
+    }
     static let modelId = "nssa-2.6.0-r1"
+    static let xgbModelId = "stager-2.6.0-rust"
 
     struct Staged { let stages: [Int]; let source: String; let t0Unix: Double? }
+
+    /// The stager in use: "official" or "xgb".
+    static var stager: String {
+        _ = ModelFiles.officialSleepStager   // registers the bundled files with the brain
+        return effectiveSleepStager(dbPath: DB.readPath())
+    }
+
+    /// The xgb stager takes about a second a night, so it covers every night (the readiness
+    /// baselines read the whole history). The official one stages the latest night automatically.
+    static var coversEveryNight: Bool { stager == Kind.xgb }
+
+    /// `StagedNightEntry.source` of a night the active stager staged.
+    static var source: String { stager == Kind.official ? "nssa" : "xgb" }
 
     /// Load already-cached sleep stage arrays keyed by `NightRow.stagingKey`.
     static func cachedStages(nights: [NightRow]) -> [String: [Int]] {
@@ -158,7 +181,7 @@ enum SleepStaging {
 
     static func cachedEntries(nights: [NightRow]) -> [String: StagedNightEntry] {
         let globalKey = ModelCacheStore.globalKey(profile: nil, timezone: false)
-        let cache: [String: StagedNightEntry] = ModelCacheStore.load(ModelCacheStore.stagingFile,
+        let cache: [String: StagedNightEntry] = ModelCacheStore.load(ModelCacheStore.stagingFile(for: stager),
                                                                      globalKey: globalKey)
         var out: [String: StagedNightEntry] = [:]
         for night in nights where night.start_ds != nil {
@@ -173,9 +196,23 @@ enum SleepStaging {
                                 weightKg: p?.weight_kg ?? 75, sex: p?.sex ?? "M")
     }
 
+    /// Stages `nights` with the stager the brain resolved. Returns date-key to stage codes, plus a
+    /// non-nil `error` only for a failure.
     static func run(nights: [NightRow], events: EventStore.Events, clock: EventStore.RingClock,
                     profile: Profile? = nil, force: Bool = false, pruneCache: Bool = true,
                     progress: @escaping @Sendable (String) -> Void = { _ in }) -> (staged: [String: [Int]], error: String?) {
+        if stager == Kind.official {
+            return runOfficial(nights: nights, events: events, clock: clock, profile: profile,
+                               force: force, pruneCache: pruneCache, progress: progress)
+        }
+        return runXgb(nights: nights, events: events, clock: clock, profile: profile,
+                      force: force, pruneCache: pruneCache, progress: progress)
+    }
+
+    /// Stages with Oura's NSSA graph and its extracted classifier, as the official app does.
+    private static func runOfficial(nights: [NightRow], events: EventStore.Events, clock: EventStore.RingClock,
+                                    profile: Profile?, force: Bool, pruneCache: Bool,
+                                    progress: @escaping @Sendable (String) -> Void) -> (staged: [String: [Int]], error: String?) {
         guard let modelPath = Bundle.main.path(forResource: "sleepstaging_2_6_0", ofType: "ptl"),
               let classifierPath = Bundle.main.path(forResource: "sleepstaging_2_6_0_classifier", ofType: "bin")
         else { return ([:], "sleep model file missing from the app bundle") }
@@ -207,8 +244,9 @@ enum SleepStaging {
             return latest.values.sorted { $0.0 < $1.0 }
         }
 
+        let file = ModelCacheStore.stagingFile(for: Kind.official)
         let globalKey = ModelCacheStore.globalKey(profile: nil, timezone: false)
-        var cache: [String: StagedNightEntry] = ModelCacheStore.load(ModelCacheStore.stagingFile, globalKey: globalKey)
+        var cache: [String: StagedNightEntry] = ModelCacheStore.load(file, globalKey: globalKey)
         var result: [String: [Int]] = [:]
         var currentKeys = Set<String>()
         var failures = 0
@@ -258,12 +296,12 @@ enum SleepStaging {
             guard let stages, !stages.isEmpty else { failures += 1; continue }
             result[key] = stages
             cache[key] = StagedNightEntry(fp: fpHex, stages: stages, source: source, t0Unix: t0)
-            ModelCacheStore.save(ModelCacheStore.stagingFile, globalKey: globalKey, entries: cache)
+            ModelCacheStore.save(file, globalKey: globalKey, entries: cache)
         }
         guard events.error == nil, !AnalysisRun.cancelled else { return ([:], "analysis interrupted") }
         if pruneCache {
             let pruned = cache.filter { currentKeys.contains($0.key) }
-            if pruned.count != cache.count { ModelCacheStore.save(ModelCacheStore.stagingFile, globalKey: globalKey, entries: pruned) }
+            if pruned.count != cache.count { ModelCacheStore.save(file, globalKey: globalKey, entries: pruned) }
         }
         if result.isEmpty && failures > 0 { return (result, "sleep inference failed") }
         return (result, nil)
@@ -287,5 +325,101 @@ enum SleepStaging {
         guard n > 0 else { return nil }
         return (Array(ts.prefix(Int(n))), out.prefix(Int(n)).map(Int.init))
     }
+
+    private static func runXgb(nights: [NightRow], events: EventStore.Events, clock: EventStore.RingClock,
+                               profile: Profile?, force: Bool, pruneCache: Bool,
+                               progress: @escaping @Sendable (String) -> Void) -> (staged: [String: [Int]], error: String?) {
+        guard !events.isEmpty else { return ([:], nil) }
+        let beds = nights.compactMap { night -> (night: NightRow, start: Int64, end: Int64, cu: Int64, key: String)? in
+            guard let start = night.start_ds, let end = night.end_ds else { return nil }
+            let captured = night.captured_unix ?? events.restricted("tag IN (118,78)").first { event in
+                (event.tag == 0x76 && (event.json["bedtime_start_ds"] as? NSNumber)?.int64Value == start)
+                    || (event.tag == 0x4e && (event.json["bedtime_start"] as? NSNumber)?.int64Value == start)
+            }?.cu
+            return (night, start, end, captured ?? events.last?.cu ?? 0, night.stagingKey)
+        }
+        guard !beds.isEmpty else { return ([:], nil) }
+        progress("Reading sleep signals")
+        let records = stagerInputsBatch(
+            dbPath: DB.readPath(),
+            windows: beds.map { StagerWindow(startDs: $0.start, endDs: $0.end, capturedUnix: $0.cu) },
+            // placeholder defaults, replaced by the profile
+            age: profile?.age ?? 30, heightM: profile?.height_m ?? 1.78,
+            weightKg: profile?.weight_kg ?? 75, sex: profile?.sex ?? "M")
+        guard records.count == beds.count else { return ([:], "sleep inputs could not be read") }
+
+        func fingerprint(_ r: StagerInputsRecord) -> String {
+            var h = FNV64()
+            h.combine(xgbModelId)
+            h.combine(r.startMs); h.combine(r.endMs)
+            h.combine(r.beatTs); h.combine(r.beats)
+            h.combine(r.acmTs); h.combine(r.acm)
+            h.combine(r.tempTs); h.combine(r.temp)
+            h.combine(r.scalars)
+            return h.hex
+        }
+        let file = ModelCacheStore.stagingFile(for: Kind.xgb)
+        let globalKey = ModelCacheStore.globalKey(profile: nil, timezone: false)
+        var cache: [String: StagedNightEntry] = ModelCacheStore.load(file, globalKey: globalKey)
+        var result: [String: [Int]] = [:]
+        var currentKeys = Set<String>()
+        var pending: [(night: NightRow, key: String, fp: String, record: StagerInputsRecord?)] = []
+        for (bed, record) in zip(beds, records) {
+            guard !AnalysisRun.cancelled else { return ([:], "analysis paused") }
+            currentKeys.insert(bed.key)
+            if record.error == nil {
+                let fp = fingerprint(record)
+                if !force, let entry = cache[bed.key], entry.fp == fp, !entry.stages.isEmpty {
+                    result[bed.key] = entry.stages
+                } else {
+                    pending.append((bed.night, bed.key, fp, record))
+                }
+            } else if bed.night.hasSignals {
+                let fp = "signals:\(bed.start):\(bed.end):\(bed.cu)"
+                if !force, let entry = cache[bed.key], entry.fp == fp, !entry.stages.isEmpty {
+                    result[bed.key] = entry.stages
+                } else {
+                    pending.append((bed.night, bed.key, fp, nil))
+                }
+                dlog("models", "stager skipped night=\(bed.key): \(record.error ?? "")")
+            }
+        }
+        var failures = 0, recomputed = 0
+        for (index, item) in pending.enumerated() {
+            progress(pending.count > 1 ? "Analyzing sleep \(index + 1)/\(pending.count)" : "Analyzing sleep")
+            guard !AnalysisRun.cancelled else { return ([:], "analysis paused") }
+            var source = "xgb"
+            let stages: [Int]? = {
+                if let record = item.record, let s = stageWithStager(record), !s.isEmpty { return s }
+                source = "signals"
+                return Sleep.estimateStages(night: item.night)
+            }()
+            guard let stages, !stages.isEmpty else { failures += 1; continue }
+            result[item.key] = stages
+            cache[item.key] = StagedNightEntry(fp: item.fp, stages: stages, source: source)
+            ModelCacheStore.save(file, globalKey: globalKey, entries: cache)
+            recomputed += 1
+        }
+        guard events.error == nil, !AnalysisRun.cancelled else { return ([:], "analysis interrupted") }
+        dlog("models", "sleep(stager) recomputed=\(recomputed) total=\(currentKeys.count) failures=\(failures)")
+        let pruned = cache.filter { currentKeys.contains($0.key) }
+        if pruneCache && pruned.count != cache.count {
+            ModelCacheStore.save(file, globalKey: globalKey, entries: pruned)
+        }
+        if result.isEmpty && failures > 0 && !pending.isEmpty { return (result, "sleep inference failed") }
+        return (result, nil)
+    }
+
+    /// One stager inference. Epoch k of the output starts at floor_30s(bedtime
+    /// start) + 30 s k, so the stage array needs no re-alignment.
+    private static func stageWithStager(_ r: StagerInputsRecord) -> [Int]? {
+        let out = stageNightRust(record: r).map(Int.init)
+        guard !out.isEmpty, out.allSatisfy({ (1...4).contains($0) }) else {
+            dlog("models", "stager failed: rust port returned \(out.count) epochs")
+            return nil
+        }
+        return out
+    }
+
 }
 #endif

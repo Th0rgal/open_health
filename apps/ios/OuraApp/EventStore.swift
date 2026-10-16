@@ -46,6 +46,24 @@ enum EventStore {
         }
         var isEmpty: Bool { makeIterator().next() == nil }
 
+        /// `events_with_anchors` (ring events plus the phone anchors, which live in
+        /// `phone_anchors`) once the store has it; `events` for databases never opened
+        /// by a current build, such as read-only seeds.
+        static func relation(_ db: OpaquePointer?) -> String {
+            var statement: OpaquePointer?
+            defer { sqlite3_finalize(statement) }
+            let sql = "SELECT 1 FROM sqlite_master WHERE type='view' AND name='events_with_anchors'"
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK,
+                  sqlite3_step(statement) == SQLITE_ROW else { return "events" }
+            return "events_with_anchors"
+        }
+        static func relation(path: String) -> String {
+            var db: OpaquePointer?
+            defer { sqlite3_close(db) }
+            guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return "events" }
+            return relation(db)
+        }
+
         /// Cheap identity of the store's contents for cache early-exits: row count and
         /// last id of decoded events, plus the same for clock anchors and `ring_start`
         /// reboots (a new anchor or newly decoded reboot can re-date old rows, so it
@@ -56,14 +74,14 @@ enum EventStore {
             defer { sqlite3_close(db) }
             sqlite3_busy_timeout(db, 5000)
             var statement: OpaquePointer?
-            let sql = "SELECT COUNT(*), IFNULL(MAX(id),0), SUM(tag IN (66,133)), IFNULL(MAX(CASE WHEN tag IN (66,133) THEN id END),0), SUM(tag = 65), IFNULL(MAX(CASE WHEN tag = 65 THEN id END),0) FROM events WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14)"
+            let sql = "SELECT COUNT(*), IFNULL(MAX(id),0), SUM(tag IN (66,133)), IFNULL(MAX(CASE WHEN tag IN (66,133) THEN id END),0), SUM(tag = 65), IFNULL(MAX(CASE WHEN tag = 65 THEN id END),0) FROM \(Events.relation(db)) WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14)"
             guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
             defer { sqlite3_finalize(statement) }
             guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
             return (0..<6).map { String(sqlite3_column_int64(statement, Int32($0))) }.joined(separator: ":")
         }
         var last: Ev? {
-            restricted("id=(SELECT id FROM events WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14) ORDER BY captured_unix DESC,id DESC LIMIT 1)").makeIterator().next()
+            restricted("id=(SELECT id FROM \(Events.relation(path: path)) WHERE decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14) ORDER BY captured_unix DESC,id DESC LIMIT 1)").makeIterator().next()
         }
         func makeIterator() -> Iterator { Iterator(self) }
         final class Iterator: IteratorProtocol {
@@ -79,7 +97,7 @@ enum EventStore {
                 sqlite3_busy_timeout(db, 5000)
                 let json = source.metadata ? "CASE WHEN tag IN (66,133) THEN COALESCE(decoded_json, '{}') ELSE '{}' END" : "COALESCE(decoded_json, '{}')"
                 let body = source.metadata ? "NULL" : "CASE WHEN tag IN (114,117,126,127) THEN body ELSE NULL END"
-                let sql = "SELECT ring_timestamp,tag,\(json),captured_unix,\(body) FROM events WHERE (decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14)) AND (\(source.predicate)) ORDER BY captured_unix,id"
+                let sql = "SELECT ring_timestamp,tag,\(json),captured_unix,\(body) FROM \(Events.relation(db)) WHERE (decoded_json IS NOT NULL OR (tag = 65 AND LENGTH(body) >= 14)) AND (\(source.predicate)) ORDER BY captured_unix,id"
                 guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
                     source.fail(ReadError.prepare(message())); finished = true; return
                 }

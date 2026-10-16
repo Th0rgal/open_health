@@ -44,11 +44,21 @@ targets:
       - path: Core.swift
       - path: WorkCoordinator.swift
       - path: Components.swift
+      - path: CaptureSettings.swift
+      - path: CaptureNeeds.swift
+      - path: ActivityLog.swift
+      - path: ActivityViews.swift
+      - path: ModelFiles.swift
       - path: Reports.swift
       - path: DayExport.swift
       - path: RawData.swift
       - path: ResearchExport.swift
       - path: HeartRate.swift
+      - path: Scores.swift
+      - path: Viz.swift
+      - path: Home.swift
+      - path: Detail.swift
+      - path: LiveHR.swift
       - path: Theme.swift
       - path: BLETransport.swift
       - path: RingSync.swift

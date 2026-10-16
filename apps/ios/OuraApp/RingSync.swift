@@ -298,12 +298,62 @@ final class RingWriter: BleWriter, @unchecked Sendable {
 /// main actor for the UI. Weakly captured so a dead RingSync just drops updates.
 final class SyncProgressBridge: SyncProgressListener, @unchecked Sendable {
     private let update: @MainActor (String, UInt64, UInt32) -> Void
-    init(_ update: @escaping @MainActor (String, UInt64, UInt32) -> Void) {
+    private let device: @MainActor (String, String, UInt8?) -> Void
+    init(_ update: @escaping @MainActor (String, UInt64, UInt32) -> Void,
+         device: @escaping @MainActor (String, String, UInt8?) -> Void = { _, _, _ in }) {
         self.update = update
+        self.device = device
     }
     func onProgress(stage: String, bytesLeft: UInt64, eventsSynced: UInt32) {
         Task { @MainActor in self.update(stage, bytesLeft, eventsSynced) }
     }
+    func onDevice(serial: String, firmware: String, batteryPct: UInt8?) {
+        Task { @MainActor in self.device(serial, firmware, batteryPct) }
+    }
+    func onNote(message: String) {
+        dlog("rust", message)
+    }
+}
+
+/// Bridges live heart-rate callbacks from the Rust runtime to closures.
+final class LiveHrBridge: LiveHrListener, @unchecked Sendable {
+    private let stage: @Sendable (String) -> Void
+    private let sample: @Sendable (Int, Int) -> Void
+    init(stage: @escaping @Sendable (String) -> Void, sample: @escaping @Sendable (Int, Int) -> Void) {
+        self.stage = stage; self.sample = sample
+    }
+    func onStage(stage: String) { self.stage(stage) }
+    func onSample(bpm: UInt16, ibiMs: UInt16) { sample(Int(bpm), Int(ibiMs)) }
+}
+
+enum LiveOutcome {
+    case finished(beats: Int), stopped, failed(String)
+}
+
+enum RingLinkError: Error { case message(String)
+    var text: String { if case .message(let m) = self { return m }; return "" }
+}
+
+enum CaptureOutcome {
+    case features([CaptureFeature]), failed(String)
+}
+
+/// What the ring itself reported at the start of the latest sync. Shown at once, long
+/// before the history drain finishes, and kept so the last values survive a relaunch.
+struct RingInfo: Codable, Equatable {
+    var serial: String
+    var firmware: String
+    var batteryPct: Int?
+    var readAt: Date
+
+    private static let key = "ring.info"
+    static func load() -> RingInfo? {
+        UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(RingInfo.self, from: $0) }
+    }
+    func save() {
+        if let data = try? JSONEncoder().encode(self) { UserDefaults.standard.set(data, forKey: Self.key) }
+    }
+    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
 }
 
 /// Orchestrates a sync and exposes progress to the UI.
@@ -311,10 +361,18 @@ final class SyncProgressBridge: SyncProgressListener, @unchecked Sendable {
 final class RingSync: ObservableObject {
     @Published var status: String = ""
     @Published var busy = false
+    /// Share of the current drain already transferred, from the ring's remaining bytes.
+    @Published private(set) var drainFraction: Double?
+    /// A live heart-rate measurement holds the ring's single BLE link.
+    @Published private(set) var liveActive = false
     @Published private(set) var exportStatus: String?
     @Published var connectionIssue: String?
     @Published var lastReport: SyncReport?
     @Published private(set) var lastSuccessfulSyncAt: Date?
+    /// Identity and charge as the ring reported them at the start of the latest sync.
+    @Published private(set) var info: RingInfo? = RingInfo.load()
+    /// Events committed to the database so far in the current sync.
+    @Published private(set) var committedEvents: UInt32 = 0
     /// Serial of the ring this phone last talked to — used to confirm a factory reset
     /// targets THIS ring and not one that merely won the scan.
     @Published private(set) var knownSerial: String? = UserDefaults.standard.string(forKey: "ring.serial")
@@ -332,6 +390,7 @@ final class RingSync: ObservableObject {
     private var session: RingSession?
     private var pump: Task<Void, Never>?
     private var lastProgressBytes: UInt64?
+    private var peakBytesLeft: UInt64 = 0
     private var lastProgressAt: Date?
     private var smoothedBytesPerSecond: Double?
     private var lastAutomaticAttemptAt: Date?
@@ -360,18 +419,29 @@ final class RingSync: ObservableObject {
     }
 
     init() {
-        for name in [UIApplication.didEnterBackgroundNotification, UIApplication.protectedDataWillBecomeUnavailableNotification] {
-            lifecycleObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self, self.busy else { return }
-                    WorkCoordinator.shared.beginCleanup()
-                    self.pause()
-                }
-            })
-        }
+        // A sync keeps running when the app is backgrounded: the bluetooth-central
+        // background mode keeps CoreBluetooth callbacks flowing, and a short background
+        // task covers the hand-off. Nothing here is required for safety: every batch
+        // commits its events and cursor in one transaction, so a suspension or kill at
+        // any instant resumes from the last committed batch.
+        let center = NotificationCenter.default
+        lifecycleObservers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                BLEEnvironment.isBackground = true
+                guard let self, self.busy else { return }
+                WorkCoordinator.shared.beginCleanup()
+                dlog("sync", "app backgrounded; sync continues")
+            }
+        })
+        lifecycleObservers.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in BLEEnvironment.isBackground = false }
+        })
         let timestamp = UserDefaults.standard.double(forKey: Self.lastSuccessfulSyncKey)
         lastSuccessfulSyncAt = timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
     }
+
+    /// Sync may run in the background; it only needs the database to be readable.
+    private var syncAllowed: Bool { UIApplication.shared.isProtectedDataAvailable }
 
     var wasRecentlySynced: Bool {
         lastSuccessfulSyncAt.map { Date().timeIntervalSince($0) < Self.automaticSyncCooldown } ?? false
@@ -383,7 +453,7 @@ final class RingSync: ObservableObject {
     /// data is sitting half-transferred on the ring, so resume eagerly with the
     /// retry loop instead of silently giving up.
     func syncAutomaticallyIfNeeded(now: Date = Date()) async -> SyncReport? {
-        guard WorkCoordinator.shared.available, !busy, let key = Keychain.loadKey() else { return nil }
+        guard WorkCoordinator.shared.available, !busy, !liveActive, let key = Keychain.loadKey() else { return nil }
         let resuming = hasIncompleteSync
         if !resuming,
            let successful = lastSuccessfulSyncAt,
@@ -537,6 +607,7 @@ final class RingSync: ObservableObject {
             let serial = try await s.factoryReset(keyHex: keyHex, confirmSerial: confirmSerial)
             Keychain.clearKey()
             UserDefaults.standard.removeObject(forKey: Self.preferredPeripheralKey)
+            RingInfo.clear(); info = nil
             lastReport = nil
             dlog("reset", "wiped \(serial)")
             status = "\(serial) wiped. Its old key is gone — pair it again to start over."
@@ -618,12 +689,226 @@ final class RingSync: ObservableObject {
         }
     }
 
+    /// Debug: time a drain of the last `days` days into a scratch database. The real
+    /// database is only read, so its cursor and events are untouched; the ring does not
+    /// discard what it sends. Results are in the diagnostics log (`[rust] batch …`,
+    /// `bench done …`). Start with the launch argument `-benchDrain <days>`.
+    func benchDrain(days: UInt32, bleMode: Int32 = -1) async {
+        while busy { try? await Task.sleep(nanoseconds: 500_000_000) }
+        guard let key = Keychain.loadKey(), syncAllowed else { return }
+        busy = true; paused = false
+        defer { busy = false }
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("bench-\(UUID().uuidString).db")
+        defer { for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: scratch.path + suffix) } }
+        dlog("bench", "start days=\(days)")
+        let t = BLETransport(nameContains: "Oura", preferredPeripheralID: preferredPeripheralID)
+        transport = t
+        defer { pump?.cancel(); pump = nil; t.disconnect(); transport = nil; session = nil }
+        do { try await t.connect() } catch { dlog("bench", "connect FAILED: \(error)"); return }
+        let s = RingSession(writer: RingWriter(t))
+        session = s
+        let frames = t.notifications
+        pump = Task {
+            for await frame in frames { s.pushFrame(data: frame) }
+            s.cancel(reason: "transport closed")
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        var lastBytes: UInt64 = 0
+        let progress = SyncProgressBridge({ _, bytesLeft, events in
+            if bytesLeft > 0 { lastBytes = bytesLeft }
+            _ = events
+        })
+        do {
+            let report = try await s.benchDrain(realDbPath: DB.url.path, scratchPath: scratch.path,
+                                                keyHex: key, daysBack: days, bleMode: bleMode, progress: progress)
+            let secs = ProcessInfo.processInfo.systemUptime - started
+            dlog("bench", "OK events=\(report.eventsSynced) wall=\(String(format: "%.1f", secs))s lastBytesLeft=\(lastBytes)")
+        } catch {
+            dlog("bench", "FAILED after \(String(format: "%.1f", ProcessInfo.processInfo.systemUptime - started))s: \(error)")
+        }
+    }
+
+    /// Connects to the ring and streams live heart rate for up to `seconds`, reporting each
+    /// beat. Needs the ring on the finger; refuses to start during a sync because the ring
+    /// has one BLE link. `stopLiveHeartRate()` ends it early.
+    func liveHeartRate(seconds: UInt32,
+                       onStage: @escaping @MainActor (String) -> Void,
+                       onSample: @escaping @MainActor (_ bpm: Int, _ ibiMs: Int) -> Void) async -> LiveOutcome {
+        guard !busy, !liveActive else { return .failed("The ring is busy syncing. Try again when it finishes.") }
+        guard let key = Keychain.loadKey() else { return .failed("No ring key saved. Pair the ring first.") }
+        guard syncAllowed else { return .failed("Unlock your iPhone to measure.") }
+        liveActive = true
+        paused = false
+        IdleTimerLock.acquire("live-hr")
+        defer {
+            liveActive = false
+            IdleTimerLock.release("live-hr")
+            pump?.cancel(); pump = nil
+            transport?.disconnect(); transport = nil
+            session = nil
+        }
+        dlog("live-hr", "start seconds=\(seconds)")
+        let t = BLETransport(nameContains: "Oura", preferredPeripheralID: preferredPeripheralID)
+        transport = t
+        do { try await t.connect() } catch {
+            dlog("live-hr", "connect FAILED: \(error)")
+            t.disconnect()
+            if case BLEError.poweredOff = error { return .failed("Bluetooth is unavailable. Check Bluetooth in Settings.") }
+            return .failed("Couldn’t find the ring. Disconnect it from other phones and try again.")
+        }
+        let s = RingSession(writer: RingWriter(t))
+        session = s
+        let frames = t.notifications
+        pump = Task {
+            for await frame in frames { s.pushFrame(data: frame) }
+            s.cancel(reason: "transport closed")
+        }
+        let bridge = LiveHrBridge(
+            stage: { stage in Task { @MainActor in onStage(stage) } },
+            sample: { bpm, ibi in Task { @MainActor in onSample(bpm, ibi) } })
+        do {
+            let beats = try await s.liveHeartRate(keyHex: key, seconds: seconds, listener: bridge)
+            dlog("live-hr", "finished beats=\(beats)")
+            rememberPeripheral(t.connectedPeripheralID)
+            return .finished(beats: Int(beats))
+        } catch SyncError.Interrupted {
+            dlog("live-hr", "stopped")
+            return .stopped
+        } catch {
+            dlog("live-hr", "FAILED: \(error)")
+            return Self.isAuthenticationFailure(error)
+                ? .failed("The ring rejected the saved key.")
+                : .failed("The ring connection dropped.")
+        }
+    }
+
+    func stopLiveHeartRate() { session?.cancel(reason: "stopped") }
+
+    /// Runs one short ring operation on its own connection: refuses during a sync or a live
+    /// measurement, needs the saved key and an unlocked phone, and always disconnects.
+    private func withRingLink<T>(_ label: String,
+                                 _ body: (RingSession, String) async throws -> T) async -> Result<T, RingLinkError> {
+        guard !busy, !liveActive else { return .failure(.message("The ring is busy syncing. Try again when it finishes.")) }
+        guard let key = Keychain.loadKey() else { return .failure(.message("No ring key saved. Pair the ring first.")) }
+        guard syncAllowed else { return .failure(.message("Unlock your iPhone and try again.")) }
+        liveActive = true
+        paused = false
+        IdleTimerLock.acquire(label)
+        defer {
+            liveActive = false
+            IdleTimerLock.release(label)
+            pump?.cancel(); pump = nil
+            transport?.disconnect(); transport = nil
+            session = nil
+        }
+        let t = BLETransport(nameContains: "Oura", preferredPeripheralID: preferredPeripheralID)
+        transport = t
+        do { try await t.connect() } catch {
+            dlog(label, "connect FAILED: \(error)")
+            t.disconnect()
+            if case BLEError.poweredOff = error { return .failure(.message("Bluetooth is unavailable. Check Bluetooth in Settings.")) }
+            return .failure(.message("Couldn’t find the ring. Disconnect it from other phones and try again."))
+        }
+        let s = RingSession(writer: RingWriter(t))
+        session = s
+        let frames = t.notifications
+        pump = Task {
+            for await frame in frames { s.pushFrame(data: frame) }
+            s.cancel(reason: "transport closed")
+        }
+        do {
+            let value = try await body(s, key)
+            rememberPeripheral(t.connectedPeripheralID)
+            return .success(value)
+        } catch SyncError.Failed(let detail) {
+            dlog(label, "FAILED: \(detail)")
+            return .failure(.message(detail))
+        } catch {
+            dlog(label, "FAILED: \(error)")
+            return .failure(.message(Self.isAuthenticationFailure(error)
+                ? "The ring rejected the saved key." : "The ring connection dropped."))
+        }
+    }
+
+    /// Arms a user-started workout on the ring (parameters, then exercise heart rate REQUESTED).
+    func startExercise(activityId: UInt16, restingHr: UInt8, maxHr: UInt8) async -> Result<ExerciseStart, RingLinkError> {
+        dlog("exercise", "start activity=\(activityId) resting=\(restingHr) max=\(maxHr)")
+        let r = await withRingLink("exercise") { s, key in
+            try await s.exerciseStart(keyHex: key, activityId: activityId, restingHr: restingHr, maxHr: maxHr)
+        }
+        if case .success(let v) = r { dlog("exercise", "armed previous=\(v.previousMode.map(String.init) ?? "?") after=\(v.modeAfter.map(String.init) ?? "?")") }
+        return r
+    }
+
+    /// Ends the workout on the ring and puts exercise heart rate back to `restoreMode`.
+    func stopExercise(restoreMode: UInt8) async -> Result<UInt8?, RingLinkError> {
+        dlog("exercise", "stop restore=\(restoreMode)")
+        return await withRingLink("exercise") { s, key in
+            try await s.exerciseStop(keyHex: key, restoreMode: restoreMode)
+        }
+    }
+
+    /// Reads the ring's capture modes, or sets `changes` first and reads them back. Needs a
+    /// free ring link, so it refuses during a sync or a live measurement. Nothing is synced
+    /// or deleted.
+    func captureSettings(applying changes: [CaptureChange]? = nil) async -> CaptureOutcome {
+        guard !busy, !liveActive else { return .failed("The ring is busy syncing. Try again when it finishes.") }
+        guard let key = Keychain.loadKey() else { return .failed("No ring key saved. Pair the ring first.") }
+        guard syncAllowed else { return .failed("Unlock your iPhone to read the ring.") }
+        liveActive = true
+        paused = false
+        IdleTimerLock.acquire("capture-settings")
+        defer {
+            liveActive = false
+            IdleTimerLock.release("capture-settings")
+            pump?.cancel(); pump = nil
+            transport?.disconnect(); transport = nil
+            session = nil
+        }
+        dlog("capture", changes == nil ? "read" : "apply \(changes!.map { "\($0.id)=\($0.mode)" })")
+        let t = BLETransport(nameContains: "Oura", preferredPeripheralID: preferredPeripheralID)
+        transport = t
+        do { try await t.connect() } catch {
+            dlog("capture", "connect FAILED: \(error)")
+            t.disconnect()
+            if case BLEError.poweredOff = error { return .failed("Bluetooth is unavailable. Check Bluetooth in Settings.") }
+            return .failed("Couldn’t find the ring. Disconnect it from other phones and try again.")
+        }
+        let s = RingSession(writer: RingWriter(t))
+        session = s
+        let frames = t.notifications
+        pump = Task {
+            for await frame in frames { s.pushFrame(data: frame) }
+            s.cancel(reason: "transport closed")
+        }
+        do {
+            let features: [CaptureFeature]
+            if let changes {
+                features = try await s.applyCaptureSettings(keyHex: key, changes: changes)
+            } else {
+                features = try await s.captureSettings(keyHex: key)
+            }
+            dlog("capture", "ok \(features.map { "\($0.id)=\($0.mode.map(String.init) ?? "?")" })")
+            rememberPeripheral(t.connectedPeripheralID)
+            return .features(features)
+        } catch SyncError.Interrupted {
+            return .failed("Stopped.")
+        } catch {
+            dlog("capture", "FAILED: \(error)")
+            return Self.isAuthenticationFailure(error)
+                ? .failed("The ring rejected the saved key.")
+                : .failed("The ring connection dropped.")
+        }
+    }
+
     @discardableResult
     func run(keyHex: String, maxAttempts: Int = 6, source: String = "manual") async -> SyncReport? {
-        guard !busy else { return nil }
+        guard !busy, !liveActive else { return nil }
         connectionIssue = nil
         lastReport = nil   // clear any prior success so a failed retry isn't read as one
         lastProgressBytes = nil
+        peakBytesLeft = 0
+        drainFraction = nil
         lastProgressAt = nil
         smoothedBytesPerSecond = nil
         let key = keyHex.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -634,13 +919,14 @@ final class RingSync: ObservableObject {
             status = "key must be 32 hex characters"
             return nil
         }
-        guard WorkCoordinator.shared.available else { status = "Sync paused. Open the app to resume."; return nil }
+        guard syncAllowed else { status = "Sync paused. Unlock your iPhone to resume."; return nil }
         busy = true
         paused = false
+        committedEvents = 0
         WorkCoordinator.shared.invalidateAnalysis()
         await WorkGate.shared.acquire()
         defer { Task { await WorkGate.shared.release() }; WorkCoordinator.shared.endCleanup() }
-        guard !paused, WorkCoordinator.shared.available else { busy = false; return nil }
+        guard !paused, syncAllowed else { busy = false; return nil }
         markedIncompleteThisRun = false
         // A multi-hour first sync must not die because the screen locked; SyncView
         // refreshes this when the app becomes active again.
@@ -666,7 +952,7 @@ final class RingSync: ObservableObject {
         var attempt = 1
         var totalBudget = max(1, maxAttempts)
         while attempt <= totalBudget {
-            if paused || Task.isCancelled || !WorkCoordinator.shared.available { status = "Sync paused. Return to the app to resume."; return nil }
+            if paused || Task.isCancelled || !syncAllowed { status = "Sync paused. Return to the app to resume."; return nil }
             attemptID = UUID().uuidString
             dlog("sync", "attempt=\(attempt) id=\(attemptID) run=\(runID)")
             if attempt > 1 {
@@ -676,7 +962,7 @@ final class RingSync: ObservableObject {
                     status = "Connection lost. Retrying (\(attempt) of \(totalBudget))…"
                 }
                 do { try await Task.sleep(nanoseconds: delayNs) } catch { return nil }
-                guard !paused, WorkCoordinator.shared.available else { return nil }
+                guard !paused, syncAllowed else { return nil }
             }
 
             if excludedPeripherals.isEmpty {
@@ -745,6 +1031,9 @@ final class RingSync: ObservableObject {
                         self?.rememberPeripheral(t.connectedPeripheralID)
                     }
                     self?.showProgress(stage: stage, bytesLeft: bytesLeft, events: events)
+                } device: { [weak self] serial, firmware, battery in
+                    guard self?.attemptID == expectedAttempt, self?.busy == true else { return }
+                    self?.adoptInfo(serial: serial, firmware: firmware, battery: battery)
                 }
                 let report = try await s.sync(dbPath: DB.url.path, keyHex: key, progress: progress)
                 Keychain.saveKey(key)
@@ -800,6 +1089,20 @@ final class RingSync: ObservableObject {
         return nil
     }
 
+    /// Publish what the ring reported right after authentication. A missing battery
+    /// reading keeps the previous one rather than blanking a value that is still true.
+    private func adoptInfo(serial: String, firmware: String, battery: UInt8?) {
+        rememberSerial(serial)
+        let previous = info?.serial == serial ? info : nil
+        let updated = RingInfo(serial: serial,
+                               firmware: firmware.isEmpty ? (previous?.firmware ?? "") : firmware,
+                               batteryPct: battery.map(Int.init) ?? previous?.batteryPct,
+                               readAt: Date())
+        info = updated
+        updated.save()
+        dlog("sync", "ring info serial=\(serial) fw=\(updated.firmware) battery=\(updated.batteryPct.map { "\($0)%" } ?? "unknown")")
+    }
+
     /// Render Rust-side progress into the status line.
     private func showProgress(stage: String, bytesLeft: UInt64, events: UInt32) {
         let now = ProcessInfo.processInfo.systemUptime
@@ -807,6 +1110,7 @@ final class RingSync: ObservableObject {
             dlog("progress", "run=\(runID) stage=\(stage) bytesLeft=\(bytesLeft) committedEvents=\(events)")
             progressStage = stage; progressLogAt = now
         }
+        committedEvents = max(committedEvents, events)
         // Real drain progress means data is mid-transfer: from here until the sync
         // completes, an interruption should resume eagerly on return to the app.
         if events > 0, !markedIncompleteThisRun {
@@ -837,6 +1141,8 @@ final class RingSync: ObservableObject {
                     smoothedBytesPerSecond = nil // a rebase/new drain starts a new estimate
                 }
                 lastProgressBytes = bytesLeft
+                peakBytesLeft = max(peakBytesLeft, bytesLeft)
+                drainFraction = 1 - Double(bytesLeft) / Double(peakBytesLeft)
                 lastProgressAt = now
                 let eta = smoothedBytesPerSecond.flatMap { rate -> String? in
                     guard rate > 0 else { return nil }
@@ -845,6 +1151,7 @@ final class RingSync: ObservableObject {
                 status = "syncing… ~\(Self.fmtBytes(bytesLeft)) left · \(events) events"
                     + (eta.map { " · about \($0)" } ?? "")
             } else if events > 0 {
+                drainFraction = 1
                 status = "syncing… \(events) events · finishing up"
             } else {
                 status = "Syncing…"

@@ -1,7 +1,9 @@
 // Objective-C++ bridge: run Oura's models through the LibTorch lite interpreter on
-// iOS. Sleep staging is NSSA (sleepstaging_2_6_0), mirroring tools/nssa_stager.py:
+// iOS: activity, step-motion, cardiovascular age, illness, and the NSSA sleep stager
+// (sleepstaging_2_6_0, mirroring tools/nssa_stager.py):
 //   forward(acm_values, acm_ts, ibi_values, ibi_ts, temp_values, temp_ts, scalars, bedtime)
-// with its five oura_ops custom ops registered below on top of NssaOps.c.
+// with its five oura_ops custom ops registered below on top of NssaOps.c. Our own
+// tree-ensemble stager is not here: it is open_oura's Rust port.
 #import "TorchBridge.h"
 #include "NssaOps.h"
 #include <torch/library.h>
@@ -30,11 +32,11 @@ struct ModuleSlot {
     std::unique_ptr<torch::jit::mobile::Module> module;
     std::string path;
 };
-static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_illness;
+static ModuleSlot g_nssa, g_cva, g_activity, g_illness;
 
 void oura_torch_release(void) {
     std::lock_guard<std::mutex> lock(g_torch);
-    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_illness}) {
+    for (ModuleSlot *slot : {&g_nssa, &g_cva, &g_activity, &g_illness}) {
         slot->module.reset();
         slot->path.clear();
     }
@@ -166,7 +168,7 @@ int oura_nssa(const char *model_path,
         || n_acm <= 0 || n_ibi <= 0 || n_temp <= 0) return -1;
     std::lock_guard<std::mutex> lock(g_torch);
     try {
-        auto &m = cachedModule(model_path, g_sleepnet.module, g_sleepnet.path);
+        auto &m = cachedModule(model_path, g_nssa.module, g_nssa.path);
         int64_t bt[2] = {bedtime_start_ms, bedtime_end_ms};
         std::vector<c10::IValue> inputs{
             blobFloat2d(acm_val, n_acm, 6), blobLong(acm_ts, n_acm),
@@ -251,11 +253,13 @@ int oura_activity(const char *model_path, const float *context, const float *use
 
         auto step_t = mat(step, n_step, 12);
 
-        auto thr = at::full({}, threshold, at::kFloat);   // 0-dim scalars
-        auto mind = at::full({}, min_duration, at::kFloat);
-        auto zero = at::full({}, 0.f, at::kFloat);
+        // One row of detection settings: probability threshold, minimum duration and
+        // tuning values; NaN selects the model default.
+        const float nanf = std::numeric_limits<float>::quiet_NaN();
+        const float settings[7] = {threshold, nanf, min_duration, 0.f, nanf, nanf, nanf};
+        auto settings_t = at::from_blob((void *)settings, {1, 7}, at::kFloat).clone();
         std::vector<c10::IValue> inputs{context_t, user_t, met_t, step_t, motion_t, temp_t, hr_t,
-                                        c10::IValue(), c10::IValue(), thr, mind, zero};
+                                        c10::IValue(), c10::IValue(), settings_t};
         auto out = m.forward(inputs).toTuple();
         auto workouts = out->elements()[0].toTensor().to(at::kFloat).contiguous();
         if (!workouts.defined() || workouts.numel() == 0) return 0;
@@ -271,40 +275,6 @@ int oura_activity(const char *model_path, const float *context, const float *use
         return n;
     } catch (const std::exception &e) {
         return activityFailure(std::string("activity: ") + e.what());
-    }
-}
-
-int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
-                    const float *raw, int n_raw, int64_t *out_timestamps_ms,
-                    float *out_features, int max_rows) {
-    activity_error.clear();
-    if (!model_path || !timestamps_ms || !raw || !out_timestamps_ms || !out_features)
-        return activityFailure("step decoder: invalid model inputs or output buffer");
-    if (n_raw <= 0 || max_rows <= 0) return 0;
-    std::lock_guard<std::mutex> lock(g_torch);
-    try {
-        auto &m = cachedModule(model_path, g_stepmotion.module, g_stepmotion.path);
-        auto timestamps = blobLong(timestamps_ms, n_raw);
-        auto data = blobFloat2d(raw, n_raw, 27);
-        auto result = m.forward({timestamps, data}).toTuple();
-        auto out_ts = result->elements()[0].toTensor().reshape({-1}).to(at::kLong).contiguous();
-        auto out_data = result->elements()[1].toTensor().to(at::kFloat).contiguous();
-        if (!out_data.defined() || out_data.numel() == 0) return 0;
-        if (out_data.dim() != 2 || out_data.size(1) != 11) {
-            return activityFailure("step decoder: expected a feature tensor with 11 columns, got rank " + std::to_string(out_data.dim()));
-        }
-        int n = std::min<int>((int)out_data.size(0), max_rows);
-        n = std::min<int>(n, (int)out_ts.numel());
-        const int64_t *tp = out_ts.data_ptr<int64_t>();
-        const float *fp = out_data.data_ptr<float>();
-        for (int i = 0; i < n; i++) out_timestamps_ms[i] = tp[i];
-        for (int i = 0; i < n * 11; i++) out_features[i] = fp[i];
-        if ((int)out_data.size(0) > max_rows) {
-            NSLog(@"oura_stepmotion: truncated %d rows to %d", (int)out_data.size(0), max_rows);
-        }
-        return n;
-    } catch (const std::exception &e) {
-        return activityFailure(std::string("step decoder: ") + e.what());
     }
 }
 

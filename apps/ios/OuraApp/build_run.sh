@@ -28,7 +28,7 @@ xcrun -sdk iphonesimulator swiftc \
     "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" "$APPDIR/Reports.swift" \
     "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" "$APPDIR/ProfileSettings.swift" \
     "$APPDIR/ModelProgress.swift" "$APPDIR/Diagnostics.swift" "$APPDIR/HealthExport.swift" "$APPDIR/DayExport.swift" "$APPDIR/WorkCoordinator.swift" \
-    "$APPDIR/HeartRate.swift" "$APPDIR/RawData.swift" "$APPDIR/ResearchExport.swift" "$BUILD/CrashCatch.o" \
+    "$APPDIR/HeartRate.swift" "$APPDIR/Scores.swift" "$APPDIR/Viz.swift" "$APPDIR/Home.swift" "$APPDIR/Detail.swift" "$APPDIR/LiveHR.swift" "$APPDIR/RawData.swift" "$APPDIR/ResearchExport.swift" "$BUILD/CrashCatch.o" \
     -L "$XCF" -loura_core -lsqlite3 \
     -o "$APP/OuraApp"
 # Xcode expands $(PRODUCT_BUNDLE_IDENTIFIER) at build time; the raw-swiftc path doesn't,

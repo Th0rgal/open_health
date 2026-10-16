@@ -7,166 +7,10 @@ import UniformTypeIdentifiers
 // SIBLING CLIENT: the web dashboard (dashboard/web/app.js) renders the SAME summary
 // JSON — a user-facing change here usually belongs there too (docs/clients-web-and-ios.md).
 
-// The home's unified "today": last night's sleep and that day's activity as ONE unit,
-// each region tappable to open its own detail (sleep → SleepDetail, activity →
-// ActivityDetail). Mirrors the web dashboard's day card. Previous days live behind
-// "show all days" (AllDaysView → DayDetailView, which shows the same pairing).
-struct TodayCard: View {
-    let s: Summary
-    let day: String
-    let onSleep: () -> Void
-    let onActivity: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // night — tap for the hypnogram + breakdown + that night's vitals
-            if let n = s.night(forDay: day) {
-                Button(action: onSleep) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            ObsTag("sleep", icon: "moon.fill")
-                            Spacer()
-                            Text(n.in_bed_h.map { String(format: "%.1fh", $0) } ?? "–")
-                                .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                            Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
-                        }
-                        Text("\(n.start ?? "–") → \(n.end ?? "–")")
-                            .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-                        if n.hasHypnogram { Hypnogram(stages: n.hypnogram!, height: 28) }
-                        else if let e = n.efficiency {
-                            Text("efficiency \(Int(e))%").font(Obs.mono(12))
-                                .foregroundStyle(e >= 85 ? Obs.good : (e < 75 ? Obs.bad : Obs.ink2))
-                        }
-                    }
-                    .contentShape(Rectangle())
-                }.buttonStyle(.plain)
-
-                Rectangle().fill(Obs.trace.opacity(0.4)).frame(height: 0.5)
-                    .padding(.vertical, 16)
-            }
-
-            // activity — tap for the movement ridge + steps/kcal + this day's workouts
-            Button(action: onActivity) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        ObsTag("activity", icon: "figure.walk")
-                        Spacer()
-                        if let st = s.activity_daily[day] {
-                            Text("\(Int(st.steps ?? 0)) steps").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                            Text("· \(Int(st.active_kcal ?? 0)) kcal").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                        }
-                        Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
-                    }
-                    MovementRidge(profile: s.activity_profile[day] ?? [])
-                    ForEach(Array(s.workoutsOn(day).prefix(2))) { w in
-                        SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM)
-                    }
-                }
-                .contentShape(Rectangle())
-            }.buttonStyle(.plain)
-        }
-        .obsCard()
-    }
-}
-
-// "show all days" → a page listing every day; tap one for its full report.
-struct AllDaysView: View {
-    let s: Summary
-    @Environment(\.dayAnalysis) private var analysis
-    @Environment(\.dismiss) private var dismiss
-
-    private static let ymd: DateFormatter = {
-        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"; return f
-    }()
-    private static let month: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "MMMM yyyy"; return f
-    }()
-    private static let weekday: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "EEE"; return f
-    }()
-    private static let number: NumberFormatter = { let f = NumberFormatter(); f.numberStyle = .decimal; return f }()
-
-    /// Days grouped by month, newest first, keeping the summary's own order.
-    private func groups(_ days: [String]) -> [(title: String, days: [String])] {
-        var out: [(String, [String])] = []
-        for day in days {
-            let title = Self.ymd.date(from: day).map { Self.month.string(from: $0) } ?? "undated"
-            if let last = out.last, last.0 == title { out[out.count - 1].1.append(day) }
-            else { out.append((title, [day])) }
-        }
-        return out.map { (title: $0.0, days: $0.1) }
-    }
-
-    var body: some View {
-        let s = analysis?.summary ?? s
-        NavigationStack {
-            ZStack {
-                Obs.canvas.ignoresSafeArea()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(groups(s.days), id: \.title) { group in
-                            Text(group.title.uppercased()).font(Obs.mono(10, .medium)).tracking(1.4)
-                                .foregroundStyle(Obs.muted)
-                                .padding(.top, 22).padding(.bottom, 8)
-                            ForEach(group.days, id: \.self) { day in
-                                NavigationLink { DayReportView(s: s, day: day, tab: .sleep) } label: { row(s, day) }
-                                    .buttonStyle(.plain)
-                                if day != group.days.last { Rectangle().fill(Obs.rule).frame(height: 1) }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 24).padding(.bottom, 24)
-                }
-            }
-            .navigationTitle("All days")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-        }
-    }
-
-    @ViewBuilder private func row(_ s: Summary, _ day: String) -> some View {
-        let date = Self.ymd.date(from: day)
-        let night = s.night(forDay: day)
-        let stat = s.activity_daily[day]
-        HStack(spacing: 12) {
-            // weekday over day-of-month, a fixed column so the rows line up
-            VStack(alignment: .leading, spacing: 1) {
-                Text(date.map { Self.weekday.string(from: $0).lowercased() } ?? "")
-                    .font(Obs.mono(9)).tracking(0.8).foregroundStyle(Obs.muted)
-                Text(String(day.suffix(2))).font(Obs.mono(17, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
-            }
-            .frame(width: 36, alignment: .leading)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(night?.in_bed_h.map { String(format: "%.1fh", $0) } ?? "–")
-                        .font(Obs.mono(12, .medium)).foregroundStyle(night == nil ? Obs.muted : Obs.ink)
-                    if let st = stat, let steps = st.steps {
-                        Text("·").foregroundStyle(Obs.trace)
-                        Text("\(Self.number.string(from: NSNumber(value: Int(steps))) ?? "0") steps")
-                            .font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-                    }
-                    if let st = stat, let kcal = st.active_kcal, kcal > 0 {
-                        Text("·").foregroundStyle(Obs.trace)
-                        Text("\(Int(kcal)) kcal").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-                    }
-                }
-                if let n = night, n.hasHypnogram {
-                    Hypnogram(stages: n.hypnogram!, height: 12)
-                } else if let n = night, let start = n.start, let end = n.end {
-                    Text("\(start) → \(end)").font(Obs.mono(10)).foregroundStyle(Obs.muted)
-                }
-            }
-            Spacer(minLength: 4)
-            Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
-        }
-        .padding(.vertical, 11)
-        .contentShape(Rectangle())
-    }
-}
-
-// Pair + sync from a real ring: paste the auth key (exported on the desktop), connect
-// over BLE, drain history into the writable DB. BLE only works on a physical device.
 struct SyncView: View {
     @ObservedObject var ring: RingSync
+    /// Identity and data counts from the latest summary; the ring's own report overrides them.
+    var device: Device? = nil
     let onSynced: (SyncReport) -> Void
     let onReset: () -> Void
     @Environment(\.dismiss) private var dismiss
@@ -175,6 +19,8 @@ struct SyncView: View {
     @ObservedObject private var store = DiagStore.shared
     @State private var diagnosticFile: URL?
     @State private var showKey = false
+    @State private var keyExpanded = false
+    @State private var keyCopied = false
     @State private var clockReport: String?
     @State private var confirmReset = false
     @State private var confirmWipeRing = false
@@ -217,15 +63,26 @@ struct SyncView: View {
         }
     }
 
+    /// A sync or pairing has succeeded and the key is stored: the setup instructions and
+    /// the key field give way to the ring's status and a single sync button.
+    private var paired: Bool { ring.knownSerial != nil && validKey }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     header
-                    if ring.connectionIssue != nil { syncStatus }
-                    else { preparation }
-                    if !ring.busy { pairingKey }
-                    connection
+                    if paired {
+                        ringCard
+                        connection
+                        if ring.connectionIssue != nil { preparation }
+                        if !ring.busy { keyDisclosure }
+                    } else {
+                        if ring.connectionIssue != nil { syncStatus }
+                        else { preparation }
+                        if !ring.busy { pairingKey }
+                        connection
+                    }
                     support
                     BuildStamp()
                 }
@@ -288,9 +145,80 @@ struct SyncView: View {
     }
 
     private var header: some View {
-        Text("Pair your ring")
+        Text(paired ? "Your ring" : "Pair your ring")
             .font(Obs.serif(28))
             .foregroundStyle(Obs.ink)
+    }
+
+    /// Identity, charge and data counts: the ring's own report from the latest sync, else the
+    /// values stored in the database.
+    private var ringCard: some View {
+        let info = ring.info
+        let battery = info?.batteryPct ?? device?.battery_pct
+        return VStack(spacing: 0) {
+            ringCardRow("Serial", info?.serial ?? ring.knownSerial ?? device?.serial ?? "–")
+            SupportDivider()
+            ringCardRow("Firmware", info.flatMap { $0.firmware.isEmpty ? nil : $0.firmware } ?? device?.firmware ?? "–")
+            SupportDivider()
+            ringCardRow("Battery", battery.map { "\($0)%" } ?? "–", tint: (battery ?? 100) < 20 ? Obs.alert : Obs.ink)
+            SupportDivider()
+            ringCardRow("Last synced", ring.lastSuccessfulSyncAt.map(Self.relative)
+                        ?? device?.synced.map { "\($0) \(device?.synced_hm ?? "")" } ?? "Never")
+            if let raw = device?.raw_events ?? device?.total_events {
+                SupportDivider()
+                ringCardRow("Events", device?.decoded_events.map { "\(raw) raw · \($0) decoded" } ?? "\(raw)")
+            }
+            if let span = device?.days_of_data {
+                SupportDivider()
+                let observed = device?.observed_days.map { " (\($0) observed)" } ?? ""
+                ringCardRow("Data", "\(String(format: "%.0f", span)) days\(observed) · \(device?.nights ?? 0) nights")
+            }
+        }
+        .padding(.horizontal, 16)
+        .background(Obs.rule.opacity(0.3), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func ringCardRow(_ label: String, _ value: String, tint: Color = Obs.ink) -> some View {
+        HStack {
+            Text(label).font(.subheadline).foregroundStyle(Obs.ink2)
+            Spacer()
+            Text(value).font(Obs.sans(13)).foregroundStyle(tint)
+        }
+        .padding(.vertical, 12)
+    }
+
+    private static func relative(_ date: Date) -> String {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return f.localizedString(for: date, relativeTo: Date())
+    }
+
+    /// The stored key, one tap away: for a backup, or to replace it.
+    private var keyDisclosure: some View {
+        DisclosureGroup(isExpanded: $keyExpanded) {
+            VStack(alignment: .leading, spacing: 12) {
+                pairingKey
+                Button {
+                    UIPasteboard.general.setItems([[UIPasteboard.typeAutomatic: key]],
+                                                  options: [.expirationDate: Date().addingTimeInterval(60)])
+                    keyCopied = true
+                } label: {
+                    Label(keyCopied ? "Copied for 60 seconds" : "Copy key", systemImage: keyCopied ? "checkmark" : "doc.on.doc")
+                        .font(.footnote.weight(.medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Obs.ink)
+                .disabled(!validKey)
+            }
+            .padding(.top, 10)
+        } label: {
+            Text("Pairing key")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(Obs.ink)
+        }
+        .tint(Obs.ink2)
+        .onChange(of: keyExpanded) { _, open in
+            if !open { showKey = false; keyCopied = false; keyFocused = false }
+        }
     }
 
     private var preparation: some View {
@@ -392,7 +320,7 @@ struct SyncView: View {
                         .font(.subheadline).foregroundStyle(Obs.ink2)
                         .fixedSize(horizontal: false, vertical: true)
                     if ring.busy {
-                        Text("Keep the app open. If the connection drops, sync resumes automatically.")
+                        Text("Sync continues if you switch apps and resumes after a dropped connection. Saved data is never discarded.")
                             .font(.footnote).foregroundStyle(Obs.ink2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -424,8 +352,8 @@ struct SyncView: View {
                     }
                 } label: {
                     HStack(spacing: 10) {
-                        Text("Connect & sync")
-                        Image(systemName: "arrow.right")
+                        Text(paired ? "Sync now" : "Connect & sync")
+                        Image(systemName: paired ? "arrow.triangle.2.circlepath" : "arrow.right")
                     }
                     .font(.body.weight(.semibold))
                     .frame(maxWidth: .infinity, minHeight: 54)
@@ -434,9 +362,11 @@ struct SyncView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!validKey)
-                Text("Your first sync may take a few minutes.")
-                    .font(.footnote).foregroundStyle(Obs.ink2)
-                    .fixedSize(horizontal: false, vertical: true)
+                if ring.lastSuccessfulSyncAt == nil {
+                    Text("Your first sync may take a few minutes.")
+                        .font(.footnote).foregroundStyle(Obs.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
@@ -449,7 +379,7 @@ struct SyncView: View {
                 Text("Help & diagnostics")
                     .font(.subheadline.weight(.semibold)).foregroundStyle(Obs.ink)
                 Spacer()
-                Text(appVersion).font(Obs.mono(11)).foregroundStyle(Obs.muted)
+                Text(appVersion).font(Obs.sans(11)).foregroundStyle(Obs.muted)
             }
             VStack(spacing: 0) {
                 SupportRow(icon: "arrow.down.doc", title: "Export data",
@@ -645,7 +575,7 @@ private struct TechnicalReportsView: View {
                     section("Previous sessions · \(store.sessions.count)", copy: nil) {
                         ForEach(store.sessions.prefix(4)) { item in
                             HStack {
-                                Text(item.title).font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                                Text(item.title).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                                 Spacer()
                                 copyButton("session-\(item.id)", text: item.body)
                             }
@@ -668,7 +598,7 @@ private struct TechnicalReportsView: View {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 2) {
                                 ForEach(Array(diag.tail.enumerated()), id: \.offset) { _, line in
-                                    Text(line).font(Obs.mono(9)).foregroundStyle(Obs.ink2)
+                                    Text(line).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                                         .lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
                                 }
                             }
@@ -695,7 +625,7 @@ private struct TechnicalReportsView: View {
     private func section<Content: View>(_ title: String, copy: String?, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Text(title.uppercased()).font(Obs.mono(10, .medium)).foregroundStyle(Obs.muted).tracking(0.8)
+                Text(title).font(Obs.sans(11, .medium)).foregroundStyle(Obs.muted)
                 Spacer()
                 if let copy { copyButton(title, text: copy) }
             }
@@ -748,30 +678,30 @@ struct DiagnosticsShare: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
-/// The top-bar sync affordance doubles as a live status light and the entry point
-/// to diagnostics. Motion stays quiet: one slow continuous turn only while BLE is
-/// active.
-private struct SyncIndicatorButton: View {
+/// The sync status glyph: a circle that fills with the drain progress while the ring syncs, the
+/// sync arrow turning slowly while BLE is active and green once the ring is synced.
+private struct SyncGlyph: View {
     @ObservedObject var ring: RingSync
-    let action: () -> Void
+    let size: CGFloat
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var rotation = 0.0
 
     var body: some View {
-        Button(action: action) {
-            ZStack {
+        ZStack {
+            Circle().stroke(Obs.rule, lineWidth: 0.8)
+            if ring.busy, let fraction = ring.drainFraction {
                 Circle()
-                    .stroke(Obs.rule, lineWidth: 0.8)
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(ring.busy ? Obs.ink : (ring.wasRecentlySynced ? Obs.good : Obs.ink2))
-                    .rotationEffect(.degrees(rotation))
+                    .trim(from: 0, to: fraction)
+                    .stroke(Obs.ink, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
             }
-            .frame(width: 31, height: 31)
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: size * 0.5, weight: .medium))
+                .foregroundStyle(ring.busy ? Obs.ink : Obs.good)
+                .rotationEffect(.degrees(rotation))
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(ring.busy ? "Ring sync in progress" : "Ring sync and diagnostics")
-        .accessibilityHint("Opens sync status, logs, and manual controls")
+        .frame(width: size, height: size)
+        .accessibilityLabel(ring.busy ? "Ring sync in progress" : "Ring synced")
         .onAppear(perform: updateAnimation)
         .onChange(of: ring.busy) { _, _ in updateAnimation() }
         .onChange(of: reduceMotion) { _, _ in updateAnimation() }
@@ -780,11 +710,46 @@ private struct SyncIndicatorButton: View {
     private func updateAnimation() {
         if ring.busy && !reduceMotion {
             rotation = 0
-            withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) {
-                rotation = 360
-            }
+            withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) { rotation = 360 }
         } else {
             withAnimation(.easeOut(duration: 0.2)) { rotation = 0 }
+        }
+    }
+}
+
+/// The line under the screen title. It shows the sync glyph while the ring syncs, keeps it green
+/// with a spinner beside it while the synced data is analyzed, and disappears when both are done.
+private struct SyncStatusLine: View {
+    @ObservedObject var ring: RingSync
+    let analyzing: Bool
+    let label: String?
+    /// A sync ran in this cycle, so the glyph stays after it ends.
+    @State private var synced = false
+
+    private var visible: Bool { ring.busy || analyzing }
+
+    var body: some View {
+        Group {
+            if visible {
+                HStack(spacing: 7) {
+                    if ring.busy || synced { SyncGlyph(ring: ring, size: 18) }
+                    if analyzing && !ring.busy {
+                        ProgressView().controlSize(.mini).scaleEffect(0.68).tint(Obs.ink)
+                    }
+                    Text((ring.busy ? "Syncing ring" : (label ?? "Analyzing saved data")))
+                        .font(Obs.sans(11, .medium)).foregroundStyle(Obs.ink2)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .onChange(of: ring.busy) { _, busy in if busy { synced = true } }
+        .onChange(of: visible) { _, now in
+            guard !now else { return }
+            // The analysis follows a sync after a moment; reset only if nothing started.
+            Task {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                if !visible { synced = false }
+            }
         }
     }
 }
@@ -798,47 +763,59 @@ struct RootView: View {
     /// a screen can be captured without driving the UI. Ignored in normal launches.
     private func applyLaunchArguments() {
         let args = CommandLine.arguments
+        dlog("keychain", "pairing key \(Keychain.loadKey() == nil ? "missing" : "present")")
         if args.contains("-openSync") { showSync = true }
         if args.contains("-openAllDays") { showAllDays = true }
+        func value(_ flag: String) -> String? {
+            args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+        }
+        if let v = value("-tab"), let t = AppTab(rawValue: v) { tab = t }
+        if let v = value("-score"), let k = ScoreKind(rawValue: v) { scoreKind = k; if value("-noSheet") == nil { scoreSheet = k } }
+        if let v = value("-metric"), let m = MetricID(rawValue: v) { metricSheet = m }
+        if let v = value("-day") { homeDay = v }
+        if args.contains("-liveDemo") { live.demo() }
+        if args.contains("-openRadar") { showRadar = true }
+        if args.contains("-openProfile") { showProfile = true }
+        if args.contains("-hopDay") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { if let s, s.days.count > 3 { homeDay = s.days[3] } }
+        }
+        if args.contains("-openDebt") { showSleepDebt = true }
+        if args.contains("-syncNow"), let key = Keychain.loadKey() {
+            Task { _ = await ring.run(keyHex: key, source: "launch-argument") }
+        }
+        if let index = args.firstIndex(of: "-benchDrain"), index + 1 < args.count, let days = UInt32(args[index + 1]) {
+            let mode = args.firstIndex(of: "-bleMode").flatMap { $0 + 1 < args.count ? Int32(args[$0 + 1]) : nil } ?? -1
+            Task { await ring.benchDrain(days: days, bleMode: mode) }
+        }
+        #if TORCH
+        if args.contains("-recomputeAll") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { recomputeAll() }
+        }
+        #endif
         if let index = args.firstIndex(of: "-openDay"), index + 1 < args.count {
             report = ReportSel(day: args[index + 1], sleep: !args.contains("activity"))
         }
     }
     @State private var showAllDays = false
+    @State private var showActivities = false
+    /// The day every daily panel shows; nil until the pager reports the latest.
+    @State private var homeDay: String?
     @State private var showSync = false
     @State private var showProfile = false
     @State private var showSleepDebt = false
     @State private var vital: VitalKind?
+    @State private var tab: AppTab = .today
+    @State private var scoreKind: ScoreKind = .sleep
+    @State private var scoreSheet: ScoreKind?
+    @State private var metricSheet: MetricID?
+    @State private var showRadar = false
     @State private var loadGeneration = 0
     @State private var isRefreshingSummary = false
     @State private var automaticSyncRequested = false
     @State private var reloadPending = false
     @StateObject private var ring = RingSync()
+    @StateObject private var live = LiveHeartRate()
     @StateObject private var modelProgress = ModelProgress()
-    private func f(_ v: Double?, _ fallback: String = "–") -> String {
-        v.map { "\(Int($0))" } ?? fallback
-    }
-    private func relAge(_ diff: Double) -> String {
-        let a = abs((diff * 10).rounded() / 10)
-        if diff < -0.05 { return "\(a) yr younger" }
-        if diff > 0.05 { return "\(a) yr older" }
-        return "in line"
-    }
-    private func localDay(_ date: Date = Date()) -> String {
-        let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
-        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
-    }
-    private func displayedDayLabel(_ day: String, now: Date = Date()) -> String {
-        if day == localDay(now) { return "today" }
-        if let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: now),
-           day == localDay(yesterday) { return "yesterday" }
-        return day
-    }
-    private func latestLabel(date: String?, time: String? = nil) -> String {
-        let day = date.map { String($0.suffix(5)) }
-        let stamp = [day, time].compactMap { $0 }.joined(separator: " · ")
-        return stamp.isEmpty ? "latest sync" : "latest · \(stamp)"
-    }
     var body: some View {
         ZStack {
             Obs.canvas.ignoresSafeArea()
@@ -847,19 +824,39 @@ struct RootView: View {
             } else {
                 VStack(spacing: 14) {
                     ProgressView().tint(Obs.ink)
-                    Text("Loading your data…").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
+                    Text("Loading your data…").font(Obs.sans(12)).foregroundStyle(Obs.ink2)
                 }
             }
         }
+        .environment(\.radarAnalyzing, modelProgress.radarActive)
+        .environment(\.openRingCapture, { showProfile = true })
         .fullScreenCover(item: $report) { sel in if let s { DayReportView(s: s, day: sel.day, tab: sel.sleep ? .sleep : .activity) } }
-        .sheet(isPresented: $showAllDays) { if let s { AllDaysView(s: s) } }
+        .sheet(isPresented: $showAllDays) {
+            if let s { HistoryView(s: s, selected: shownDay(s), onSelect: { homeDay = $0 }) }
+        }
         .onAppear(perform: applyLaunchArguments)
         .sheet(isPresented: $showSync) {
-            SyncView(ring: ring, onSynced: refreshAfterSync, onReset: resetAndReload)
+            SyncView(ring: ring, device: s?.device, onSynced: refreshAfterSync, onReset: resetAndReload)
         }
-        .sheet(isPresented: $showProfile) { ProfileSettingsView(profile: s?.profile, onSaved: refreshDerivedData) }
-        .sheet(isPresented: $showSleepDebt) { if let debt = s?.sleepDebt { SleepDebtDetail(debt: debt) } }
+        .sheet(isPresented: $showActivities) {
+            if let s { ActivityTimelineView(s: s, day: shownDay(s), store: ActivityLogStore.shared, ring: ring, onFinished: refreshDerivedData) }
+        }
+        .sheet(isPresented: $showProfile) {
+            ProfileSettingsView(profile: s?.profile, recompute: recomputeHook, ring: ring, onSaved: refreshDerivedData)
+        }
+        .sheet(isPresented: $showSleepDebt) {
+            if let s { DebtDetailView(s: s, day: shownDay(s), onOpenDay: openReport) }
+        }
         .sheet(item: $vital) { kind in if let s { VitalTrendView(s: s, kind: kind) } }
+        .sheet(item: $scoreSheet) { kind in
+            if let s { ScoreDetailView(s: s, kind: kind, day: shownDay(s), onOpenDay: openReport) }
+        }
+        .sheet(item: $metricSheet) { id in
+            if let s { MetricDetailView(s: s, id: id, day: shownDay(s), onOpenDay: openReport) }
+        }
+        .sheet(isPresented: $showRadar) {
+            if let s, let radar = s.symptomRadar { RadarDetailView(s: s, illness: radar, day: shownDay(s)) }
+        }
         #if TORCH
         .environment(\.dayAnalysis, DayAnalysisContext(summary: s,
             isBusy: isRefreshingSummary || ring.busy, refresh: refreshDayAnalysis))
@@ -869,6 +866,7 @@ struct RootView: View {
             // with SQLite + model output without blanking the existing Today card.
             requestAutomaticSync()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .summaryNeedsReload)) { _ in load(force: true) }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataDidBecomeAvailableNotification)) { _ in
             requestAutomaticSync()
         }
@@ -880,6 +878,25 @@ struct RootView: View {
             }
         }
     }
+
+    /// The profile screen's "Recompute everything": only where the models exist.
+    private var recomputeHook: RecomputeHook? {
+        #if TORCH
+        RecomputeHook(run: recomputeAll, label: modelProgress.label, busy: isRefreshingSummary || ring.busy)
+        #else
+        nil
+        #endif
+    }
+
+    #if TORCH
+    /// Drops every cached model result and reruns the models over all saved data. The
+    /// current summary stays on screen until the new one is complete.
+    private func recomputeAll() {
+        guard !isRefreshingSummary, !ring.busy else { return }
+        ModelCacheStore.clearAll()
+        load(force: true, clearCurrent: false)
+    }
+    #endif
 
     // re-read the DB after a sync brought in new events
     private func reload() {
@@ -915,6 +932,11 @@ struct RootView: View {
         automaticSyncRequested = true
         Task {
             defer { automaticSyncRequested = false }
+            // At cold launch the app can still report itself inactive when onAppear
+            // fires, and no later scene change follows; wait briefly for it.
+            for _ in 0..<5 where !WorkCoordinator.shared.available {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
             _ = await ring.syncAutomaticallyIfNeeded()
             if WorkCoordinator.shared.available { load(force: true, clearCurrent: false) }
         }
@@ -1005,13 +1027,16 @@ struct RootView: View {
             IdleTimerLock.acquire("models")
             dlog("models", "start run=\(run.id)")
             let started = ProcessInfo.processInfo.systemUptime
+            #if TORCH
+            let pending = Core.Pending()
+            #endif
             let full: Summary = await withCheckedContinuation { completion in
                 DispatchQueue.global(qos: .userInitiated).async {
                     let summary = run.perform {
                         let base = Core.base()
                         #if TORCH
                         return base.error == nil && !run.isCancelled
-                            ? Core.withModels(base, previous: previous, progress: progress) : base
+                            ? Core.withModels(base, previous: previous, pending: pending, progress: progress) : base
                         #else
                         return base
                         #endif
@@ -1028,8 +1053,24 @@ struct RootView: View {
                     } else if s == nil { s = full }
                     modelProgress.report(generation, full.error == nil ? nil : "Couldn’t refresh data.")
                 } else { modelProgress.report(generation, "Analysis paused") }
-                isRefreshingSummary = false
             }
+            #if TORCH
+            // The symptom radar is the slowest model; the rest is already on screen.
+            if pending.illness, generation == loadGeneration, !run.isCancelled, WorkCoordinator.shared.available, full.error == nil {
+                modelProgress.report(generation, "Analyzing symptom radar")
+                let withIllness: Summary = await withCheckedContinuation { completion in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        completion.resume(returning: run.perform { Core.withIllness(full, progress: progress) })
+                    }
+                }
+                if generation == loadGeneration, !run.isCancelled, WorkCoordinator.shared.available {
+                    s = withIllness
+                    SummaryCache.save(withIllness)
+                }
+                if generation == loadGeneration { modelProgress.report(generation, nil) }
+            }
+            #endif
+            if generation == loadGeneration { isRefreshingSummary = false }
             dlog("models", "end run=\(run.id) cancelled=\(run.isCancelled) duration=\(Int(ProcessInfo.processInfo.systemUptime - started))s")
             IdleTimerLock.release("models")
             WorkCoordinator.shared.finishAnalysis(run)
@@ -1037,179 +1078,134 @@ struct RootView: View {
         }
     }
 
-    @ViewBuilder private func content(_ s: Summary) -> some View {
-        let latestTemp = s.nights.first { $0.skin_temp != nil }
-        let latestOxygen = s.nights.first { $0.spo2_mean != nil }
-        let recentTemperatures = Array(s.nights.compactMap(\.skin_temp).prefix(14).reversed())
-        let recentOxygen = Array(s.nights.compactMap(\.spo2_mean).prefix(14).reversed())
-        let latestHR = s.vitals.hr
-        ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("Open Oura").font(Obs.serif(22)).foregroundStyle(Obs.ink)
-                        Text("beta").font(Obs.mono(9, .medium)).tracking(1.2).foregroundStyle(Obs.muted)
-                        Spacer()
-                        Button { showProfile = true } label: {
-                            Image(systemName: "person.crop.circle")
-                                .font(.system(size: 17)).foregroundStyle(Obs.ink2)
-                        }
-                        SyncIndicatorButton(ring: ring) { showSync = true }
-                    }
+    private func shownDay(_ s: Summary) -> String {
+        homeDay.flatMap { s.days.contains($0) ? $0 : nil }
+            ?? s.days.first { s.scores[$0].map { $0.sleep != nil || $0.readiness != nil || $0.activity != nil } ?? false }
+            ?? s.days.first ?? ""
+    }
 
-                    if let err = s.error {
-                        ObsTag("no data"); Text(err).font(Obs.mono(13)).foregroundStyle(Obs.bad)
-                    } else {
-                        // digest headline
-                        if let d = s.digest {
-                            Text(d).font(Obs.prose(16, .regular)).foregroundStyle(Obs.ink)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
+    private func open(_ route: Route) {
+        switch route {
+        case .score(let k): scoreSheet = k
+        case .metric(let m): metricSheet = m
+        case .vital(let v): vital = v
+        case .debt: showSleepDebt = true
+        case .radar: showRadar = true
+        case .allDays: showAllDays = true
+        case .activities: showActivities = true
+        case .day(let d, let sleep): report = ReportSel(day: d, sleep: sleep)
+        }
+    }
 
-                        // today — last night's sleep + that day's activity as one unit, the
-                        // hero of the home; tap the sleep or the activity region for its report.
-                        if let day = s.days.first {
-                            HStack(spacing: 9) {
-                                ObsTag(displayedDayLabel(day), icon: "sun.max.fill")
-                                    .fixedSize()
-                                if displayedDayLabel(day) != day {
-                                    Text(String(day.suffix(5))).font(Obs.mono(11)).foregroundStyle(Obs.muted)
-                                }
-                                if ring.busy || isRefreshingSummary {
-                                    ProgressView().controlSize(.mini).scaleEffect(0.68).tint(Obs.ink)
-                                    // one line next to the tag: short labels, no wrapping
-                                    Text((ring.busy ? "Syncing ring" : (modelProgress.label ?? "Analyzing saved data")).lowercased()).font(Obs.mono(9, .medium))
-                                        .tracking(0.6).foregroundStyle(Obs.ink2)
-                                        .lineLimit(1).minimumScaleFactor(0.8).truncationMode(.tail)
-                                }
-                            }
-                            .animation(.easeInOut(duration: 0.2), value: ring.busy || isRefreshingSummary)
-                            TodayCard(s: s, day: day,
-                                      onSleep: { report = ReportSel(day: day, sleep: true) },
-                                      onActivity: { report = ReportSel(day: day, sleep: false) })
-                        }
+    /// Opens a day's report from inside a sheet: close the sheet first so the full-screen
+    /// cover is not presented over a sheet that is still dismissing.
+    private func openReport(_ day: String) {
+        scoreSheet = nil; metricSheet = nil; showSleepDebt = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { report = ReportSel(day: day, sleep: true) }
+    }
 
-                        // vitals
-                        ObsRule()
-                        ObsTag("vitals", icon: "waveform.path.ecg")
-                        HStack(alignment: .top, spacing: 24) {
-                            VitalCell(tag: "nightly hrv", value: f(s.vitals.hrv.latest), unit: "ms",
-                                      delta: s.vitals.hrv.delta_pct, series: s.vitals.hrv.series,
-                                      baseline: s.vitals.hrv.baseline,
-                                      action: { vital = .hrv })
-                            VitalCell(tag: "heart rate",
-                                      value: f(latestHR?.latest ?? s.vitals.rhr.latest), unit: "bpm",
-                                      series: s.vitals.rhr.series,
-                                      baseline: s.vitals.rhr.baseline,
-                                      deltaGoodWhenPositive: false,
-                                      detail: latestHR.map { latestLabel(date: $0.date, time: $0.hm) }
-                                          ?? "nightly minimum",
-                                      action: { vital = .heartRate })
-                        }
-                        HStack(alignment: .top, spacing: 24) {
-                            VitalCell(tag: "skin temp",
-                                      value: latestTemp?.skin_temp.map { String(format: "%.1f", $0) } ?? "–",
-                                      unit: "°c",
-                                      series: recentTemperatures,
-                                      detail: latestTemp.map { latestLabel(date: s.wakeYmd($0)) },
-                                      action: { vital = .temp })
-                            VitalCell(tag: "blood o₂", value: f(latestOxygen?.spo2_mean), unit: "%",
-                                      series: recentOxygen,
-                                      detail: latestOxygen.map { latestLabel(date: s.wakeYmd($0)) },
-                                      action: { vital = .oxygen })
-                        }
+    /// Screen title with the ring, sync and profile controls; sync progress sits under it.
+    private func topBar(_ title: String, _ s: Summary) -> AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 12) {
+                Text(title).font(Obs.serif(28)).foregroundStyle(Obs.ink)
+                Spacer()
+                Button { showAllDays = true } label: {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 16)).foregroundStyle(Obs.ink2)
+                        .frame(width: 31, height: 31)
+                }
+                .accessibilityLabel("History")
+                Button { showProfile = true } label: {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 17)).foregroundStyle(Obs.ink2)
+                        .frame(width: 31, height: 31)
+                }
+                RingBatteryButton(pct: ring.info?.batteryPct ?? s.device?.battery_pct) { showSync = true }
+            }
+            SyncStatusLine(ring: ring, analyzing: isRefreshingSummary && !modelProgress.radarActive,
+                           label: modelProgress.label)
+        }
+        .animation(.easeInOut(duration: 0.2), value: ring.busy || isRefreshingSummary))
+    }
 
-                        if let debt = s.sleepDebt {
-                            ObsRule()
-                            SleepDebtCard(debt: debt) { showSleepDebt = true }
-                        }
-
-                        // Torch build: Oura's own illness model. Otherwise the shared
-                        // core's baseline comparison over the same four biomarkers.
-                        if let radar = s.symptomRadar, radar.available {
-                            ObsRule()
-                            IllnessCard(illness: radar)
-                        }
-
-                        // Cardiovascular estimates belong together: vascular age/PWV
-                        // from raw PPG plus the demographic VO₂max estimate.
-                        if s.cardio?.vascular_age != nil || s.fitness?.vo2max != nil {
-                            ObsRule()
-                            ObsTag("cardiovascular", icon: "heart.fill")
-                            VStack(spacing: 12) {
-                                if let cv = s.cardio, let va = cv.vascular_age {
-                                    ObsStat(label: "vascular age", value: String(format: "%.1f yr", va))
-                                    if let ca = cv.chronological_age { ObsStat(label: "vs your age", value: relAge(va - ca)) }
-                                    if let pwv = cv.pwv_ms { ObsStat(label: "pulse-wave velocity", value: String(format: "%.2f m/s", pwv)) }
-                                    if let seg = cv.segments { ObsStat(label: "segments analysed", value: "\(seg)") }
-                                }
-                                if let vo = s.fitness?.vo2max {
-                                    ObsStat(label: "vo₂max estimate", value: String(format: "%.1f ml/kg/min", vo))
-                                }
-                            }
-                        }
-
-                        // browse every day → per-day detail (sleep + activity)
-                        if !s.days.isEmpty {
-                            ObsRule()
-                            Button { showAllDays = true } label: {
-                                HStack {
-                                    ObsTag("all days", icon: "calendar")
-                                    Text("\(s.days.count)").font(Obs.mono(11)).foregroundStyle(Obs.muted)
-                                    Spacer()
-                                    Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
-                                }.contentShape(Rectangle())
-                            }.buttonStyle(.plain)
-                        }
-
-                        // nights the shared brain withheld because the ring clock could not
-                        // be resolved unambiguously (missing anchor, accelerated counter, or
-                        // multi-reboot stall)
-                        if let warnings = s.clock?.warnings, !warnings.isEmpty {
-                            ObsTag("ring clock", icon: "clock.badge.exclamationmark")
-                            VStack(alignment: .leading, spacing: 6) {
-                                ForEach(warnings, id: \.self) { w in
-                                    Text("• \(w)").font(Obs.mono(11)).foregroundStyle(Obs.bad)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
-                        }
-
-                        // on-device model failures (empty unless a torch model genuinely
-                        // failed — a missing bundle or an inference error, not just no data)
-                        if !s.modelErrors.isEmpty {
-                            ObsTag("on-device models", icon: "exclamationmark.triangle")
-                            VStack(alignment: .leading, spacing: 6) {
-                                ForEach(s.modelErrors, id: \.self) { e in
-                                    Text("• \(e)").font(Obs.mono(11)).foregroundStyle(Obs.bad)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
-                        }
-
-                        // device & data health
-                        ObsRule()
-                        ObsTag("device", icon: "cpu")
-                        VStack(spacing: 10) {
-                            ObsStat(label: "serial", value: s.device?.serial ?? "–")
-                            ObsStat(label: "firmware", value: s.device?.firmware ?? "–")
-                            ObsStat(label: "battery",
-                                    value: s.device?.battery_pct.map { "\($0)%" } ?? "–",
-                                    accent: (s.device?.battery_pct ?? 100) < 20 ? Obs.bad : Obs.ink)
-                            if let raw = s.device?.raw_events ?? s.device?.total_events {
-                                ObsStat(label: "events",
-                                        value: s.device?.decoded_events.map { "\(raw) raw · \($0) decoded" } ?? "\(raw)")
-                            }
-                            ObsStat(label: "synced",
-                                    value: s.device.flatMap { d in d.synced.map { "\($0) \(d.synced_hm ?? "")" } } ?? "–")
-                        }
-                        BuildStamp(prefix: s.device?.days_of_data.map { span in
-                            let obs = s.device?.observed_days.map { " (\($0) observed)" } ?? ""
-                            return "\(String(format: "%.0f", span)) days\(obs) · \(s.device?.nights ?? s.nights.count) nights"
-                        })
+    /// Ring-clock warnings and model failures, the only prose left on Today.
+    private func dataNotes(_ s: Summary) -> AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 14) {
+            if let warnings = s.clock?.warnings, !warnings.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    SectionLabel(title: "Ring clock", icon: "clock.badge.exclamationmark")
+                    ForEach(warnings, id: \.self) { w in
+                        Text("• \(w)").font(Obs.sans(11)).foregroundStyle(Obs.bad)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .padding(.horizontal, 24).padding(.top, 12).padding(.bottom, 24)
             }
+            if !s.modelErrors.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    SectionLabel(title: "On-device models", icon: "exclamationmark.triangle")
+                    ForEach(s.modelErrors, id: \.self) { e in
+                        Text("• \(e)").font(Obs.sans(11)).foregroundStyle(Obs.bad)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        })
+    }
+
+    @ViewBuilder private func content(_ s: Summary) -> some View {
+        if let err = s.error {
+            VStack(alignment: .leading, spacing: 12) {
+                topBar("Open Oura", s)
+                SectionLabel(title: "No data")
+                Text(err).font(Obs.sans(13)).foregroundStyle(Obs.bad)
+                Spacer()
+            }
+            .padding(.horizontal, 20).padding(.top, 12)
+        } else {
+            let day = shownDay(s)
+            TabView(selection: $tab) {
+                TodayTab(s: s, day: day, live: live, ring: ring, kind: $scoreKind, onSelectDay: { homeDay = $0 }, open: open,
+                         header: topBar("Today", s), notes: dataNotes(s))
+                    .tabItem { Label("Today", systemImage: "sun.max.fill") }.tag(AppTab.today)
+                VitalsTab(s: s, day: day, kind: $scoreKind, onSelectDay: { homeDay = $0 }, open: open, header: topBar("Vitals", s))
+                    .tabItem { Label("Vitals", systemImage: "waveform.path.ecg") }.tag(AppTab.vitals)
+                TrendsTab(s: s, day: day, open: open, header: topBar("Trends", s))
+                    .tabItem { Label("Trends", systemImage: "chart.line.uptrend.xyaxis") }.tag(AppTab.trends)
+            }
+            .tint(Obs.ink)
+        }
+    }
+}
+
+/// Battery level as the border of a ring: green from 30%, yellow below 30%, red below 15%.
+struct RingBatteryButton: View {
+    let pct: Int?
+    let action: () -> Void
+
+    private static func color(_ pct: Int?) -> Color {
+        guard let pct else { return Obs.muted }
+        if pct < 15 { return Obs.alert }
+        if pct < 30 { return Obs.caution }
+        return Obs.good
+    }
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle().stroke(Obs.rule, lineWidth: 2.5)
+                Circle()
+                    .trim(from: 0, to: CGFloat(min(max(pct ?? 0, 0), 100)) / 100)
+                    .stroke(Self.color(pct), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Circle().stroke(Obs.ink2, lineWidth: 1.4).frame(width: 11, height: 11)
+            }
+            .frame(width: 24, height: 24)
+            .frame(width: 31, height: 31)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(pct.map { "Ring battery \($0) percent" } ?? "Your ring")
+        .accessibilityHint("Opens your ring: battery, sync and diagnostics")
     }
 }
 
@@ -1257,7 +1253,7 @@ struct BuildStamp: View {
 
     var body: some View {
         Text(line)
-            .font(Obs.mono(10))
+            .font(Obs.sans(11))
             .foregroundStyle(Obs.muted)
             .multilineTextAlignment(.center)
             .fixedSize(horizontal: false, vertical: true)

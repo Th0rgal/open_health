@@ -94,8 +94,9 @@ enum IllnessModel {
 
     static func run(profile: Profile?, events: EventStore.Events,
                     clock: EventStore.RingClock, knownDigest: String? = nil) -> (result: IllnessResult?, error: String?) {
-        guard let modelPath = Bundle.main.path(forResource: "illness_detection_0_5_1", ofType: "ptl")
-        else { return (nil, "illness model file missing from the app bundle") }
+        // not shipped in every build: the model-free Symptom Radar stays
+        guard let modelPath = ModelFiles.bundled("illness_detection_0_5_1", "ptl")
+        else { return (nil, nil) }
         guard !events.isEmpty else { return (nil, nil) }
         let cacheKey = ModelCacheStore.globalKey(profile: profile)
         let storeDigest = knownDigest ?? events.digest()

@@ -198,7 +198,7 @@ struct RawDataView: View {
 
     private var kindList: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("event types").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+            Text("event types").font(Obs.sans(11)).foregroundStyle(Obs.ink2)
             ForEach(kinds) { k in
                 Button {
                     filter = (filter == k.name) ? "" : k.name
@@ -206,11 +206,11 @@ struct RawDataView: View {
                 } label: {
                     HStack {
                         Text(k.name)
-                            .font(Obs.mono(12))
+                            .font(Obs.sans(12))
                             .foregroundStyle(filter == k.name ? Obs.ink : Obs.ink2)
                         Spacer()
                         Text(k.decoded == k.total ? "\(k.total)" : "\(k.decoded)/\(k.total)")
-                            .font(Obs.mono(12)).foregroundStyle(Obs.muted)
+                            .font(Obs.sans(12)).foregroundStyle(Obs.muted)
                     }
                     .frame(minHeight: 36)
                 }
@@ -226,7 +226,7 @@ struct RawDataView: View {
     private var chart: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("chart").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                Text("chart").font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                 if loadingEvents { ProgressView().controlSize(.mini).tint(Obs.muted) }
                 Spacer()
                 if !fields.isEmpty {
@@ -236,7 +236,7 @@ struct RawDataView: View {
                         }
                     } label: {
                         Text(field ?? "pick a field")
-                            .font(Obs.mono(11)).foregroundStyle(Obs.ink)
+                            .font(Obs.sans(11)).foregroundStyle(Obs.ink)
                     }
                 }
             }
@@ -251,11 +251,11 @@ struct RawDataView: View {
                     .frame(height: 180)
                 if let first = points.first, let last = points.last {
                     HStack {
-                        Text(Self.stamp(first.t)).font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                        Text(Self.stamp(first.t)).font(Obs.sans(11)).foregroundStyle(Obs.muted)
                         Spacer()
-                        Text("\(points.count) pts").font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                        Text("\(points.count) pts").font(Obs.sans(11)).foregroundStyle(Obs.muted)
                         Spacer()
-                        Text(Self.stamp(last.t)).font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                        Text(Self.stamp(last.t)).font(Obs.sans(11)).foregroundStyle(Obs.muted)
                     }
                 }
             }
@@ -266,18 +266,18 @@ struct RawDataView: View {
     private var eventList: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("newest first · \(events.count) shown")
-                .font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                .font(Obs.sans(11)).foregroundStyle(Obs.ink2)
             ForEach(events.prefix(60)) { e in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text(e.date.map(Self.full) ?? "no time")
-                            .font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                            .font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                         Spacer()
                         Text("tag 0x\(String(e.tag, radix: 16)) · ds \(e.ringTimestamp)")
-                            .font(Obs.mono(9)).foregroundStyle(Obs.muted)
+                            .font(Obs.sans(11)).foregroundStyle(Obs.muted)
                     }
                     Text(e.prettyJSON)
-                        .font(Obs.mono(10)).foregroundStyle(Obs.ink)
+                        .font(Obs.sans(11)).foregroundStyle(Obs.ink)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -368,7 +368,7 @@ struct TimeSeriesChart: View {
 
             for (label, value) in [("\(fmt(y1))", y1), ("\(fmt(y0))", y0)] {
                 let y = inset + h * (1 - CGFloat((value - y0) / ySpan))
-                ctx.draw(Text(label).font(Obs.mono(9)).foregroundColor(Obs.muted),
+                ctx.draw(Text(label).font(Obs.sans(11)).foregroundColor(Obs.muted),
                          at: CGPoint(x: inset + 2, y: max(8, min(size.height - 8, y))),
                          anchor: .leading)
             }

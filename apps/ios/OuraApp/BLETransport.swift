@@ -32,6 +32,18 @@ protocol RingTransport: AnyObject {
     var notifications: AsyncStream<Data> { get }
 }
 
+/// Whether the app is in the background, readable from any queue. iOS ignores an
+/// unfiltered scan while backgrounded, so the transport switches to a service-filtered
+/// one; `RingSync` updates this from the app lifecycle.
+enum BLEEnvironment {
+    private static let lock = NSLock()
+    private static var _background = false
+    static var isBackground: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _background }
+        set { lock.lock(); _background = newValue; lock.unlock() }
+    }
+}
+
 enum BLEError: Error, CustomStringConvertible {
     case poweredOff, notFound, noWriteCharacteristic, disconnected, busy
     case ringNotAdvertising(otherDevices: Int)
@@ -74,6 +86,11 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     private let preferredPeripheralID: UUID?
     private let excludedPeripheralIDs: Set<UUID>
     private var scanStartedAt: Date?
+    // Reconnecting to the remembered ring by identifier skips the scan, which a worn
+    // ring answers slowly and which iOS restricts in the background.
+    private var directTimeout: DispatchWorkItem?
+    private var gattConnected = false
+    private static let directConnectWindow: TimeInterval = 12
 
 
     private var notifyContinuation: AsyncStream<Data>.Continuation?
@@ -90,6 +107,9 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     private var historyBuffer = Data()
     private var historyFrames = 0
     private var historyBytes = 0
+    // arrival timing of the raw notifications in the current history burst (diagnostics)
+    private var burstTimes: [Double] = []
+    private var burstSizes: [Int] = []
     private static let historyFlushBytes = 32 * 1024
 
     private var connectCont: CheckedContinuation<Void, Error>?
@@ -152,7 +172,7 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
                     }
                     connectTimeout = work
                     bleQueue.asyncAfter(deadline: .now() + timeout, execute: work)
-                    if central.state == .poweredOn { startScan() }
+                    if central.state == .poweredOn { beginDiscovery() }
                     else if [.poweredOff, .unauthorized, .unsupported].contains(central.state) {
                         finishConnect(.failure(BLEError.poweredOff))
                     }
@@ -173,6 +193,38 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         }
     }
 
+    /// Connect straight to the remembered ring when iOS still knows it; otherwise scan.
+    /// If the direct connection has not completed within the window (ring asleep or
+    /// the identifier stale), fall back to scanning for the rest of the budget.
+    private func beginDiscovery() {
+        guard !closed, peripheral == nil else { return }
+        if let id = preferredPeripheralID, !excludedPeripheralIDs.contains(id),
+           let known = central.retrievePeripherals(withIdentifiers: [id]).first {
+            dlog("ble", "reconnecting to saved ring id=\(id.uuidString.suffix(12)) without scanning")
+            lock.lock()
+            stage = "connecting to the saved ring"
+            _connectedPeripheralID = id
+            lock.unlock()
+            peripheral = known
+            known.delegate = self
+            central.connect(known, options: nil)
+            let work = DispatchWorkItem { [weak self] in self?.directConnectExpired(known) }
+            directTimeout = work
+            bleQueue.asyncAfter(deadline: .now() + Self.directConnectWindow, execute: work)
+            return
+        }
+        startScan()
+    }
+
+    private func directConnectExpired(_ known: CBPeripheral) {
+        guard !closed, connectCont != nil, peripheral === known, !gattConnected else { return }
+        dlog("ble", "saved ring did not answer in \(Int(Self.directConnectWindow))s; scanning instead")
+        central.cancelPeripheralConnection(known)
+        peripheral = nil
+        lock.lock(); _connectedPeripheralID = nil; lock.unlock()
+        startScan()
+    }
+
     private func startScan() {
         scanStartedAt = Date()
         lock.lock(); stage = "scanning; no ring advertisement seen yet"; lock.unlock()
@@ -185,9 +237,14 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         // 128-bit service UUID + manufacturer data), so its name only arrives in the
         // scan response, which a worn ring in low-power mode answers lazily. Without
         // duplicates iOS may coalesce the ring into a single early, name-less report.
-        central.scanForPeripherals(
-            withServices: nil,
-            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+        // In the background iOS requires a service filter and coalesces duplicates.
+        if BLEEnvironment.isBackground {
+            central.scanForPeripherals(withServices: [RingUUID.service], options: nil)
+        } else {
+            central.scanForPeripherals(
+                withServices: nil,
+                options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+        }
     }
 
     /// Finish the inbound frame stream so a Rust drain blocked on `recv` returns at once
@@ -198,6 +255,7 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     private func closeOnQueue() {
         guard !closed else { return }
         closed = true
+        directTimeout?.cancel(); directTimeout = nil
         central.stopScan()
         finishWrite(.failure(BLEError.disconnected))
         finishConnect(.failure(BLEError.disconnected))
@@ -236,7 +294,7 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         switch central.state {
         case .poweredOn:
             poweredOn = true
-            if connectCont != nil { startScan() }
+            if connectCont != nil { beginDiscovery() }
         case .poweredOff, .unauthorized, .unsupported:
             finishConnect(.failure(BLEError.poweredOff))
             closeOnQueue()
@@ -328,6 +386,8 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         guard !closed, self.peripheral === peripheral else { return }
+        gattConnected = true
+        directTimeout?.cancel(); directTimeout = nil
         let mtu = peripheral.maximumWriteValueLength(for: .withResponse)
         dlog("ble", "GATT connected (maxWrite=\(mtu)B); discovering the Oura service")
         lock.lock(); stage = "discovering services/characteristics"; lock.unlock()
@@ -437,6 +497,8 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             return
         }
         if Self.isHistoryPayload(v) {
+            burstTimes.append(ProcessInfo.processInfo.systemUptime)
+            burstSizes.append(v.count)
             historyBuffer.append(v)
             historyFrames += 1
             historyBytes += v.count
@@ -451,6 +513,7 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         // compact diagnostic line instead of tens of thousands of raw payload lines.
         flushHistoryPayload()
         if historyFrames > 0 {
+            logBurst()
             dlog("recv", "history payload omitted; \(historyFrames) BLE frames, \(historyBytes)B")
             historyFrames = 0
             historyBytes = 0
@@ -477,6 +540,19 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
             offset = end
         }
         return offset > 0
+    }
+
+    /// One line per history burst: how the ring paced its notifications.
+    private func logBurst() {
+        guard burstTimes.count > 1 else { burstTimes.removeAll(); burstSizes.removeAll(); return }
+        let gaps = zip(burstTimes.dropFirst(), burstTimes).map { ($0 - $1) * 1000 }
+        let sorted = gaps.sorted()
+        let span = (burstTimes.last! - burstTimes.first!) * 1000
+        let sizes = burstSizes
+        dlog("burst", String(format: "n=%d span=%.0fms gap p10=%.0f p50=%.0f p90=%.0f max=%.0fms size min=%d max=%d bytes=%d",
+                             sizes.count, span, sorted[sorted.count / 10], sorted[sorted.count / 2],
+                             sorted[sorted.count * 9 / 10], sorted.last!, sizes.min()!, sizes.max()!, sizes.reduce(0, +)))
+        burstTimes.removeAll(keepingCapacity: true); burstSizes.removeAll(keepingCapacity: true)
     }
 
     private func deliver(_ data: Data) {

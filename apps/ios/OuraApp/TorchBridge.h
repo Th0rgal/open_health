@@ -22,7 +22,7 @@ int oura_nssa(const char *model_path,
 // sleepstaging_2_6_0_classifier.bin, see tools/extract_nssa_classifier.py).
 void oura_nssa_set_classifier_path(const char *path);
 
-// Cardiovascular age (cva_2_1_0): forward(ppg [n_segs×1500] f32, demo [1×5] f32) →
+// Cardiovascular age (cva_2_1_5): forward(ppg [n_segs×1500] f32, demo [1×5] f32) →
 // (vascular_age, …, pwv, …). `ppg` is row-major; `demo` is [sex(-1/0/1), height_m,
 // age, ring, weight]. Writes vascular_age + pulse-wave velocity; returns 0 / -1.
 int oura_cva(const char *model_path, const float *ppg, int n_segs, const float *demo,
@@ -41,12 +41,6 @@ int oura_activity(const char *model_path, const float *context, const float *use
                   const float *motion, int n_motion,
                   const float *temp, int n_temp, const float *hr, int n_hr,
                   float threshold, float min_duration, float *out_workouts, int max_rows);
-
-// Decode Ring 5 real-step packets with Oura's steps_motion_decoder. `raw` is
-// N×27 quantized input and timestamps are Unix milliseconds. Returns 3N rows.
-int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
-                    const float *raw, int n_raw, int64_t *out_timestamps_ms,
-                    float *out_features, int max_rows);
 
 // Illness detection ("Symptom Radar", illness_detection_0_5_1). Mirrors
 // tools/run_illness_model.py. `series` is row-major 7×30 (index 0 = today, NaN =

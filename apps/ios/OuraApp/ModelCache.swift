@@ -24,6 +24,8 @@ struct FNV64 {
     mutating func combine(_ x: Double) { combine(x.bitPattern) }
     mutating func combine(_ x: Float) { combine(UInt64(x.bitPattern)) }
     mutating func combine(_ xs: [Float]) { combine(xs.count); for x in xs { combine(x) } }
+    mutating func combine(_ xs: [Int64]) { combine(xs.count); for x in xs { combine(x) } }
+    mutating func combine(_ s: String) { combine(s.utf8.count); for b in s.utf8 { combine(UInt64(b)) } }
     var hex: String { String(format: "%016llx", value) }
 }
 
@@ -43,7 +45,8 @@ struct FingerprintedEntry<Value: Codable>: Codable {
 struct StagedNightEntry: Codable {
     var fp: String
     var stages: [Int]
-    /// "nssa" (Oura's sleepstaging model) or "signals" (our estimate when NSSA cannot run).
+    /// The stager that produced the night: "nssa" (Oura's sleepstaging model), "xgb" (the built-in
+    /// stager) or "signals" (our estimate when the stager cannot run).
     var source: String? = nil
     /// Wall-clock start (unix s) of the first NSSA epoch (floor30 of the bedtime start).
     var t0Unix: Double? = nil
@@ -92,11 +95,15 @@ enum ModelCacheStore {
     // ambiguous multi-reboot stall intervals.
     // 10: Oura Gen 4 0x75 sleep_temp_event, 0x60/0x80 IBI deduplication, and N3 deep
     // sleep recovery.
-    static let version = 11
+    // 17: NSSA and the built-in stager keep separate staging caches; entries carry their source.
+    static let version = 17
     static let cvaFile = "cva-model-cache.json"
     static let illnessFile = "illness-model-cache.json"
     static let activityFile = "activity-model-cache.json"
-    static let stagingFile = "sleep-staging-cache.json"
+    /// One staging cache per sleep stager, so a switch never reuses the other stager's hypnograms.
+    static func stagingFile(for stager: String) -> String {
+        stager == "official" ? "sleep-staging-cache.json" : "sleep-staging-xgb-cache.json"
+    }
     /// Generations kept besides the current one (see `ModelCacheFile.previous`).
     static let previousGenerations = 2
     private static let queue = DispatchQueue(label: "md.thomas.openoura.model-cache", qos: .utility)
@@ -179,7 +186,8 @@ enum ModelCacheStore {
             try? FileManager.default.removeItem(at: url(cvaFile))
             try? FileManager.default.removeItem(at: url(illnessFile))
             try? FileManager.default.removeItem(at: url(activityFile))
-            try? FileManager.default.removeItem(at: url(stagingFile))
+            try? FileManager.default.removeItem(at: url(stagingFile(for: "official")))
+            try? FileManager.default.removeItem(at: url(stagingFile(for: "xgb")))
         }
     }
 

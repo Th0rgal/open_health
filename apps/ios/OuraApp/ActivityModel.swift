@@ -1,9 +1,8 @@
 #if TORCH
 import Foundation
 
-/// Android-parity runner for Oura's automatic_activity_detection 3.1.11 model.
-/// The official app evaluates each local day separately and feeds the real decoded
-/// step-motion channel. Both details materially affect the predicted sport.
+/// Runner for the activity model. It evaluates each local day separately and feeds the
+/// decoded step-motion channel; both affect the predicted sport.
 enum ActivityModel {
     private static let behavior: [Int: String] = [
         -1: "nothing", 0: "–", 1: "badminton", 2: "boxing", 3: "cross-country skiing",
@@ -49,7 +48,7 @@ enum ActivityModel {
     /// Bumped whenever the per-day preprocessing (dedup, placeholders, reject rule)
     /// changes, so cached results — cached failures above all — are recomputed once
     /// instead of being trusted for inputs the new pipeline would build differently.
-    private static let pipelineVersion = 2
+    private static let pipelineVersion = 4
 
     /// The last complete pass's result when the store is unchanged since (same rows,
     /// same clock anchors) — no event read needed. `storeDigest` is `Events.digest()`.
@@ -71,8 +70,9 @@ enum ActivityModel {
                     knownDigest: String? = nil,
                     progress: @escaping @Sendable (String) -> Void = { _ in },
                     inputsSink: (([String: Any]) -> Void)? = nil) -> (sessions: [WorkoutSession], error: String?) {
-        guard let aadPath = Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl")
-        else { return ([], "activity model file missing from the app bundle") }
+        // not shipped in every build: activity detection is then off, not an error
+        guard let aadPath = ModelFiles.bundled("automatic_activity_detection_3_1_15", "ptl")
+        else { return ([], nil) }
 
         guard !events.isEmpty else { return ([], onlyDay == nil ? nil : "No activity data is saved for this day.") }
         let globalKey = ModelCacheStore.globalKey(profile: profile)
@@ -136,7 +136,7 @@ enum ActivityModel {
             return ([], onlyDay == nil ? nil : "No activity data is saved for this day.")
         }
 
-        let stepPackets = collectStepPackets(events: events, clock: clock)
+        let stepPackets = loadStepRows()
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         // Newest first: today's card is the one the user is waiting on, and a
@@ -156,7 +156,7 @@ enum ActivityModel {
             func rowsOfDay(_ rows: [TimedRow]) -> [TimedRow] {
                 rows.filter { $0.unixMinute >= lo && $0.unixMinute < hi }.sorted { $0.unixMinute < $1.unixMinute }
             }
-            // The ring may resend a MET minute; Android's Realm series keeps one value per
+            // The ring may resend a MET minute; the stored series keeps one value per
             // timestamp (last write wins). Duplicates make the model's resampler throw.
             var metByMinute: [Double: TimedRow] = [:]
             for row in rowsOfDay(met) { metByMinute[row.unixMinute.rounded()] = row }
@@ -250,7 +250,12 @@ enum ActivityModel {
             progress(onlyDay != nil ? "Refreshing activity" : pending.count > 1 ? "Analyzing activity \(index + 1)/\(pending.count)" : "Analyzing activity")
             var daySessions: [WorkoutSession] = []
             var failed = false
-            if isDegenerate(day.inputs) {
+            if day.inputs.rawStep.isEmpty {
+                // The official app does not run the model on a day without step-motion rows
+                // (open_oura docs/automatic-activity-detection.md): the ring only sends them with
+                // REAL_STEPS on. Detections without them are not what the app would show.
+                dlog("models", "activity day=\(day.key) has no step-motion rows, no sessions")
+            } else if isDegenerate(day.inputs) {
                 dlog("models", "activity day=\(day.key) met=\(day.inputs.met.count) motion=\(day.inputs.motion.count) hr=\(day.inputs.hr.count): no valid wear window for the model, no sessions")
             } else {
                 do { daySessions = try runDay(day.inputs, user: user, aadPath: aadPath, nan: nan, inputsSink: inputsSink) }
@@ -334,7 +339,7 @@ enum ActivityModel {
     /// One AAD inference over one local day's inputs.
     private static func runDay(_ inputs: DayInputs, user: [Float], aadPath: String, nan: Float,
                                inputsSink: (([String: Any]) -> Void)? = nil) throws -> [WorkoutSession] {
-        let decoded = try decodeStepPackets(inputs.rawStep)
+        let decoded = inputs.rawStep
         let lo = inputs.dayStart.timeIntervalSince1970 / 60
         let firstMet = inputs.met.flat[0]
         let lastMet = inputs.met.flat[(inputs.met.count - 1) * 2]
@@ -376,85 +381,14 @@ enum ActivityModel {
         return sessions
     }
 
-    private static func collectStepPackets(events: EventStore.Events, clock: EventStore.RingClock) -> [TimedRow] {
-        var secondPackets: [Int64: Data] = [:]
-        for event in events.restricted("tag=127") {
-            guard let body = event.body, body.count == 14,
-                  let seconds = clock.datedUnixSeconds(event.ds, capturedUnix: event.cu) else { continue }
-            let wallDecisecond = Int64((seconds * 10).rounded())
-            secondPackets[wallDecisecond] = body
+    /// The step-motion rows (a row per 10 s of walking-gait features) that the ring's real-step
+    /// records decode to, from open_oura's `steps_motion_decoder`. Empty when the ring has not
+    /// recorded real steps (feature 0x0b off).
+    private static func loadStepRows() -> [TimedRow] {
+        let r = stepMotionRows(dbPath: DB.readPath())
+        return r.timestampsMs.enumerated().map { i, ms in
+            TimedRow(unixMinute: Double(ms) / 60_000, values: Array(r.features[i * 11..<i * 11 + 11]))
         }
-        var rows: [TimedRow] = []
-        for event in events.restricted("tag=126") {
-            guard let first = event.body, first.count == 14,
-                  let seconds = clock.datedUnixSeconds(event.ds, capturedUnix: event.cu) else { continue }
-            let wallDecisecond = Int64((seconds * 10).rounded())
-            guard let second = secondPackets[wallDecisecond + 1] else { continue }
-            let values = unpack(first: [UInt8](first), second: [UInt8](second)).map(Float.init)
-            rows.append(TimedRow(unixMinute: Double(wallDecisecond) / 10.0 / 60.0, values: values))
-        }
-        return rows
-    }
-
-    /// Decode one day's (or a chunked slice of a day's) 27-col gait packets.
-    /// Hiking days can be thousands of pairs; the old path fed the whole history
-    /// as one tensor and jetsam-killed the app.
-    private static func decodeStepPackets(_ packets: [TimedRow]) throws -> [TimedRow] {
-        guard !packets.isEmpty else { return [] }
-        guard let modelPath = Bundle.main.path(forResource: "steps_motion_decoder_2_0_0", ofType: "ptl")
-        else { throw InferenceFailure("step decoder model file is missing from the app bundle") }
-        let chunk = 4096
-        let overlap = 24
-        if packets.count <= chunk {
-            return try runStepDecoder(packets, modelPath: modelPath)
-        }
-        var out: [TimedRow] = []
-        var seen = Set<Int64>()
-        var i = 0
-        while i < packets.count {
-            let end = min(packets.count, i + chunk)
-            try AnalysisRun.check()
-            let decoded = try runStepDecoder(Array(packets[i..<end]), modelPath: modelPath)
-            for row in decoded {
-                let key = Int64((row.unixMinute * 60_000).rounded())
-                if seen.insert(key).inserted { out.append(row) }
-            }
-            if end == packets.count { break }
-            i = end - overlap
-        }
-        return out
-    }
-
-    private static func runStepDecoder(_ packets: [TimedRow], modelPath: String) throws -> [TimedRow] {
-        var timestamps = packets.map { Int64(($0.unixMinute * 60_000).rounded()) }
-        var raw = packets.flatMap(\.values)
-        let capacity = packets.count * 3
-        var outputTimestamps = [Int64](repeating: 0, count: capacity)
-        var outputFeatures = [Float](repeating: 0, count: capacity * 11)
-        let count = oura_stepmotion(modelPath, &timestamps, &raw, Int32(packets.count),
-                                    &outputTimestamps, &outputFeatures, Int32(capacity))
-        guard count >= 0 else { throw InferenceFailure.bridge() }
-        if count == 0 { return [] }
-        let order = [6, 7, 9, 10, 8, 5, 4, 0, 3, 1, 2]
-        return (0..<Int(count)).map { row in
-            let decoded = Array(outputFeatures[row * 11..<row * 11 + 11])
-            return TimedRow(unixMinute: Double(outputTimestamps[row]) / 60_000,
-                            values: order.map { decoded[$0] })
-        }
-    }
-
-    /// Native Ring 5 real-step packet layout, recovered from libringeventparser.so.
-    private static func unpack(first p1: [UInt8], second p2: [UInt8]) -> [Int] {
-        let c = Int(p2[13])
-        return [
-            Int(p2[10]) << 2 | c & 3, Int(p2[11]), Int(p2[12]),
-            Int(p1[0]) << 1 | Int(p1[3]) >> 7, Int(p1[1]) << 1 | c >> 7 & 1,
-            Int(p1[2]) << 1 | c >> 6 & 1, Int(p1[3]) & 127, Int(p1[4]), Int(p1[5]), Int(p1[6]), Int(p1[7]),
-            Int(p1[8]) << 1 | Int(p1[11]) >> 7, Int(p1[9]) << 1 | c >> 5 & 1,
-            Int(p1[10]) << 1 | c >> 4 & 1, Int(p1[11]) & 127, Int(p1[12]), Int(p1[13]), Int(p2[0]), Int(p2[1]),
-            Int(p2[2]) << 1 | Int(p2[5]) >> 7, Int(p2[3]) << 1 | c >> 3 & 1,
-            Int(p2[4]) << 1 | c >> 2 & 1, Int(p2[5]) & 127, Int(p2[6]), Int(p2[7]), Int(p2[8]), Int(p2[9]),
-        ]
     }
 }
 #endif

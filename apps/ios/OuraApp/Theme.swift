@@ -29,6 +29,7 @@ enum Obs {
     static let chart = adaptive(light: 0x6e695f, dark: 0xa8a195)
     static let good = adaptive(light: 0x1baf7a, dark: 0x2ec48c)
     static let bad = adaptive(light: 0xeb6834, dark: 0xe07a4a)
+    static let caution = adaptive(light: 0xd9a93b, dark: 0xe6bd5c)
     static let alert = adaptive(light: 0xc4472c, dark: 0xe06a4f)
 
     // Back-compat names. `teal` is the quiet chart color; `yellow` is a problem.
@@ -70,11 +71,20 @@ enum Obs {
         }
     }
 
+    // Home redesign: a raised surface for cards, one tint per score domain, and a
+    // blue for the "good" band (green stays reserved for "optimal").
+    static let raised = adaptive(light: 0xf2efe6, dark: 0x1d1b19)
+    static let readyTint = adaptive(light: 0x2f9e8f, dark: 0x4fc3b0)
+    static let sleepTint = adaptive(light: 0x5566d6, dark: 0x8b9bf5)
+    static let activityTint = adaptive(light: 0xd9792b, dark: 0xf0a35e)
+    static let goodSoft = adaptive(light: 0x3a8fd0, dark: 0x5fb4ea)
+
     static func serif(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .serif)
     }
-    static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+    /// The interface font: the system sans with fixed-width digits so changing numbers do not shift.
+    static func sans(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight).monospacedDigit()
     }
     static func prose(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight)
@@ -92,9 +102,8 @@ struct ObsTag: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Obs.muted)
             }
-            Text(text.uppercased())
-                .font(Obs.mono(11, .medium))
-                .tracking(1.6)
+            Text(text)
+                .font(Obs.sans(11, .medium))
                 .foregroundStyle(Obs.muted)
         }
     }
@@ -134,9 +143,9 @@ struct ObsStat: View {
     var accent: Color = Obs.ink
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(label).font(Obs.mono(13)).foregroundStyle(Obs.ink2)
+            Text(label).font(Obs.sans(13)).foregroundStyle(Obs.ink2)
             Spacer(minLength: 16)
-            Text(value).font(Obs.mono(15, .medium)).foregroundStyle(accent)
+            Text(value).font(Obs.sans(15, .medium)).foregroundStyle(accent)
                 .monospacedDigit()
         }
     }

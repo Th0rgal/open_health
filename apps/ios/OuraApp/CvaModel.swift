@@ -4,7 +4,7 @@ import Foundation
 
 // On-device cardiovascular age: decode the ring's raw PPG (cva_raw_ppg_data, tag
 // 0x81) the same way the app does, segment it into 1500-sample windows, and run
-// cva_2_1_0 — a faithful port of tools/run_cva_model.py. Returns (vascular_age,
+// cva_2_1_5 — a faithful port of tools/run_cva_model.py. Returns (vascular_age,
 // pwv, segments), or nil when there's no usable PPG.
 enum CvaModel {
     private static let SEG_LEN = 1500
@@ -16,7 +16,7 @@ enum CvaModel {
     // `error` only for genuine failures (model missing / inference failed despite data).
     static func run(sex: String, age: Double, heightM: Double, weightKg: Double, ringSize: Double) -> (result: Result?, error: String?) {
         let dbPath = DB.readPath()
-        guard let modelPath = Bundle.main.path(forResource: "cva_2_1_0", ofType: "ptl")
+        guard let modelPath = Bundle.main.path(forResource: "cva_2_1_5", ofType: "ptl")
         else { return (nil, "cardiovascular model file missing from the app bundle") }
 
         let sexVal: Float = sex.uppercased() == "F" ? -1 : (sex.uppercased() == "O" ? 0 : 1)

@@ -399,6 +399,22 @@ fileprivate class UniffiHandleMap<T> {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
+    typealias FfiType = UInt8
+    typealias SwiftType = UInt8
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt8 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: UInt8, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
     typealias FfiType = UInt16
     typealias SwiftType = UInt16
@@ -473,6 +489,22 @@ fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
 
     public static func write(_ value: Int64, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterFloat: FfiConverterPrimitive {
+    typealias FfiType = Float
+    typealias SwiftType = Float
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Float {
+        return try lift(readFloat(&buf))
+    }
+
+    public static func write(_ value: Float, into buf: inout [UInt8]) {
+        writeFloat(&buf, lower(value))
     }
 }
 
@@ -585,9 +617,38 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol RingSessionProtocol : AnyObject {
     
     /**
+     * Authenticate, set the requested modes (0 off or 1 automatic; anything else is refused
+     * before anything is sent) and return the modes read back.
+     */
+    func applyCaptureSettings(keyHex: String, changes: [CaptureChange]) async throws  -> [CaptureFeature]
+    
+    /**
+     * Measure drain throughput without touching real data: authenticate, then drain
+     * from `days_back` days before the real database's cursor into the scratch database
+     * at `scratch_path` (deleted by the caller). The real database is only read, so its
+     * cursor and events are unaffected. Stops when drained or cancelled.
+     */
+    func benchDrain(realDbPath: String, scratchPath: String, keyHex: String, daysBack: UInt32, bleMode: Int32, progress: SyncProgressListener) async throws  -> SyncReport
+    
+    /**
      * Interrupts even an idle Rust receive; a finished Swift AsyncStream cannot do this.
      */
     func cancel(reason: String) 
+    
+    /**
+     * Authenticate and read the mode of each capture feature. Writes nothing to the ring.
+     */
+    func captureSettings(keyHex: String) async throws  -> [CaptureFeature]
+    
+    /**
+     * Arm a user-started workout (open_oura `OuraClient::exercise_start`).
+     */
+    func exerciseStart(keyHex: String, activityId: UInt16, restingHr: UInt8, maxHr: UInt8) async throws  -> ExerciseStart
+    
+    /**
+     * End a workout and restore the exercise heart rate mode (open_oura `OuraClient::exercise_stop`).
+     */
+    func exerciseStop(keyHex: String, restoreMode: UInt8) async throws  -> UInt8?
     
     /**
      * **DESTRUCTIVE.** Wipe the ring back to factory state: the installed auth key,
@@ -604,6 +665,13 @@ public protocol RingSessionProtocol : AnyObject {
      * rather than resuming the old cursor.
      */
     func factoryReset(keyHex: String, confirmSerial: String) async throws  -> String
+    
+    /**
+     * Authenticate, then stream live heart rate for up to `seconds` (the ring must be
+     * worn). `listener` receives each valid beat. Returns the number of beats. The
+     * ring is put back to automatic measuring on every exit, including `cancel`.
+     */
+    func liveHeartRate(keyHex: String, seconds: UInt32, listener: LiveHrListener) async throws  -> UInt32
     
     /**
      * Pair with a **factory-reset** ring: install a 16-byte app-auth key over the
@@ -700,6 +768,50 @@ public convenience init(writer: BleWriter) {
 
     
     /**
+     * Authenticate, set the requested modes (0 off or 1 automatic; anything else is refused
+     * before anything is sent) and return the modes read back.
+     */
+open func applyCaptureSettings(keyHex: String, changes: [CaptureChange])async throws  -> [CaptureFeature] {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oura_core_fn_method_ringsession_apply_capture_settings(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(keyHex),FfiConverterSequenceTypeCaptureChange.lower(changes)
+                )
+            },
+            pollFunc: ffi_oura_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_oura_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_oura_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeCaptureFeature.lift,
+            errorHandler: FfiConverterTypeSyncError.lift
+        )
+}
+    
+    /**
+     * Measure drain throughput without touching real data: authenticate, then drain
+     * from `days_back` days before the real database's cursor into the scratch database
+     * at `scratch_path` (deleted by the caller). The real database is only read, so its
+     * cursor and events are unaffected. Stops when drained or cancelled.
+     */
+open func benchDrain(realDbPath: String, scratchPath: String, keyHex: String, daysBack: UInt32, bleMode: Int32, progress: SyncProgressListener)async throws  -> SyncReport {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oura_core_fn_method_ringsession_bench_drain(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(realDbPath),FfiConverterString.lower(scratchPath),FfiConverterString.lower(keyHex),FfiConverterUInt32.lower(daysBack),FfiConverterInt32.lower(bleMode),FfiConverterCallbackInterfaceSyncProgressListener.lower(progress)
+                )
+            },
+            pollFunc: ffi_oura_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_oura_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_oura_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncReport.lift,
+            errorHandler: FfiConverterTypeSyncError.lift
+        )
+}
+    
+    /**
      * Interrupts even an idle Rust receive; a finished Swift AsyncStream cannot do this.
      */
 open func cancel(reason: String) {try! rustCall() {
@@ -707,6 +819,66 @@ open func cancel(reason: String) {try! rustCall() {
         FfiConverterString.lower(reason),$0
     )
 }
+}
+    
+    /**
+     * Authenticate and read the mode of each capture feature. Writes nothing to the ring.
+     */
+open func captureSettings(keyHex: String)async throws  -> [CaptureFeature] {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oura_core_fn_method_ringsession_capture_settings(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(keyHex)
+                )
+            },
+            pollFunc: ffi_oura_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_oura_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_oura_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeCaptureFeature.lift,
+            errorHandler: FfiConverterTypeSyncError.lift
+        )
+}
+    
+    /**
+     * Arm a user-started workout (open_oura `OuraClient::exercise_start`).
+     */
+open func exerciseStart(keyHex: String, activityId: UInt16, restingHr: UInt8, maxHr: UInt8)async throws  -> ExerciseStart {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oura_core_fn_method_ringsession_exercise_start(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(keyHex),FfiConverterUInt16.lower(activityId),FfiConverterUInt8.lower(restingHr),FfiConverterUInt8.lower(maxHr)
+                )
+            },
+            pollFunc: ffi_oura_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_oura_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_oura_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeExerciseStart.lift,
+            errorHandler: FfiConverterTypeSyncError.lift
+        )
+}
+    
+    /**
+     * End a workout and restore the exercise heart rate mode (open_oura `OuraClient::exercise_stop`).
+     */
+open func exerciseStop(keyHex: String, restoreMode: UInt8)async throws  -> UInt8? {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oura_core_fn_method_ringsession_exercise_stop(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(keyHex),FfiConverterUInt8.lower(restoreMode)
+                )
+            },
+            pollFunc: ffi_oura_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_oura_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_oura_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionUInt8.lift,
+            errorHandler: FfiConverterTypeSyncError.lift
+        )
 }
     
     /**
@@ -736,6 +908,28 @@ open func factoryReset(keyHex: String, confirmSerial: String)async throws  -> St
             completeFunc: ffi_oura_core_rust_future_complete_rust_buffer,
             freeFunc: ffi_oura_core_rust_future_free_rust_buffer,
             liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeSyncError.lift
+        )
+}
+    
+    /**
+     * Authenticate, then stream live heart rate for up to `seconds` (the ring must be
+     * worn). `listener` receives each valid beat. Returns the number of beats. The
+     * ring is put back to automatic measuring on every exit, including `cancel`.
+     */
+open func liveHeartRate(keyHex: String, seconds: UInt32, listener: LiveHrListener)async throws  -> UInt32 {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oura_core_fn_method_ringsession_live_heart_rate(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(keyHex),FfiConverterUInt32.lower(seconds),FfiConverterCallbackInterfaceLiveHrListener.lower(listener)
+                )
+            },
+            pollFunc: ffi_oura_core_rust_future_poll_u32,
+            completeFunc: ffi_oura_core_rust_future_complete_u32,
+            freeFunc: ffi_oura_core_rust_future_free_u32,
+            liftFunc: FfiConverterUInt32.lift,
             errorHandler: FfiConverterTypeSyncError.lift
         )
 }
@@ -861,6 +1055,366 @@ public func FfiConverterTypeRingSession_lower(_ value: RingSession) -> UnsafeMut
 
 
 /**
+ * The full dashboard summary — the SAME `build_summary()` JSON the web client
+ * renders, computed from the synced SQLite DB. `tz_offset` is hours from UTC.
+ *
+ * Models (sleep hypnogram / cardiovascular age / activity sessions) use a
+ * [`oura_summary::ModelRunner`]; on-device we'll pass the `.ptl` torch runner.
+ * For now [`oura_summary::NoModelRunner`] yields the signal-derived panels
+ * (vitals, cardio trend, activity profile, device & data-health, digest) — most
+ * of the dashboard — with model fields null until the torch runner is wired.
+ *
+ * Returns the summary JSON string, or `{ "error": "…" }`.
+ * The ring's records inside a time window, for plotting an activity afterwards. Read from the
+ * database on the phone; the ring is not contacted. Each series is parallel arrays of unix
+ * seconds and values.
+ */
+public struct ActivitySeriesRecord {
+    public var hrT: [Double]
+    public var hrV: [Double]
+    public var metT: [Double]
+    public var metV: [Double]
+    public var motionT: [Double]
+    public var motionV: [Double]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(hrT: [Double], hrV: [Double], metT: [Double], metV: [Double], motionT: [Double], motionV: [Double]) {
+        self.hrT = hrT
+        self.hrV = hrV
+        self.metT = metT
+        self.metV = metV
+        self.motionT = motionT
+        self.motionV = motionV
+    }
+}
+
+
+
+extension ActivitySeriesRecord: Equatable, Hashable {
+    public static func ==(lhs: ActivitySeriesRecord, rhs: ActivitySeriesRecord) -> Bool {
+        if lhs.hrT != rhs.hrT {
+            return false
+        }
+        if lhs.hrV != rhs.hrV {
+            return false
+        }
+        if lhs.metT != rhs.metT {
+            return false
+        }
+        if lhs.metV != rhs.metV {
+            return false
+        }
+        if lhs.motionT != rhs.motionT {
+            return false
+        }
+        if lhs.motionV != rhs.motionV {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(hrT)
+        hasher.combine(hrV)
+        hasher.combine(metT)
+        hasher.combine(metV)
+        hasher.combine(motionT)
+        hasher.combine(motionV)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeActivitySeriesRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ActivitySeriesRecord {
+        return
+            try ActivitySeriesRecord(
+                hrT: FfiConverterSequenceDouble.read(from: &buf), 
+                hrV: FfiConverterSequenceDouble.read(from: &buf), 
+                metT: FfiConverterSequenceDouble.read(from: &buf), 
+                metV: FfiConverterSequenceDouble.read(from: &buf), 
+                motionT: FfiConverterSequenceDouble.read(from: &buf), 
+                motionV: FfiConverterSequenceDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ActivitySeriesRecord, into buf: inout [UInt8]) {
+        FfiConverterSequenceDouble.write(value.hrT, into: &buf)
+        FfiConverterSequenceDouble.write(value.hrV, into: &buf)
+        FfiConverterSequenceDouble.write(value.metT, into: &buf)
+        FfiConverterSequenceDouble.write(value.metV, into: &buf)
+        FfiConverterSequenceDouble.write(value.motionT, into: &buf)
+        FfiConverterSequenceDouble.write(value.motionV, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeActivitySeriesRecord_lift(_ buf: RustBuffer) throws -> ActivitySeriesRecord {
+    return try FfiConverterTypeActivitySeriesRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeActivitySeriesRecord_lower(_ value: ActivitySeriesRecord) -> RustBuffer {
+    return FfiConverterTypeActivitySeriesRecord.lower(value)
+}
+
+
+/**
+ * A requested mode for one capture feature (0 off, 1 automatic).
+ */
+public struct CaptureChange {
+    public var id: UInt8
+    public var mode: UInt8
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: UInt8, mode: UInt8) {
+        self.id = id
+        self.mode = mode
+    }
+}
+
+
+
+extension CaptureChange: Equatable, Hashable {
+    public static func ==(lhs: CaptureChange, rhs: CaptureChange) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.mode != rhs.mode {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(mode)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCaptureChange: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CaptureChange {
+        return
+            try CaptureChange(
+                id: FfiConverterUInt8.read(from: &buf), 
+                mode: FfiConverterUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CaptureChange, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.id, into: &buf)
+        FfiConverterUInt8.write(value.mode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCaptureChange_lift(_ buf: RustBuffer) throws -> CaptureChange {
+    return try FfiConverterTypeCaptureChange.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCaptureChange_lower(_ value: CaptureChange) -> RustBuffer {
+    return FfiConverterTypeCaptureChange.lower(value)
+}
+
+
+/**
+ * One ring capture feature as the ring reports it.
+ */
+public struct CaptureFeature {
+    public var id: UInt8
+    public var name: String
+    /**
+     * 0 off, 1 automatic, 2 requested, 3 live; `None` when the ring did not answer.
+     */
+    public var mode: UInt8?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: UInt8, name: String, 
+        /**
+         * 0 off, 1 automatic, 2 requested, 3 live; `None` when the ring did not answer.
+         */mode: UInt8?) {
+        self.id = id
+        self.name = name
+        self.mode = mode
+    }
+}
+
+
+
+extension CaptureFeature: Equatable, Hashable {
+    public static func ==(lhs: CaptureFeature, rhs: CaptureFeature) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.mode != rhs.mode {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(name)
+        hasher.combine(mode)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCaptureFeature: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CaptureFeature {
+        return
+            try CaptureFeature(
+                id: FfiConverterUInt8.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                mode: FfiConverterOptionUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CaptureFeature, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionUInt8.write(value.mode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCaptureFeature_lift(_ buf: RustBuffer) throws -> CaptureFeature {
+    return try FfiConverterTypeCaptureFeature.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCaptureFeature_lower(_ value: CaptureFeature) -> RustBuffer {
+    return FfiConverterTypeCaptureFeature.lower(value)
+}
+
+
+/**
+ * What `exercise_start` did to the ring.
+ */
+public struct ExerciseStart {
+    /**
+     * Exercise heart rate mode before the start (0 off, 1 automatic, 2 requested), if readable.
+     */
+    public var previousMode: UInt8?
+    /**
+     * Mode the ring reports after the start (2 when the session is armed).
+     */
+    public var modeAfter: UInt8?
+    /**
+     * Result byte of the parameter write (0 success).
+     */
+    public var parameterResult: UInt8
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Exercise heart rate mode before the start (0 off, 1 automatic, 2 requested), if readable.
+         */previousMode: UInt8?, 
+        /**
+         * Mode the ring reports after the start (2 when the session is armed).
+         */modeAfter: UInt8?, 
+        /**
+         * Result byte of the parameter write (0 success).
+         */parameterResult: UInt8) {
+        self.previousMode = previousMode
+        self.modeAfter = modeAfter
+        self.parameterResult = parameterResult
+    }
+}
+
+
+
+extension ExerciseStart: Equatable, Hashable {
+    public static func ==(lhs: ExerciseStart, rhs: ExerciseStart) -> Bool {
+        if lhs.previousMode != rhs.previousMode {
+            return false
+        }
+        if lhs.modeAfter != rhs.modeAfter {
+            return false
+        }
+        if lhs.parameterResult != rhs.parameterResult {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(previousMode)
+        hasher.combine(modeAfter)
+        hasher.combine(parameterResult)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeExerciseStart: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExerciseStart {
+        return
+            try ExerciseStart(
+                previousMode: FfiConverterOptionUInt8.read(from: &buf), 
+                modeAfter: FfiConverterOptionUInt8.read(from: &buf), 
+                parameterResult: FfiConverterUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ExerciseStart, into buf: inout [UInt8]) {
+        FfiConverterOptionUInt8.write(value.previousMode, into: &buf)
+        FfiConverterOptionUInt8.write(value.modeAfter, into: &buf)
+        FfiConverterUInt8.write(value.parameterResult, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExerciseStart_lift(_ buf: RustBuffer) throws -> ExerciseStart {
+    return try FfiConverterTypeExerciseStart.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExerciseStart_lower(_ value: ExerciseStart) -> RustBuffer {
+    return FfiConverterTypeExerciseStart.lower(value)
+}
+
+
+/**
  * What a successful [`RingSession::pair`] installed.
  *
  * `key_hex` is the ONLY copy of the ring's auth key: the ring stores it but never
@@ -946,6 +1500,297 @@ public func FfiConverterTypePairReport_lift(_ buf: RustBuffer) throws -> PairRep
 #endif
 public func FfiConverterTypePairReport_lower(_ value: PairReport) -> RustBuffer {
     return FfiConverterTypePairReport.lower(value)
+}
+
+
+/**
+ * The stager's inputs for one window, flattened for the torch bridge. `beats` holds
+ * `[ibi, amplitude, valid]` per beat, `acm` six statistics per epoch. `error` is set (and the
+ * arrays are empty) when the window cannot be staged.
+ */
+public struct StagerInputsRecord {
+    public var startMs: Int64
+    public var endMs: Int64
+    public var beatTs: [Int64]
+    public var beats: [Float]
+    public var acmTs: [Int64]
+    public var acm: [Float]
+    public var tempTs: [Int64]
+    public var temp: [Float]
+    public var scalars: [Float]
+    public var rawBeats: UInt32
+    public var error: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(startMs: Int64, endMs: Int64, beatTs: [Int64], beats: [Float], acmTs: [Int64], acm: [Float], tempTs: [Int64], temp: [Float], scalars: [Float], rawBeats: UInt32, error: String?) {
+        self.startMs = startMs
+        self.endMs = endMs
+        self.beatTs = beatTs
+        self.beats = beats
+        self.acmTs = acmTs
+        self.acm = acm
+        self.tempTs = tempTs
+        self.temp = temp
+        self.scalars = scalars
+        self.rawBeats = rawBeats
+        self.error = error
+    }
+}
+
+
+
+extension StagerInputsRecord: Equatable, Hashable {
+    public static func ==(lhs: StagerInputsRecord, rhs: StagerInputsRecord) -> Bool {
+        if lhs.startMs != rhs.startMs {
+            return false
+        }
+        if lhs.endMs != rhs.endMs {
+            return false
+        }
+        if lhs.beatTs != rhs.beatTs {
+            return false
+        }
+        if lhs.beats != rhs.beats {
+            return false
+        }
+        if lhs.acmTs != rhs.acmTs {
+            return false
+        }
+        if lhs.acm != rhs.acm {
+            return false
+        }
+        if lhs.tempTs != rhs.tempTs {
+            return false
+        }
+        if lhs.temp != rhs.temp {
+            return false
+        }
+        if lhs.scalars != rhs.scalars {
+            return false
+        }
+        if lhs.rawBeats != rhs.rawBeats {
+            return false
+        }
+        if lhs.error != rhs.error {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(startMs)
+        hasher.combine(endMs)
+        hasher.combine(beatTs)
+        hasher.combine(beats)
+        hasher.combine(acmTs)
+        hasher.combine(acm)
+        hasher.combine(tempTs)
+        hasher.combine(temp)
+        hasher.combine(scalars)
+        hasher.combine(rawBeats)
+        hasher.combine(error)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStagerInputsRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StagerInputsRecord {
+        return
+            try StagerInputsRecord(
+                startMs: FfiConverterInt64.read(from: &buf), 
+                endMs: FfiConverterInt64.read(from: &buf), 
+                beatTs: FfiConverterSequenceInt64.read(from: &buf), 
+                beats: FfiConverterSequenceFloat.read(from: &buf), 
+                acmTs: FfiConverterSequenceInt64.read(from: &buf), 
+                acm: FfiConverterSequenceFloat.read(from: &buf), 
+                tempTs: FfiConverterSequenceInt64.read(from: &buf), 
+                temp: FfiConverterSequenceFloat.read(from: &buf), 
+                scalars: FfiConverterSequenceFloat.read(from: &buf), 
+                rawBeats: FfiConverterUInt32.read(from: &buf), 
+                error: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StagerInputsRecord, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.startMs, into: &buf)
+        FfiConverterInt64.write(value.endMs, into: &buf)
+        FfiConverterSequenceInt64.write(value.beatTs, into: &buf)
+        FfiConverterSequenceFloat.write(value.beats, into: &buf)
+        FfiConverterSequenceInt64.write(value.acmTs, into: &buf)
+        FfiConverterSequenceFloat.write(value.acm, into: &buf)
+        FfiConverterSequenceInt64.write(value.tempTs, into: &buf)
+        FfiConverterSequenceFloat.write(value.temp, into: &buf)
+        FfiConverterSequenceFloat.write(value.scalars, into: &buf)
+        FfiConverterUInt32.write(value.rawBeats, into: &buf)
+        FfiConverterOptionString.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStagerInputsRecord_lift(_ buf: RustBuffer) throws -> StagerInputsRecord {
+    return try FfiConverterTypeStagerInputsRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStagerInputsRecord_lower(_ value: StagerInputsRecord) -> RustBuffer {
+    return FfiConverterTypeStagerInputsRecord.lower(value)
+}
+
+
+/**
+ * A bedtime window to stage: ring deciseconds and the capture time of its `bedtime_period`.
+ */
+public struct StagerWindow {
+    public var startDs: Int64
+    public var endDs: Int64
+    public var capturedUnix: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(startDs: Int64, endDs: Int64, capturedUnix: Int64) {
+        self.startDs = startDs
+        self.endDs = endDs
+        self.capturedUnix = capturedUnix
+    }
+}
+
+
+
+extension StagerWindow: Equatable, Hashable {
+    public static func ==(lhs: StagerWindow, rhs: StagerWindow) -> Bool {
+        if lhs.startDs != rhs.startDs {
+            return false
+        }
+        if lhs.endDs != rhs.endDs {
+            return false
+        }
+        if lhs.capturedUnix != rhs.capturedUnix {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(startDs)
+        hasher.combine(endDs)
+        hasher.combine(capturedUnix)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStagerWindow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StagerWindow {
+        return
+            try StagerWindow(
+                startDs: FfiConverterInt64.read(from: &buf), 
+                endDs: FfiConverterInt64.read(from: &buf), 
+                capturedUnix: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StagerWindow, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.startDs, into: &buf)
+        FfiConverterInt64.write(value.endDs, into: &buf)
+        FfiConverterInt64.write(value.capturedUnix, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStagerWindow_lift(_ buf: RustBuffer) throws -> StagerWindow {
+    return try FfiConverterTypeStagerWindow.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStagerWindow_lower(_ value: StagerWindow) -> RustBuffer {
+    return FfiConverterTypeStagerWindow.lower(value)
+}
+
+
+/**
+ * The activity model's step-motion input: a row per 10 s, decoded from the stored real-step
+ * records by open_oura's `steps_motion_decoder` (no model file). `features` is `timestamps_ms.len()`
+ * rows of 11 values in the activity model's column order.
+ */
+public struct StepMotionRowsRecord {
+    public var timestampsMs: [Int64]
+    public var features: [Float]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(timestampsMs: [Int64], features: [Float]) {
+        self.timestampsMs = timestampsMs
+        self.features = features
+    }
+}
+
+
+
+extension StepMotionRowsRecord: Equatable, Hashable {
+    public static func ==(lhs: StepMotionRowsRecord, rhs: StepMotionRowsRecord) -> Bool {
+        if lhs.timestampsMs != rhs.timestampsMs {
+            return false
+        }
+        if lhs.features != rhs.features {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(timestampsMs)
+        hasher.combine(features)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStepMotionRowsRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StepMotionRowsRecord {
+        return
+            try StepMotionRowsRecord(
+                timestampsMs: FfiConverterSequenceInt64.read(from: &buf), 
+                features: FfiConverterSequenceFloat.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StepMotionRowsRecord, into buf: inout [UInt8]) {
+        FfiConverterSequenceInt64.write(value.timestampsMs, into: &buf)
+        FfiConverterSequenceFloat.write(value.features, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStepMotionRowsRecord_lift(_ buf: RustBuffer) throws -> StepMotionRowsRecord {
+    return try FfiConverterTypeStepMotionRowsRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStepMotionRowsRecord_lower(_ value: StepMotionRowsRecord) -> RustBuffer {
+    return FfiConverterTypeStepMotionRowsRecord.lower(value)
 }
 
 
@@ -1228,6 +2073,142 @@ extension FfiConverterCallbackInterfaceBleWriter : FfiConverter {
 
 
 /**
+ * Swift implements this to receive live heart-rate beats.
+ */
+public protocol LiveHrListener : AnyObject {
+    
+    /**
+     * `"auth"` while authenticating, `"streaming"` once the ring has been asked for beats.
+     */
+    func onStage(stage: String) 
+    
+    /**
+     * One valid beat: the instantaneous rate and the inter-beat interval it came from.
+     */
+    func onSample(bpm: UInt16, ibiMs: UInt16) 
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceLiveHrListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfaceLiveHrListener = UniffiVTableCallbackInterfaceLiveHrListener(
+        onStage: { (
+            uniffiHandle: UInt64,
+            stage: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceLiveHrListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onStage(
+                     stage: try FfiConverterString.lift(stage)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onSample: { (
+            uniffiHandle: UInt64,
+            bpm: UInt16,
+            ibiMs: UInt16,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceLiveHrListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onSample(
+                     bpm: try FfiConverterUInt16.lift(bpm),
+                     ibiMs: try FfiConverterUInt16.lift(ibiMs)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            let result = try? FfiConverterCallbackInterfaceLiveHrListener.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface LiveHrListener: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitLiveHrListener() {
+    uniffi_oura_core_fn_init_callback_vtable_livehrlistener(&UniffiCallbackInterfaceLiveHrListener.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceLiveHrListener {
+    fileprivate static var handleMap = UniffiHandleMap<LiveHrListener>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceLiveHrListener : FfiConverter {
+    typealias SwiftType = LiveHrListener
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+
+
+/**
  * Swift implements this to receive sync progress. `stage` is a short machine
  * tag ("auth" / "setup" / "sync"); during "sync", `bytes_left` is the ring's
  * own count of event bytes still to transfer (0 = unknown/finished) and
@@ -1236,6 +2217,18 @@ extension FfiConverterCallbackInterfaceBleWriter : FfiConverter {
 public protocol SyncProgressListener : AnyObject {
     
     func onProgress(stage: String, bytesLeft: UInt64, eventsSynced: UInt32) 
+    
+    /**
+     * Ring identity and charge, read right after authentication so the UI can show
+     * them before the history drain starts. `battery_pct` is `None` when the ring
+     * did not answer the battery request.
+     */
+    func onDevice(serial: String, firmware: String, batteryPct: UInt8?) 
+    
+    /**
+     * Free-form diagnostic line (timings, skipped optional steps). Never affects control flow.
+     */
+    func onNote(message: String) 
     
 }
 
@@ -1264,6 +2257,58 @@ fileprivate struct UniffiCallbackInterfaceSyncProgressListener {
                      stage: try FfiConverterString.lift(stage),
                      bytesLeft: try FfiConverterUInt64.lift(bytesLeft),
                      eventsSynced: try FfiConverterUInt32.lift(eventsSynced)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onDevice: { (
+            uniffiHandle: UInt64,
+            serial: RustBuffer,
+            firmware: RustBuffer,
+            batteryPct: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceSyncProgressListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onDevice(
+                     serial: try FfiConverterString.lift(serial),
+                     firmware: try FfiConverterString.lift(firmware),
+                     batteryPct: try FfiConverterOptionUInt8.lift(batteryPct)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onNote: { (
+            uniffiHandle: UInt64,
+            message: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceSyncProgressListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onNote(
+                     message: try FfiConverterString.lift(message)
                 )
             }
 
@@ -1336,6 +2381,30 @@ extension FfiConverterCallbackInterfaceSyncProgressListener : FfiConverter {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt8: FfiConverterRustBuffer {
+    typealias SwiftType = UInt8?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt8.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt8.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -1385,6 +2454,106 @@ fileprivate struct FfiConverterSequenceUInt16: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceInt32: FfiConverterRustBuffer {
+    typealias SwiftType = [Int32]
+
+    public static func write(_ value: [Int32], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterInt32.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Int32] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Int32]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterInt32.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceInt64: FfiConverterRustBuffer {
+    typealias SwiftType = [Int64]
+
+    public static func write(_ value: [Int64], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterInt64.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Int64] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Int64]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterInt64.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceFloat: FfiConverterRustBuffer {
+    typealias SwiftType = [Float]
+
+    public static func write(_ value: [Float], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterFloat.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Float] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Float]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterFloat.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceDouble: FfiConverterRustBuffer {
+    typealias SwiftType = [Double]
+
+    public static func write(_ value: [Double], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterDouble.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Double] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Double]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterDouble.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -1402,6 +2571,106 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCaptureChange: FfiConverterRustBuffer {
+    typealias SwiftType = [CaptureChange]
+
+    public static func write(_ value: [CaptureChange], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCaptureChange.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CaptureChange] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CaptureChange]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCaptureChange.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCaptureFeature: FfiConverterRustBuffer {
+    typealias SwiftType = [CaptureFeature]
+
+    public static func write(_ value: [CaptureFeature], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCaptureFeature.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CaptureFeature] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CaptureFeature]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCaptureFeature.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeStagerInputsRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [StagerInputsRecord]
+
+    public static func write(_ value: [StagerInputsRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeStagerInputsRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [StagerInputsRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [StagerInputsRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeStagerInputsRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeStagerWindow: FfiConverterRustBuffer {
+    typealias SwiftType = [StagerWindow]
+
+    public static func write(_ value: [StagerWindow], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeStagerWindow.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [StagerWindow] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [StagerWindow]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeStagerWindow.read(from: &buf))
         }
         return seq
     }
@@ -1452,6 +2721,15 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
         print("uniffiFutureContinuationCallback invalid handle")
     }
 }
+public func activitySeries(dbPath: String, startUnix: Double, endUnix: Double) -> ActivitySeriesRecord {
+    return try!  FfiConverterTypeActivitySeriesRecord.lift(try! rustCall() {
+    uniffi_oura_core_fn_func_activity_series(
+        FfiConverterString.lower(dbPath),
+        FfiConverterDouble.lower(startUnix),
+        FfiConverterDouble.lower(endUnix),$0
+    )
+})
+}
 /**
  * Record a research "mark now" at the phone's current time; returns that unix time.
  */
@@ -1495,6 +2773,17 @@ public func coreVersion() -> String {
 public func databaseIntegrity(dbPath: String)throws  -> String {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeSyncError.lift) {
     uniffi_oura_core_fn_func_database_integrity(
+        FfiConverterString.lower(dbPath),$0
+    )
+})
+}
+/**
+ * The stager in use for this database: `"official"` or `"xgb"`. Resolves the stored choice and the
+ * registered files, the same as the summary's `sleep_stager.effective`.
+ */
+public func effectiveSleepStager(dbPath: String) -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_oura_core_fn_func_effective_sleep_stager(
         FfiConverterString.lower(dbPath),$0
     )
 })
@@ -1598,17 +2887,84 @@ public func rmssd(ibiMs: [UInt16]) -> Double {
 })
 }
 /**
- * The full dashboard summary — the SAME `build_summary()` JSON the web client
- * renders, computed from the synced SQLite DB. `tz_offset` is hours from UTC.
- *
- * Models (sleep hypnogram / cardiovascular age / activity sessions) use a
- * [`oura_summary::ModelRunner`]; on-device we'll pass the `.ptl` torch runner.
- * For now [`oura_summary::NoModelRunner`] yields the signal-derived panels
- * (vitals, cardio trend, activity profile, device & data-health, digest) — most
- * of the dashboard — with model fields null until the torch runner is wired.
- *
- * Returns the summary JSON string, or `{ "error": "…" }`.
+ * Tells the shared brain which files of the official sleep stager this build has (the TorchScript
+ * graph and the extracted classifier; `None` when the bundle lacks one). Returns whether the
+ * official stager is available.
  */
+public func setOfficialSleepStagerFiles(graphPath: String?, classifierPath: String?) -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_oura_core_fn_func_set_official_sleep_stager_files(
+        FfiConverterOptionString.lower(graphPath),
+        FfiConverterOptionString.lower(classifierPath),$0
+    )
+})
+}
+/**
+ * The sleep stager status as JSON (the summary's `sleep_stager` object): stored choice, stager in
+ * use, and both options with availability and notices.
+ */
+public func sleepStagerStatusJson(dbPath: String) -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_oura_core_fn_func_sleep_stager_status_json(
+        FfiConverterString.lower(dbPath),$0
+    )
+})
+}
+/**
+ * Stages one night with the ported sleep stager (`oura_analysis::ported::sleepstaging`)
+ * from inputs assembled by `stager_inputs_batch`. Returns one label per 30 s epoch (1 deep, 2
+ * light, 3 REM, 4 wake), or an empty list when the stager rejects the night. The classifier is the
+ * one bundled with open_oura's `oura-analysis`.
+ */
+public func stageNightRust(record: StagerInputsRecord) -> [Int32] {
+    return try!  FfiConverterSequenceInt32.lift(try! rustCall() {
+    uniffi_oura_core_fn_func_stage_night_rust(
+        FfiConverterTypeStagerInputsRecord.lower(record),$0
+    )
+})
+}
+/**
+ * Assembles the sleep stager's inputs for every window, reading the event log once. The
+ * result has one record per window, in order.
+ */
+public func stagerInputsBatch(dbPath: String, windows: [StagerWindow], age: Double, heightM: Double, weightKg: Double, sex: String) -> [StagerInputsRecord] {
+    return try!  FfiConverterSequenceTypeStagerInputsRecord.lift(try! rustCall() {
+    uniffi_oura_core_fn_func_stager_inputs_batch(
+        FfiConverterString.lower(dbPath),
+        FfiConverterSequenceTypeStagerWindow.lower(windows),
+        FfiConverterDouble.lower(age),
+        FfiConverterDouble.lower(heightM),
+        FfiConverterDouble.lower(weightKg),
+        FfiConverterString.lower(sex),$0
+    )
+})
+}
+/**
+ * Whether the step counter model is installed, so the profile can offer it as the step source.
+ */
+public func stepCounterAvailable() -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_oura_core_fn_func_step_counter_available($0
+    )
+})
+}
+/**
+ * Installs the step counter weights from a file you supply (not part of the repository). Returns whether the model is now available.
+ */
+public func stepCounterLoad(path: String) -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_oura_core_fn_func_step_counter_load(
+        FfiConverterString.lower(path),$0
+    )
+})
+}
+public func stepMotionRows(dbPath: String) -> StepMotionRowsRecord {
+    return try!  FfiConverterTypeStepMotionRowsRecord.lift(try! rustCall() {
+    uniffi_oura_core_fn_func_step_motion_rows(
+        FfiConverterString.lower(dbPath),$0
+    )
+})
+}
 public func summaryJson(dbPath: String, tzOffset: Int64) -> String {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_oura_core_fn_func_summary_json(
@@ -1633,6 +2989,9 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_oura_core_checksum_func_activity_series() != 53197) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_oura_core_checksum_func_add_research_marker() != 62335) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1643,6 +3002,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_func_database_integrity() != 19533) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_func_effective_sleep_stager() != 40642) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_func_events_json() != 22398) {
@@ -1663,13 +3025,52 @@ private var initializationResult: InitializationResult = {
     if (uniffi_oura_core_checksum_func_rmssd() != 51404) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_oura_core_checksum_func_summary_json() != 27782) {
+    if (uniffi_oura_core_checksum_func_set_official_sleep_stager_files() != 40241) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_func_sleep_stager_status_json() != 33835) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_func_stage_night_rust() != 13870) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_func_stager_inputs_batch() != 44267) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_func_step_counter_available() != 24934) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_func_step_counter_load() != 21094) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_func_step_motion_rows() != 36753) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_func_summary_json() != 60689) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_method_ringsession_apply_capture_settings() != 29888) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_method_ringsession_bench_drain() != 24384) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_method_ringsession_cancel() != 11635) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_oura_core_checksum_method_ringsession_capture_settings() != 18741) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_method_ringsession_exercise_start() != 41185) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_method_ringsession_exercise_stop() != 30772) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_oura_core_checksum_method_ringsession_factory_reset() != 9780) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_method_ringsession_live_heart_rate() != 34199) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_method_ringsession_pair() != 40653) {
@@ -1687,11 +3088,24 @@ private var initializationResult: InitializationResult = {
     if (uniffi_oura_core_checksum_method_blewriter_write() != 56807) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_oura_core_checksum_method_livehrlistener_on_stage() != 50215) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_method_livehrlistener_on_sample() != 2360) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_oura_core_checksum_method_syncprogresslistener_on_progress() != 32063) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_method_syncprogresslistener_on_device() != 41245) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_method_syncprogresslistener_on_note() != 15792) {
         return InitializationResult.apiChecksumMismatch
     }
 
     uniffiCallbackInitBleWriter()
+    uniffiCallbackInitLiveHrListener()
     uniffiCallbackInitSyncProgressListener()
     return InitializationResult.ok
 }()
