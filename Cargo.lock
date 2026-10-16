@@ -1272,7 +1272,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "oura-analysis"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?rev=4f7957d3304c4084f0e1e703f3d84606bf10b781#4f7957d3304c4084f0e1e703f3d84606bf10b781"
+source = "git+https://github.com/manueldeprada/open_oura?rev=a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e#a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e"
 dependencies = [
  "oura-protocol",
  "serde",
@@ -1343,12 +1343,13 @@ dependencies = [
 [[package]]
 name = "oura-link"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?rev=4f7957d3304c4084f0e1e703f3d84606bf10b781#4f7957d3304c4084f0e1e703f3d84606bf10b781"
+source = "git+https://github.com/manueldeprada/open_oura?rev=a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e#a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e"
 dependencies = [
  "async-trait",
  "btleplug",
  "futures",
  "hex",
+ "libc",
  "oura-protocol",
  "thiserror 1.0.69",
  "tokio",
@@ -1359,7 +1360,7 @@ dependencies = [
 [[package]]
 name = "oura-protocol"
 version = "0.1.0"
-source = "git+https://github.com/Th0rgal/open_oura?rev=4f7957d3304c4084f0e1e703f3d84606bf10b781#4f7957d3304c4084f0e1e703f3d84606bf10b781"
+source = "git+https://github.com/manueldeprada/open_oura?rev=a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e#a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e"
 dependencies = [
  "aes",
  "hex",
@@ -1371,6 +1372,7 @@ dependencies = [
 [[package]]
 name = "oura-store"
 version = "0.1.0"
+source = "git+https://github.com/manueldeprada/open_oura?rev=a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e#a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e"
 dependencies = [
  "oura-protocol",
  "rusqlite",

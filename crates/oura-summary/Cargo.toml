@@ -7,13 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-oura-protocol = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
-oura-store = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
-oura-analysis = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
+oura-protocol = { git = "https://github.com/manueldeprada/open_oura", rev = "a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e" }
+oura-store = { git = "https://github.com/manueldeprada/open_oura", rev = "a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e" }
+oura-analysis = { git = "https://github.com/manueldeprada/open_oura", rev = "a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e" }
 serde_json = "1"
 anyhow = "1"
 rusqlite = "0.31"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
-rusqlite = "0.31"

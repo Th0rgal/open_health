@@ -12,12 +12,12 @@ name = "oura_core"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
-oura-analysis = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
-oura-store = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
-oura-protocol = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
+oura-analysis = { git = "https://github.com/manueldeprada/open_oura", rev = "a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e" }
+oura-store = { git = "https://github.com/manueldeprada/open_oura", rev = "a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e" }
+oura-protocol = { git = "https://github.com/manueldeprada/open_oura", rev = "a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e" }
 oura-summary = { path = "../oura-summary" }
 # the ring client + transport trait, WITHOUT btleplug (iOS supplies the transport)
-oura-link = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781", default-features = false }
+oura-link = { git = "https://github.com/manueldeprada/open_oura", rev = "a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e", default-features = false }
 uniffi = { version = "0.28", features = ["cli", "tokio"] }
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
 async-trait = "0.1"

@@ -17,6 +17,3 @@ repository = "https://github.com/Th0rgal/open_health"
 [profile.release]
 lto = true
 strip = true
-
-[patch."https://github.com/Th0rgal/open_oura"]
-oura-store = { path = "vendor/oura-store" }
