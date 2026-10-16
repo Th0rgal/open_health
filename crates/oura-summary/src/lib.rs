@@ -691,6 +691,130 @@ fn stage_code(phase: &str) -> i64 {
 
 /// Seconds of sleep per `sleep_phase_data` epoch.
 const RING_STAGE_EPOCH_S: f64 = 30.0;
+const RING_STAGE_EPOCH_DS: i64 = (RING_STAGE_EPOCH_S * 10.0) as i64;
+
+/// The ring's stage codes on a window's 30 s grid, 0 where no run covers it. `None`
+/// when no run of the window's boot epoch reaches into it.
+fn paint_ring_stages(
+    runs: &[RingSleep],
+    start_ds: i64,
+    end_ds: i64,
+    captured_unix: i64,
+    unix_s_at: impl Fn(i64, i64) -> f64,
+) -> Option<Vec<i64>> {
+    let span_ds = end_ds - start_ds;
+    if span_ds <= 0 {
+        return None;
+    }
+    let cells = (span_ds / RING_STAGE_EPOCH_DS).max(1) as usize;
+    let mut stages = vec![0i64; cells];
+    let mut painted = false;
+    for run in runs {
+        // Relative counters overlap across boots; reject runs from other epochs.
+        if (unix_s_at(run.end_ds, run.captured_unix) - unix_s_at(run.end_ds, captured_unix))
+            .abs()
+            > EPOCH_ALIGNMENT_SLACK_S
+        {
+            continue;
+        }
+        // keep a run that lies within this window (either end may hang over)
+        if run.end_ds <= start_ds || run.start_ds >= end_ds {
+            continue;
+        }
+        for (i, code) in run.codes.iter().enumerate() {
+            let at = run.start_ds + i as i64 * RING_STAGE_EPOCH_DS;
+            if at < start_ds || at >= end_ds {
+                continue;
+            }
+            stages[(((at - start_ds) / RING_STAGE_EPOCH_DS) as usize).min(cells - 1)] = *code;
+            painted = true;
+        }
+    }
+    painted.then_some(stages)
+}
+
+/// Shortest stretch without sustained sleep at either edge of an automatic window that
+/// is cut from it. Up to this much is ordinary sleep latency or lying in after waking
+/// and stays in bed. More is time awake before going to sleep or after waking up.
+const MIN_EDGE_WAKE_TRIM_DS: i64 = 30 * 60 * 10;
+/// Sustained sleep: a 15-minute stretch the ring stages at least 75% asleep.
+const SUSTAINED_SLEEP_EPOCHS: usize = 30;
+const SUSTAINED_SLEEP_MIN_ASLEEP: usize = 23;
+
+/// The cells `[first, end)` from the first to the last epoch of sustained sleep in a
+/// ring hypnogram. `None` when no 15-minute stretch reaches the asleep share.
+fn sustained_sleep_cells(stages: &[i64]) -> Option<(usize, usize)> {
+    let asleep = |c: &i64| (1..=3).contains(c);
+    let sustained = |from: usize| {
+        stages[from..from + SUSTAINED_SLEEP_EPOCHS]
+            .iter()
+            .filter(|c| asleep(c))
+            .count()
+            >= SUSTAINED_SLEEP_MIN_ASLEEP
+    };
+    let windows = stages.len().checked_sub(SUSTAINED_SLEEP_EPOCHS)? + 1;
+    let first = (0..windows).find(|&i| asleep(&stages[i]) && sustained(i))?;
+    let last = (0..windows)
+        .rev()
+        .find(|&i| asleep(&stages[i + SUSTAINED_SLEEP_EPOCHS - 1]) && sustained(i))?
+        + SUSTAINED_SLEEP_EPOCHS;
+    Some((first, last))
+}
+
+/// Cut long stretches without sustained sleep off both ends of an automatic window.
+///
+/// The ring's bedtime counts time awake in bed as time in bed: on one Gen 3 night it
+/// ran to 10:33 while the ring's own hypnogram was awake from 09:31, and on another it
+/// opened at 23:36 with no sustained sleep staged before 03:13. An edge of at least
+/// [`MIN_EDGE_WAKE_TRIM_DS`] is cut on the 30 s grid, so the ring's codes stay aligned
+/// with the shortened window.
+fn trim_edge_wake(stages: &[i64], start_ds: i64, end_ds: i64) -> (i64, i64) {
+    let Some((first, last)) = sustained_sleep_cells(stages) else {
+        return (start_ds, end_ds);
+    };
+    let lead_ds = first as i64 * RING_STAGE_EPOCH_DS;
+    let trimmed_end_ds = start_ds + last as i64 * RING_STAGE_EPOCH_DS;
+    (
+        if lead_ds >= MIN_EDGE_WAKE_TRIM_DS {
+            start_ds + lead_ds
+        } else {
+            start_ds
+        },
+        if end_ds - trimmed_end_ds >= MIN_EDGE_WAKE_TRIM_DS {
+            trimmed_end_ds
+        } else {
+            end_ds
+        },
+    )
+}
+
+/// Undo the extension of a window past a declared end that the ring analysed.
+///
+/// [`normalize_bed_periods`] carries a night past its declared end while sleep signals
+/// continue, which rejoins a night the ring split and recovers one whose marker stopped
+/// early. Where the ring staged a sleep ending at the declared end, it has already judged
+/// when that sleep ended, and an extension only adds epochs its hypnogram does not
+/// cover: a 4-minute doze 23 min after waking (09:48, after a 09:25 bedtime end) left
+/// 26 unstaged minutes and withheld the score.
+fn keep_analysed_ends(
+    beds: &mut [BedPeriod],
+    runs: &[RingSleep],
+    unix_s_at: impl Fn(i64, i64) -> f64,
+) {
+    for bed in beds.iter_mut().filter(|bed| bed.end_ds > bed.raw_end_ds) {
+        let analysed = runs.iter().any(|run| {
+            run.start_ds < bed.raw_end_ds
+                && (run.end_ds - bed.raw_end_ds).abs() <= STATED_WINDOW_SLACK_DS
+                && (unix_s_at(run.end_ds, run.captured_unix)
+                    - unix_s_at(bed.raw_end_ds, bed.captured_unix))
+                .abs()
+                    <= EPOCH_ALIGNMENT_SLACK_S
+        });
+        if analysed {
+            bed.end_ds = bed.raw_end_ds;
+        }
+    }
+}
 
 /// The ring's OWN hypnogram, assembled from `sleep_phase_data` (tag `0x5a`).
 ///
@@ -717,39 +841,15 @@ fn ring_hypnograms(
 ) -> Vec<((i64, i64), Value)> {
     let mut out = Vec::new();
     for night in nights {
-        let span_ds = night.end_ds - night.start_ds;
-        if span_ds <= 0 {
+        let Some(stages) = paint_ring_stages(
+            runs,
+            night.start_ds,
+            night.end_ds,
+            night.captured_unix,
+            &unix_s_at,
+        ) else {
             continue;
-        }
-        let epoch_ds = (RING_STAGE_EPOCH_S * 10.0) as i64;
-        let cells = (span_ds / epoch_ds).max(1) as usize;
-        let mut stages = vec![0i64; cells];
-        let mut painted = false;
-        for run in runs {
-            // Relative counters overlap across boots; reject runs from other epochs.
-            if (unix_s_at(run.end_ds, run.captured_unix)
-                - unix_s_at(run.end_ds, night.captured_unix))
-            .abs()
-                > EPOCH_ALIGNMENT_SLACK_S
-            {
-                continue;
-            }
-            // keep a run that lies within this night's window (either end may hang over)
-            if run.end_ds <= night.start_ds || run.start_ds >= night.end_ds {
-                continue;
-            }
-            for (i, code) in run.codes.iter().enumerate() {
-                let at = run.start_ds + i as i64 * epoch_ds;
-                if at < night.start_ds || at >= night.end_ds {
-                    continue;
-                }
-                stages[(((at - night.start_ds) / epoch_ds) as usize).min(cells - 1)] = *code;
-                painted = true;
-            }
-        }
-        if !painted {
-            continue;
-        }
+        };
         let share = |code: i64| {
             let n = stages.iter().filter(|&&c| c == code).count();
             (n as f64 / stages.len() as f64 * 1000.0).round() / 10.0
@@ -2176,13 +2276,14 @@ pub fn build_summary(
         &ring_sleep_state,
         unix_s_at,
     ));
-    let beds = normalize_bed_periods(
+    let mut beds = normalize_bed_periods(
         raw_beds,
         &sleep_support,
         &pulse_support,
         &ring_sleep_state,
         unix_s_at,
     );
+    keep_analysed_ends(&mut beds, &ring_sleeps, unix_s_at);
     // A night whose boot clock is untrustworthy cannot be placed on the calendar.
     // Record the specific clock reason (`missing_anchor`, `accelerated_counter`, or
     // `ambiguous_reboot_stall`) and whether a future sync can recover it.
@@ -2247,6 +2348,14 @@ pub fn build_summary(
                 nt.start_ds = ov.start_ds;
                 nt.end_ds = ov.end_ds;
                 nt.manual_bedtime = true;
+            } else if let Some(stages) = paint_ring_stages(
+                &ring_sleeps,
+                nt.start_ds,
+                nt.end_ds,
+                nt.captured_unix,
+                unix_s_at,
+            ) {
+                (nt.start_ds, nt.end_ds) = trim_edge_wake(&stages, nt.start_ds, nt.end_ds);
             }
             nt
         })
@@ -3258,6 +3367,61 @@ mod tests {
         assert_eq!(metrics["sol_min"], 60.0);
         assert_eq!(asleep, 7 * 3600);
         assert_eq!(hyp[0].1["efficiency_pct"], 87.5);
+    }
+
+    #[test]
+    fn long_wake_edges_are_trimmed_and_ordinary_latency_is_kept() {
+        let epoch = RING_STAGE_EPOCH_DS;
+        let night = |lead: usize, sleep: usize, tail: usize| {
+            let mut codes = vec![4; lead];
+            // brief arousals inside the sleep do not end it
+            codes.extend((0..sleep).map(|i| if i % 20 == 10 { 4 } else { 2 }));
+            codes.extend(vec![4; tail]);
+            let end = codes.len() as i64 * epoch;
+            (codes, end)
+        };
+        // 3 h awake before sleeping and 1 h after waking (the 09:31 to 10:33 shape)
+        let (codes, end) = night(360, 840, 120);
+        assert_eq!(
+            trim_edge_wake(&codes, 0, end),
+            (360 * epoch, end - 120 * epoch)
+        );
+        // 20 min of sleep latency and 10 min lying in after waking stay in bed
+        let (codes, end) = night(40, 840, 20);
+        assert_eq!(trim_edge_wake(&codes, 0, end), (0, end));
+        // an unstaged edge counts like wake: nothing says sleep had begun
+        let mut codes = vec![0; 80];
+        codes.extend(vec![2; 600]);
+        assert_eq!(
+            trim_edge_wake(&codes, 0, 680 * epoch),
+            (80 * epoch, 680 * epoch)
+        );
+        // a window with no sustained sleep is left alone rather than collapsed
+        let restless: Vec<i64> = (0..240).map(|i| if i % 3 == 0 { 2 } else { 4 }).collect();
+        assert_eq!(trim_edge_wake(&restless, 0, 240 * epoch), (0, 240 * epoch));
+    }
+
+    #[test]
+    fn an_analysed_end_is_not_extended_past_the_hypnogram() {
+        let minute = 60 * 10;
+        let analysed = [RingSleep {
+            start_ds: 0,
+            end_ds: 470 * minute,
+            captured_unix: 1,
+            codes: vec![2; 940],
+        }];
+        let extended = |raw_end: i64| BedPeriod {
+            end_ds: raw_end + 26 * minute,
+            ..bed(0, raw_end)
+        };
+        // the ring staged the sleep ending at the declared end: drop the extension
+        let mut beds = vec![extended(470 * minute)];
+        keep_analysed_ends(&mut beds, &analysed, |ds, _| ds as f64 / 10.0);
+        assert_eq!(beds[0].end_ds, 470 * minute);
+        // a declared end the ring never analysed keeps its extension
+        let mut beds = vec![extended(300 * minute)];
+        keep_analysed_ends(&mut beds, &analysed, |ds, _| ds as f64 / 10.0);
+        assert_eq!(beds[0].end_ds, 326 * minute);
     }
 
     #[test]
