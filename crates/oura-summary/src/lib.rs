@@ -625,6 +625,13 @@ struct RingSleep {
 /// not follow the previous one starts a new sleep. A page carries only the `ds` at
 /// which the ring emitted it — writing happens when analysis finishes, i.e. at the end
 /// of the sleep — so a run ends at its last page and runs back at 30 s an epoch.
+///
+/// Where the ring states the window, the run fills it. The ring writes whole
+/// [`RING_PAGE_EPOCHS`] pages: on 20 Gen 3 sleeps it padded a final page that was at
+/// least 31% full and dropped one that was at most 19% full, leaving the hypnogram 2 to
+/// 10 epochs short of the window. A shortfall under a quarter page is that dropped page.
+/// It closes a bedtime that ends when you get up, and the staged epochs before it were
+/// wake on 8 of those 9 sleeps, so it counts as wake.
 fn ring_sleep_runs(
     pages: &[(i64, i64, i64, Vec<i64>)],
     windows: &[SleepWindowStatement],
@@ -649,12 +656,21 @@ fn ring_sleep_runs(
         previous_page = *page;
     }
     for run in &mut runs {
-        let first_page_ds = run.start_ds;
-        (run.start_ds, run.end_ds) = stated_window(first_page_ds, windows)
-            .unwrap_or((run.end_ds - run.codes.len() as i64 * epoch_ds, run.end_ds));
+        let Some((start_ds, end_ds)) = stated_window(run.start_ds, windows) else {
+            run.start_ds = run.end_ds - run.codes.len() as i64 * epoch_ds;
+            continue;
+        };
+        (run.start_ds, run.end_ds) = (start_ds, end_ds);
+        let window_epochs = ((end_ds - start_ds) / epoch_ds) as usize;
+        if (1..RING_PAGE_EPOCHS / 4).contains(&window_epochs.saturating_sub(run.codes.len())) {
+            run.codes.resize(window_epochs, 4);
+        }
     }
     runs
 }
+
+/// Stage epochs per `sleep_phase_data` page.
+const RING_PAGE_EPOCHS: usize = 52;
 
 /// A `sleep_summary_1` event: the ring's statement of the sleep it just analysed, as
 /// minutes back from the event's own stamp to the window start and end.
@@ -3307,6 +3323,26 @@ mod tests {
             ..stated
         };
         assert_eq!(ring_sleep_runs(&pages, &[other])[0].end_ds, stamp + 71);
+    }
+
+    #[test]
+    fn a_dropped_partial_last_page_closes_the_window_as_wake() {
+        // 18 full pages under a 471-minute window: the ring dropped a 6-epoch last page
+        let stamp = 1_000_000;
+        let pages: Vec<_> = (0..18)
+            .map(|p| (stamp + 70 + p, 1, p, vec![2; 52]))
+            .collect();
+        let window = |start_min| SleepWindowStatement {
+            stamp_ds: stamp,
+            start_min,
+            end_min: 6,
+        };
+        let runs = ring_sleep_runs(&pages, &[window(477)]);
+        assert_eq!(runs[0].codes.len(), 942);
+        assert!(runs[0].codes[936..].iter().all(|&c| c == 4));
+        // a quarter page or more missing is not a dropped page: leave it unstaged
+        let runs = ring_sleep_runs(&pages, &[window(484)]);
+        assert_eq!(runs[0].codes.len(), 936);
     }
 
     #[test]
