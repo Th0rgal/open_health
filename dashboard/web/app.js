@@ -1565,17 +1565,17 @@ function renderDevice(d) {
   const bstat = stat("Battery", bpct != null ? bpct : "—", "%");
   if (bpct != null && bpct < 20) bstat.classList.add("low");
   if (dev.battery_recorded) {
-    let btitle = `Recorded ${dev.battery_recorded}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}`;
+    let rec = `Recorded ${dev.battery_recorded}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}`;
     if (dev.battery_fresh_hours != null) {
       if (dev.battery_fresh_hours >= 24) {
-        btitle += ` (${Math.round(dev.battery_fresh_hours / 24)}d ago)`;
+        rec += ` (${Math.round(dev.battery_fresh_hours / 24)}d ago)`;
       } else if (dev.battery_fresh_hours >= 1) {
-        btitle += ` (${Math.round(dev.battery_fresh_hours)}h ago)`;
+        rec += ` (${Math.round(dev.battery_fresh_hours)}h ago)`;
       } else {
-        btitle += ` (<1h ago)`;
+        rec += ` (<1h ago)`;
       }
     }
-    bstat.title = btitle;
+    bstat.title = `Battery: ${bpct != null ? bpct + "%" : "—"}${dev.battery_v ? " (" + dev.battery_v + " V)" : ""}\n${rec}`;
   }
   stats.append(bstat);
   const fresh = dev.fresh_hours != null ? (dev.fresh_hours < 1 ? "<1" : Math.round(dev.fresh_hours)) : "—";
@@ -1647,7 +1647,7 @@ function renderDevice(d) {
     kvItem("API", esc(dev.api_version || "—")) +
     kvItem("MAC", esc(dev.mac || "—")) +
     kvItem("Hardware", esc(dev.hardware_id || "—")) +
-    kvItem("Battery", dev.battery_v != null ? `${dev.battery_v} V (${dev.battery_pct != null ? dev.battery_pct + "%" : "—"}${dev.battery_recorded ? " · " + dev.battery_recorded + (dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : "") : ""})` : (dev.battery_pct != null ? `${dev.battery_pct}%` : "—")) +
+    kvItem("Battery", dev.battery_v != null ? `${dev.battery_pct != null ? dev.battery_pct + "%" : "—"} · ${dev.battery_v} V` + (dev.battery_recorded ? `<br><span style="color:var(--faint);font-size:11px">Recorded ${dev.battery_recorded}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}</span>` : "") : (dev.battery_pct != null ? `${dev.battery_pct}%` : "—")) +
     kvItem("Last sync", `${esc(dev.synced || "—")} ${esc(dev.synced_hm || "")}`) +
     kvItem("Sync cursor", dev.next_cursor != null ? dev.next_cursor.toLocaleString() : "—") +
     kvItem("History", historyDetail) +
@@ -2002,17 +2002,18 @@ function renderActions(d) {
     let title = `Ring battery ${dev.battery_pct}%`;
     if (dev.battery_v) title += ` · ${dev.battery_v} V`;
     if (dev.battery_recorded) {
-      title += ` · recorded ${dev.battery_recorded}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}`;
+      let rec = `Recorded ${dev.battery_recorded}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}`;
       if (dev.battery_fresh_hours != null) {
         if (dev.battery_fresh_hours >= 24) {
           const days = Math.round(dev.battery_fresh_hours / 24);
-          title += ` (${days}d ago)`;
+          rec += ` (${days}d ago)`;
         } else if (dev.battery_fresh_hours >= 1) {
-          title += ` (${Math.round(dev.battery_fresh_hours)}h ago)`;
+          rec += ` (${Math.round(dev.battery_fresh_hours)}h ago)`;
         } else {
-          title += ` (<1h ago)`;
+          rec += ` (<1h ago)`;
         }
       }
+      title += `\n${rec}`;
     }
     b.title = title;
   } else {
