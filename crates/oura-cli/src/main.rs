@@ -305,8 +305,8 @@ enum Command {
         #[arg(long, default_value_t = 8090)]
         port: u16,
         /// Timezone offset (hours from UTC) for displayed times.
-        #[arg(long, default_value_t = local_tz_offset_hours())]
-        tz_offset: i64,
+        #[arg(long, default_value_t = local_tz_offset_hours(), value_parser = parse_tz_offset, allow_hyphen_values = true)]
+        tz_offset: f64,
         /// Sex for the cardiovascular-age model: M | F | O.
         #[arg(long, default_value = "M")]
         sex: String,
