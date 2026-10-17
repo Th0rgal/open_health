@@ -191,6 +191,10 @@ struct SleepDebtSummary: Codable {
 struct Device: Codable {
     var serial: String?; var firmware: String?
     var battery_pct: Int?
+    var battery_v: Double?
+    var battery_recorded: String?
+    var battery_recorded_hm: String?
+    var battery_fresh_hours: Double?
     var days_of_data: Double?; var elapsed_days: Double?
     var observed_days: Int?; var observed_coverage_days: Double?
     var nights: Int?

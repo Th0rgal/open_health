@@ -2914,15 +2914,16 @@ pub fn build_summary(
         ),
         insight("Stress / resilience", false, "needs cloud scores"),
     ]);
-    let mut battery: Option<(i64, i64)> = None;
+    let mut battery: Option<(i64, i64, f64)> = None;
     let mut battery_readings: Vec<(f64, i64)> = Vec::new();
     for (ds, tag, jstr, cu) in &events {
         if name_of(*tag) == "debug_data" && jstr.contains("battery_pct") {
             if let Ok(v) = serde_json::from_str::<Value>(jstr) {
                 if let Some(p) = v["battery_pct"].as_i64() {
-                    battery = Some((p, v["voltage_mv"].as_i64().unwrap_or(0)));
+                    let b_unix = unix_s_at(*ds, *cu);
+                    battery = Some((p, v["voltage_mv"].as_i64().unwrap_or(0), b_unix));
                     if (0..=100).contains(&p) && is_dated(*ds, *cu) {
-                        battery_readings.push((unix_s_at(*ds, *cu), p));
+                        battery_readings.push((b_unix, p));
                     }
                 }
             }
@@ -2956,6 +2957,9 @@ pub fn build_summary(
         "nights": nights.len(),
         "battery_pct": battery.map(|b| b.0),
         "battery_v": battery.map(|b| (b.1 as f64 / 1000.0 * 100.0).round() / 100.0),
+        "battery_recorded": battery.map(|b| date_label(b.2, tz)),
+        "battery_recorded_hm": battery.map(|b| hm(b.2, tz)),
+        "battery_fresh_hours": battery.map(|b| ((now - b.2) / 3600.0 * 10.0).round() / 10.0),
         // [unix_s, percent] readings for the battery chart; see `battery_history`
         "battery_history": battery_history(&battery_readings, BATTERY_HISTORY_DAYS),
         "measuring": measuring,
