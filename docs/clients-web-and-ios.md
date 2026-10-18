@@ -144,9 +144,12 @@ including naps in that day's total, then evaluates 14 calendar days with at leas
 valid days; this matches the decompiled Android input and UI. The nightly **sleep need**
 is personalized like Oura's (`SleepDebtInput.longTermSleepTimeAvgSeconds` ← the long-term
 `sleepTimeAvg` baseline): each day's need is the mean of that user's daily totals over the
-previous 90 days, IQR-outlier-filtered, clamped to 7–9 h, rounded to 15 min, causal (a
-night never sets its own need), except that a day with fewer than 14 valid days before it uses
-all of the user's valid days, with an 8 h fallback below 14 valid days in total — see
+previous 90 days, IQR-outlier-filtered and clamped to 7–9 h, weighted by days/90 against a
+7.4 h prior (one wearer's need as reported by the Oura app was 7.3 to 7.4 h). A day with fewer than 14 valid days before it uses all of the
+user's valid days, and the prior alone applies below 14 valid days in total. A `sleep_need_h`
+in `profile.json` (4 to 12 h) replaces the estimate; iOS sets it under Profile > Sleep and shows
+the reason and the days the estimate moved (`sleep_debt.need_note`, `need_changes`) on the Sleep
+debt screen. The web does not show these yet (Known gaps). See
 Rust `sleep_need_s`. Both clients read it from the summary JSON. iOS stages sleep from the
 **on-device** SleepNet hypnogram (`NightRow.stages`), because iOS runs `build_summary` with
 `NoModelRunner` (no server-side staging), so the FFI `stages_full`/`metrics` are empty there.
@@ -182,6 +185,12 @@ which is why Oura's own app has no per-night HRV trend either.
 
 ## Known gaps (iOS-only, not yet on the web)
 
+- **Sleep need setting and explanation** (iOS, `ProfileSettings.swift`, `Detail.swift`): the
+  Profile Sleep card sets `sleep_need_h`, and the Sleep debt screen shows why the estimated need
+  is what it is and when it moved. The web reads the same summary fields but shows neither.
+- **Capture hints** (iOS, `CaptureNeeds.swift`): tiles without data from a ring capture feature
+  dim and point to Profile > Ring capture, and Exercise heart rate stays locked until Step motion
+  is applied. The web has no ring link, so its panels keep their text hints.
 - **Today / Vitals / Trends tabs** (iOS, `Home.swift`): the home is three tabs over the same summary.
   Today shows one day (day strip, three scores, the selected score's contributors, sleep,
   activity, body). Vitals is a tile per metric. Trends covers 14, 30 or 90 days with a

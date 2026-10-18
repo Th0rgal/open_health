@@ -203,6 +203,14 @@ pub fn steps_source(db: &Path) -> &'static str {
     if wanted.as_deref() == Some("model") && real_steps::available() { "model" } else { "ring" }
 }
 
+/// The sleep need the user set (`"sleep_need_h"` in `profile.json`), in seconds. Absent, null or
+/// outside 4 to 12 hours means the need is estimated.
+pub fn read_sleep_need_override(db: &Path) -> Option<i32> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(profile_path(db)).ok()?).ok()?;
+    let hours = v.get("sleep_need_h")?.as_f64()?;
+    (4.0..=12.0).contains(&hours).then(|| (hours * 3600.0).round() as i32)
+}
+
 fn read_profile_number(db: &Path, key: &str) -> Option<u32> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(profile_path(db)).ok()?).ok()?;
     v.get(key)?.as_u64().map(|n| n.clamp(25, 200) as u32)
@@ -240,6 +248,7 @@ pub fn profile_json(db: &Path) -> Value {
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|p| p["chronotype"]["ideal_midpoint"].as_str().map(str::to_string));
     v["ideal_midpoint"] = mid.map_or(Value::Null, Value::String);
+    v["sleep_need_h"] = read_sleep_need_override(db).map_or(Value::Null, |s| json!(s as f64 / 3600.0));
     v
 }
 
@@ -463,27 +472,54 @@ fn ymd_label(unix_s: f64, tz: impl Into<OffsetHours>) -> String {
 }
 
 const SLEEP_DEBT_DAYS: i64 = 14;
-/// Fallback need while there isn't enough history to personalize.
-const SLEEP_NEED_DEFAULT_H: f64 = 8.0;
+/// Need used until personal history carries weight (7.4 h): one wearer's need as reported by
+/// the Oura app was 7.3 to 7.4 h, so a short history is blended toward this value.
+const SLEEP_NEED_PRIOR_S: f64 = 7.4 * 3600.0;
 const SLEEP_NEED_WINDOW_DAYS: i64 = 90;
 const SLEEP_NEED_MIN_VALID_DAYS: usize = 14;
 const SLEEP_NEED_FLOOR_S: f64 = 7.0 * 3600.0;
 const SLEEP_NEED_CEIL_S: f64 = 9.0 * 3600.0;
-const SLEEP_NEED_ROUND_S: f64 = 900.0;
+
+/// How a day's sleep need was set, for the explanation shown next to it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum NeedBasis {
+    /// Entered by the user in `profile.json` (`sleep_need_h`).
+    Manual,
+    /// Fewer than 14 valid days exist, so only the prior applies.
+    Prior,
+    /// The prior blended with the user's average of `days` valid days.
+    Blend { days: usize, mean_s: i32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SleepNeed {
+    seconds: i32,
+    basis: NeedBasis,
+    /// The 7–9 h band moved the blended value.
+    limited: bool,
+}
 
 /// Personalized daily sleep need, matching what the Oura app feeds ecore's
 /// `sleep_debt_calculate` (`SleepDebtInput.longTermSleepTimeAvgSeconds`, the
-/// long-term `sleepTimeAvg` baseline): the user's typical sleep over the last
-/// ~3 months, with unusually short or long days filtered out. Causal — only
-/// days strictly before `day` count, so a night never sets its own need.
-/// The IQR fence is our outlier filter (Oura only documents "unusually short
-/// or extra-long nights are filtered out"), and the result is clamped to the
-/// 7–9 h band the app itself cites so chronic under-sleep can't ratify itself
-/// as a low need. A day with fewer than 14 valid days before it (a new database) uses all
-/// the user's valid days instead, so the first weeks are scored against one typical need
-/// and not an 8 h default that inflates every early shortfall. Falls back to 8 h until 14
-/// valid days exist at all.
-fn sleep_need_s(asleep_by_day: &std::collections::BTreeMap<i64, i32>, day: i64) -> i32 {
+/// long-term `sleepTimeAvg` baseline). The user's typical sleep over the last ~3 months,
+/// with unusually short or long days filtered out, is the baseline. A short history is a
+/// noisy estimate of a long-term average, so the mean is weighted by `days / 90` against
+/// the 7.4 h prior and becomes the user's own average at 90 days.
+/// The IQR fence is our outlier filter (Oura only documents "unusually short or
+/// extra-long nights are filtered out"), and the result is clamped to the 7–9 h band the
+/// app itself cites so chronic under-sleep can't ratify itself as a low need. A day with
+/// fewer than 14 valid days before it (a new database) uses all the user's valid days, so
+/// the first weeks share one need. With fewer than 14 valid days in total the need is the
+/// prior. Otherwise only days strictly before `day` count, so a night never sets its own
+/// need. A `manual` need replaces all of this.
+fn sleep_need(
+    asleep_by_day: &std::collections::BTreeMap<i64, i32>,
+    day: i64,
+    manual: Option<i32>,
+) -> SleepNeed {
+    if let Some(seconds) = manual {
+        return SleepNeed { seconds, basis: NeedBasis::Manual, limited: false };
+    }
     let valid = |(_, &s): (&i64, &i32)| (s > 0).then_some(s as f64);
     let mut vals: Vec<f64> = asleep_by_day
         .range(day - SLEEP_NEED_WINDOW_DAYS..day)
@@ -493,7 +529,7 @@ fn sleep_need_s(asleep_by_day: &std::collections::BTreeMap<i64, i32>, day: i64) 
         vals = asleep_by_day.iter().filter_map(valid).collect();
     }
     if vals.len() < SLEEP_NEED_MIN_VALID_DAYS {
-        return (SLEEP_NEED_DEFAULT_H * 3600.0) as i32;
+        return SleepNeed { seconds: SLEEP_NEED_PRIOR_S as i32, basis: NeedBasis::Prior, limited: false };
     }
     vals.sort_by(f64::total_cmp);
     let quantile = |p: f64| -> f64 {
@@ -509,8 +545,67 @@ fn sleep_need_s(asleep_by_day: &std::collections::BTreeMap<i64, i32>, day: i64) 
         .filter(|&v| v >= q1 - fence && v <= q3 + fence)
         .collect();
     let mean = kept.iter().sum::<f64>() / kept.len() as f64;
-    let need = mean.clamp(SLEEP_NEED_FLOOR_S, SLEEP_NEED_CEIL_S);
-    ((need / SLEEP_NEED_ROUND_S).round() * SLEEP_NEED_ROUND_S) as i32
+    let weight = (kept.len() as f64 / SLEEP_NEED_WINDOW_DAYS as f64).min(1.0);
+    let blended = weight * mean + (1.0 - weight) * SLEEP_NEED_PRIOR_S;
+    let need = blended.clamp(SLEEP_NEED_FLOOR_S, SLEEP_NEED_CEIL_S);
+    SleepNeed {
+        seconds: need.round() as i32,
+        basis: NeedBasis::Blend { days: kept.len(), mean_s: mean.round() as i32 },
+        limited: need != blended,
+    }
+}
+
+#[cfg(test)]
+fn sleep_need_s(asleep_by_day: &std::collections::BTreeMap<i64, i32>, day: i64) -> i32 {
+    sleep_need(asleep_by_day, day, None).seconds
+}
+
+/// `7h 24m` for a duration in seconds.
+fn hm_text(seconds: i32) -> String {
+    let minutes = (seconds as f64 / 60.0).round() as i32;
+    format!("{}h {:02}m", minutes / 60, minutes % 60)
+}
+
+/// Why the need is what it is, in one sentence for the clients to show.
+fn need_note(need: &SleepNeed) -> String {
+    let prior = hm_text(SLEEP_NEED_PRIOR_S as i32);
+    match need.basis {
+        NeedBasis::Manual => "Set by you in Profile.".to_string(),
+        NeedBasis::Prior => format!(
+            "Fewer than {SLEEP_NEED_MIN_VALID_DAYS} nights with sleep so far, so the starting value of {prior} applies."
+        ),
+        NeedBasis::Blend { days, mean_s } => {
+            let weight = (days as f64 / SLEEP_NEED_WINDOW_DAYS as f64).min(1.0);
+            let limit = if need.limited { " The result is held within 7 to 9 hours." } else { "" };
+            format!(
+                "Your {days} nights with sleep average {}. The need weights that average {:.0}% and the starting value of {prior} {:.0}%; your own average takes over at {SLEEP_NEED_WINDOW_DAYS} nights.{limit}",
+                hm_text(mean_s),
+                weight * 100.0,
+                (1.0 - weight) * 100.0,
+            )
+        }
+    }
+}
+
+/// What changed between two consecutive days' needs.
+fn need_change_reason(before: &SleepNeed, after: &SleepNeed) -> String {
+    match (before.basis, after.basis) {
+        (NeedBasis::Prior, NeedBasis::Blend { days, .. }) => format!(
+            "{days} nights with sleep reached the minimum of {SLEEP_NEED_MIN_VALID_DAYS}, so your average now counts"
+        ),
+        (NeedBasis::Blend { days: d0, mean_s: m0 }, NeedBasis::Blend { days: d1, mean_s: m1 }) => {
+            if d1 == d0 && m1 == m0 {
+                "the 7 to 9 hour limit changed the result".to_string()
+            } else {
+                format!(
+                    "{d0} to {d1} nights with sleep, average {} to {}",
+                    hm_text(m0),
+                    hm_text(m1)
+                )
+            }
+        }
+        _ => "the basis of the need changed".to_string(),
+    }
 }
 
 /// The debt is defined once the window has enough valid nights. `SleepDebt::valid` is
@@ -532,18 +627,24 @@ fn sleep_debt_state(debt_min: f64) -> &'static str {
 /// Android's sleep-debt screen works on calendar days, not individual sleep sessions:
 /// a main sleep and a nap ending on the same day both contribute to that day's total.
 /// Build the complete 14-day series here so every client renders the same result.
-fn sleep_debt_summary(asleep_by_day: &std::collections::BTreeMap<i64, i32>) -> Value {
+/// `manual_need_s` replaces the estimated need on every day.
+fn sleep_debt_summary(
+    asleep_by_day: &std::collections::BTreeMap<i64, i32>,
+    manual_need_s: Option<i32>,
+) -> Value {
     use oura_analysis::ported::sleep_debt::{sleep_debt, SleepDebtConfig};
 
     let Some(&anchor) = asleep_by_day.keys().next_back() else {
         return json!({
             "debt_min": 0, "recent_shortfall_min": 0, "valid": false,
-            "need_h": SLEEP_NEED_DEFAULT_H, "valid_days": 0, "window_days": SLEEP_DEBT_DAYS,
-            "state": "none", "days": [],
+            "need_h": SLEEP_NEED_PRIOR_S / 3600.0, "valid_days": 0, "window_days": SLEEP_DEBT_DAYS,
+            "state": "none", "days": [], "need_source": "automatic", "need_note": "",
+            "need_changes": [],
         });
     };
     let first = anchor - (SLEEP_DEBT_DAYS - 1);
     let mut days = Vec::with_capacity(SLEEP_DEBT_DAYS as usize);
+    let need_on = |day: i64| sleep_need(asleep_by_day, day, manual_need_s);
 
     // ecore takes a per-day need array, so each day of the window is scored
     // against the need that was current *that* day.
@@ -553,20 +654,33 @@ fn sleep_debt_summary(asleep_by_day: &std::collections::BTreeMap<i64, i32>) -> V
             .clone()
             .map(|d| asleep_by_day.get(&d).copied().unwrap_or(0))
             .collect();
-        let need = range.map(|d| sleep_need_s(asleep_by_day, d)).collect();
+        let need = range.map(|d| need_on(d).seconds).collect();
         (actual, need)
     };
 
+    let mut need_changes = Vec::new();
+    let mut previous = need_on(first - 1);
     for day in first..=anchor {
         let (actual, need) = window(day);
         let debt = sleep_debt(&actual, &need, &SleepDebtConfig::default());
         let total = asleep_by_day.get(&day).copied();
-        let need_s = sleep_need_s(asleep_by_day, day);
+        let today_need = need_on(day);
+        let need_s = today_need.seconds;
         let valid_days = actual.iter().filter(|&&s| s > 0).count();
         let cumulative = has_debt(&debt).then(|| (debt.debt_s as f64 / 60.0).round());
         let (y, m, d) = civil(day);
+        let date = format!("{y:04}-{m:02}-{d:02}");
+        if (need_s as f64 / 60.0).round() != (previous.seconds as f64 / 60.0).round() {
+            need_changes.push(json!({
+                "date": date,
+                "from_min": (previous.seconds as f64 / 60.0).round(),
+                "to_min": (need_s as f64 / 60.0).round(),
+                "reason": need_change_reason(&previous, &today_need),
+            }));
+        }
+        previous = today_need;
         days.push(json!({
-            "date": format!("{y:04}-{m:02}-{d:02}"),
+            "date": date,
             "total_sleep_min": total.map(|s| (s as f64 / 60.0).round()),
             "sleep_need_min": (need_s as f64 / 60.0).round(),
             "shortfall_min": total.map(|s| ((need_s - s) as f64 / 60.0).round()),
@@ -591,11 +705,15 @@ fn sleep_debt_summary(asleep_by_day: &std::collections::BTreeMap<i64, i32>) -> V
     } else {
         0.0
     };
+    let latest_need = need_on(anchor);
     json!({
         "debt_min": debt_min,
         "recent_shortfall_min": recent_shortfall_min,
         "valid": enough_days,
-        "need_h": (sleep_need_s(asleep_by_day, anchor) as f64 / 3600.0 * 100.0).round() / 100.0,
+        "need_h": (latest_need.seconds as f64 / 3600.0 * 100.0).round() / 100.0,
+        "need_source": if latest_need.basis == NeedBasis::Manual { "manual" } else { "automatic" },
+        "need_note": need_note(&latest_need),
+        "need_changes": need_changes,
         "valid_days": valid_days,
         "window_days": SLEEP_DEBT_DAYS,
         "state": state,
@@ -2636,7 +2754,7 @@ pub fn build_summary(
     nights_json.reverse();
 
     asleep_by_day.retain(|day, _| !incomplete_sleep_days.contains(day));
-    let sleep_debt = sleep_debt_summary(&asleep_by_day);
+    let sleep_debt = sleep_debt_summary(&asleep_by_day, read_sleep_need_override(db));
 
     // Symptom signs for the most recent night, judged against the nights before it.
     // `nights` is oldest-first, so the last entry is tonight and everything before it
@@ -3454,28 +3572,35 @@ mod tests {
         }
         // A one-hour nap belongs to the latest calendar day, making its total 8 h.
         *sleep.entry(104).or_default() += 3600;
-        let value = sleep_debt_summary(&sleep);
+        let value = sleep_debt_summary(&sleep, None);
         assert_eq!(value["valid"], true);
         assert_eq!(value["valid_days"], 5);
         assert_eq!(value["days"].as_array().unwrap().len(), 14);
         assert_eq!(value["days"][13]["total_sleep_min"], 480.0);
-        assert_eq!(value["recent_shortfall_min"], 0.0);
+        assert_eq!(value["recent_shortfall_min"], -36.0); // 7.4 h prior need - 8 h
     }
 
     #[test]
-    fn sleep_need_defaults_until_enough_history_then_personalizes() {
+    fn sleep_need_is_the_prior_until_enough_history_then_blends_toward_the_user() {
         let mut sleep = std::collections::BTreeMap::new();
         for day in 100..113 {
             sleep.insert(day, 27000); // 7.5 h × 13 days — one short of the minimum
         }
-        assert_eq!(sleep_need_s(&sleep, 113), 28800); // still the 8 h default
-        sleep.insert(113, 27000); // 14th valid day
-        assert_eq!(sleep_need_s(&sleep, 114), 27000); // typical sleep becomes the need
+        assert_eq!(sleep_need_s(&sleep, 113), 26640); // the 7.4 h prior
+        sleep.insert(113, 27000); // 14th valid day, weight 14/90
+        assert_eq!(sleep_need_s(&sleep, 114), 26696); // 26640 + (27000 - 26640) * 14 / 90
         // the first weeks use all valid days, so an early day gets the same need
-        assert_eq!(sleep_need_s(&sleep, 100), 27000);
+        assert_eq!(sleep_need_s(&sleep, 100), 26696);
         // with 14 earlier days the window is causal: a day's own sleep is excluded
         sleep.insert(114, 36000);
-        assert_eq!(sleep_need_s(&sleep, 114), 27000);
+        assert_eq!(sleep_need_s(&sleep, 114), 26696);
+    }
+
+    #[test]
+    fn sleep_need_reaches_the_user_average_at_ninety_days() {
+        let sleep: std::collections::BTreeMap<i64, i32> =
+            (0..90).map(|d| (d, 27360)).collect(); // 7.6 h
+        assert_eq!(sleep_need_s(&sleep, 90), 27360);
     }
 
     #[test]
@@ -3486,11 +3611,48 @@ mod tests {
         }
         sleep.insert(120, 2 * 3600); // an unusually short night
         sleep.insert(121, 13 * 3600); // and an unusually long one
-        assert_eq!(sleep_need_s(&sleep, 122), 27000); // both filtered out
+        assert_eq!(sleep_need_s(&sleep, 122), 26720); // both filtered out; weight 20/90
 
         let short: std::collections::BTreeMap<i64, i32> =
             (100..120).map(|d| (d, 5 * 3600)).collect(); // chronic 5 h sleeper
         assert_eq!(sleep_need_s(&short, 120), 7 * 3600); // clamped to the 7 h floor
+    }
+
+    #[test]
+    fn manual_sleep_need_replaces_the_estimate_everywhere() {
+        let sleep: std::collections::BTreeMap<i64, i32> = (100..120).map(|d| (d, 7 * 3600)).collect();
+        let value = sleep_debt_summary(&sleep, Some(8 * 3600));
+        assert_eq!(value["need_source"], "manual");
+        assert_eq!(value["need_h"], 8.0);
+        assert!(value["days"].as_array().unwrap().iter().all(|d| d["sleep_need_min"] == 480.0));
+        assert!(value["need_changes"].as_array().unwrap().is_empty());
+        assert_eq!(value["need_note"], "Set by you in Profile.");
+    }
+
+    #[test]
+    fn need_changes_list_when_and_why_the_estimate_moved() {
+        // 20 days at 7 h, then one 8.5 h day per day for 14 more: the average moves each day.
+        let mut sleep: std::collections::BTreeMap<i64, i32> = (0..20).map(|d| (d, 7 * 3600)).collect();
+        for d in 20..34 {
+            sleep.insert(d, 8 * 3600 + 1800);
+        }
+        let value = sleep_debt_summary(&sleep, None);
+        assert_eq!(value["need_source"], "automatic");
+        let changes = value["need_changes"].as_array().unwrap();
+        assert!(!changes.is_empty());
+        let first = &changes[0];
+        assert!(first["to_min"].as_f64() > first["from_min"].as_f64());
+        let reason = first["reason"].as_str().unwrap();
+        assert!(reason.contains("nights with sleep, average"), "{reason}");
+        assert!(value["need_note"].as_str().unwrap().contains("nights with sleep average"));
+    }
+
+    #[test]
+    fn need_note_says_when_only_the_prior_applies() {
+        let sleep: std::collections::BTreeMap<i64, i32> = (100..105).map(|d| (d, 7 * 3600)).collect();
+        let value = sleep_debt_summary(&sleep, None);
+        let note = value["need_note"].as_str().unwrap();
+        assert!(note.contains("Fewer than 14 nights") && note.contains("7h 24m"), "{note}");
     }
 
     #[test]
@@ -3501,7 +3663,7 @@ mod tests {
             (102, 8 * 3600),
             (103, 8 * 3600),
         ]);
-        let value = sleep_debt_summary(&sleep);
+        let value = sleep_debt_summary(&sleep, None);
         assert_eq!(value["valid"], false);
         assert_eq!(value["valid_days"], 4);
     }

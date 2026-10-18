@@ -618,6 +618,36 @@ struct DebtDetailView: View {
         }
     }
 
+    /// Why the need is what it is, and the days it moved.
+    @ViewBuilder private var needCard: some View {
+        if let all = s.sleepDebt, let note = all.need_note, !note.isEmpty {
+            let changes = (all.need_changes ?? []).filter { $0.date <= day }
+            VStack(alignment: .leading, spacing: 10) {
+                SectionLabel(title: all.need_source == "manual" ? "Sleep need, set by you" : "Sleep need, estimated",
+                             icon: "moon.zzz.fill", tint: Obs.sleepTint)
+                Text(note).font(Obs.sans(12)).foregroundStyle(Obs.ink2).fixedSize(horizontal: false, vertical: true)
+                if all.need_source != "manual" {
+                    if changes.isEmpty {
+                        Text("The need did not change in these 14 days.").font(Obs.sans(11)).foregroundStyle(Obs.muted)
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(changes.reversed()) { c in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(DayFmt.relative(c.date)): \(fmtMinutes(c.from_min)) to \(fmtMinutes(c.to_min))")
+                                        .font(Obs.sans(12, .medium)).foregroundStyle(Obs.ink).monospacedDigit()
+                                    Text(c.reason.prefix(1).uppercased() + c.reason.dropFirst())
+                                        .font(Obs.sans(11)).foregroundStyle(Obs.muted)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .surface(padding: 14)
+        }
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -646,6 +676,7 @@ struct DebtDetailView: View {
                             Text(mode == 1 ? "Dashed line: sleep need, hours" : "Hours of cumulative debt")
                                 .font(Obs.sans(11)).foregroundStyle(Obs.muted)
                         }
+                        needCard
                         VStack(alignment: .leading, spacing: 10) {
                             HStack {
                                 Text("DAY").frame(maxWidth: .infinity, alignment: .leading)

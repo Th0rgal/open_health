@@ -176,7 +176,9 @@ struct DailyStat: Codable {
     /// Seven activity-score contributors, 0 to 100 (targets, stay active, move every hour, training frequency, training volume, recovery load, recovery run).
     var contributors: [Double]?
 }
-struct Profile: Codable { var sex: String?; var age: Double?; var height_m: Double?; var weight_kg: Double?; var ring_size: Double?; var ideal_midpoint: String? }
+struct Profile: Codable { var sex: String?; var age: Double?; var height_m: Double?; var weight_kg: Double?; var ring_size: Double?; var ideal_midpoint: String?
+               /// The sleep need set by the user, hours; nil when estimated.
+               var sleep_need_h: Double? }
 // a detected activity session (on-device automatic_activity_detection)
 struct WorkoutSession: Identifiable, Codable {
     let start: String; let end: String; let durationMin: Int; let label: String; let isWorkout: Double
@@ -196,6 +198,14 @@ struct SleepDebtDay: Codable, Identifiable {
     var valid_days: Int
     var id: String { date }
 }
+/// A day on which the estimated sleep need moved, with the reason.
+struct NeedChange: Codable, Identifiable {
+    var date: String
+    var from_min: Double
+    var to_min: Double
+    var reason: String
+    var id: String { date }
+}
 struct SleepDebtSummary: Codable {
     var debt_min: Double = 0
     var recent_shortfall_min: Double = 0
@@ -205,6 +215,11 @@ struct SleepDebtSummary: Codable {
     var window_days: Int = 14
     var state: String = "none"
     var days: [SleepDebtDay] = []
+    /// "manual" when the user set the need, else "automatic"; the sentence explaining the
+    /// latest need; and the days on which the estimate moved. Absent in older cached summaries.
+    var need_source: String?
+    var need_note: String?
+    var need_changes: [NeedChange]?
 
     /// The debt as it stood at the end of `day`, or nil outside the summarized window.
     func asOf(_ day: String) -> SleepDebtSummary? {

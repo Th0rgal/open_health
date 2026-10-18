@@ -14,8 +14,11 @@ private struct EditableProfile {
     var stepsSource: String
     /// Sleep stager: "auto", "official" or "xgb" (oura-summary `sleep_stager`).
     var sleepStager: String
+    /// The sleep need in hours when the user sets it; nil lets the app estimate it.
+    var sleepNeedH: Double?
 
     init(_ profile: Profile?) {
+        sleepNeedH = profile?.sleep_need_h
         let stored = (try? JSONSerialization.jsonObject(with: Data(contentsOf: DB.url.deletingLastPathComponent()
             .appendingPathComponent("profile.json"))) as? [String: Any])?["steps_source"] as? String
         stepsSource = stored == "model" && ModelFiles.stepCounter ? "model" : "ring"
@@ -41,6 +44,7 @@ private enum ProfileStore {
         object["weight_kg"] = p.weightKg; object["ring_size"] = p.ringSize
         object["steps_source"] = p.stepsSource
         if p.sleepStager == "auto" { object.removeValue(forKey: "sleep_stager") } else { object["sleep_stager"] = p.sleepStager }
+        if let need = p.sleepNeedH { object["sleep_need_h"] = need } else { object.removeValue(forKey: "sleep_need_h") }
         let midpoint = p.idealMidpoint.trimmingCharacters(in: .whitespaces)
         if midpoint.isEmpty {
             object.removeValue(forKey: "chronotype")
@@ -363,7 +367,25 @@ struct ProfileSettingsView: View {
 
     private var sleepCard: some View {
         Card(title: "Sleep", icon: "moon.fill",
-             note: "The midpoint is on the Oura app's Body Clock screen. It sets the timing part of the sleep score.") {
+             note: "The midpoint is on the Oura app's Body Clock screen. It sets the timing part of the sleep score. Sleep need is estimated from your nights unless you set it; Sleep debt shows why the estimate changes.") {
+            Toggle(isOn: Binding(get: { profile.sleepNeedH != nil },
+                                 set: { profile.sleepNeedH = $0 ? (profile.sleepNeedH ?? 7.5) : nil })) {
+                Text("Set sleep need").font(Obs.sans(13)).foregroundStyle(Obs.ink2)
+            }
+            .tint(Obs.sleepTint)
+            .padding(.vertical, 8)
+            if let need = profile.sleepNeedH {
+                FieldRule()
+                Stepper(value: Binding(get: { need }, set: { profile.sleepNeedH = $0 }), in: 5...11, step: 0.25) {
+                    HStack {
+                        Text("Sleep need").font(Obs.sans(13)).foregroundStyle(Obs.ink2)
+                        Spacer(minLength: 12)
+                        Text(fmtMinutes(need * 60)).font(Obs.sans(13)).foregroundStyle(Obs.ink).monospacedDigit()
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+            FieldRule()
             Toggle(isOn: $midpointOn.animation(.easeOut(duration: 0.2))) {
                 Text("Ideal sleep midpoint").font(Obs.sans(13)).foregroundStyle(Obs.ink2)
             }
