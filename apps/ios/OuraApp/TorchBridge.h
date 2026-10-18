@@ -3,6 +3,10 @@
 #include <stdint.h>
 #include <sqlite3.h> // surfaced to Swift via the bridging header (no SQLite3 module needed)
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Cardiovascular age (cva_2_1_5): forward(ppg [n_segs×1500] f32, demo [1×5] f32) →
 // (vascular_age, …, pwv, …). `ppg` is row-major; `demo` is [sex(-1/0/1), height_m,
 // age, ring, weight]. Writes vascular_age + pulse-wave velocity; returns 0 / -1.
