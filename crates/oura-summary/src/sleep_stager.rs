@@ -122,7 +122,7 @@ pub fn status(db: &Path) -> Value {
     let official = official_available();
     let official_notice = (!official).then(|| {
         format!(
-            "Not available in this build. Missing: {OFFICIAL_CLASSIFIER}. Extract it with tools/extract_nssa_classifier.py, add it to the models folder, and rebuild, or use the built-in staging."
+            "Not available in this build: the vendored classifier file is missing. Add it to the models folder and rebuild, or use the built-in staging."
         )
     });
     json!({
@@ -132,7 +132,7 @@ pub fn status(db: &Path) -> Value {
             {
                 "id": "official",
                 "label": "Oura model",
-                "detail": "The vendor classifier extracted from Oura's sleepstaging_2_6_0, running on this app's Rust feature pipeline. It reproduces the official app's stages closely.",
+                "detail": "The vendored classifier file, running on this app's Rust feature pipeline. It reproduces the official app's stages closely.",
                 "available": official,
                 "notice": official_notice,
             },
@@ -289,8 +289,16 @@ pub fn hypnogram_json(start_ds: i64, end_ds: i64, captured_unix: i64, stages: &[
 /// Stages every `[start_ds, end_ds, captured_unix]` window with `stager`, returning the batch
 /// shape the web dashboard reads (`null` for a window that cannot be staged). The `official`
 /// batch carries source `nssa`, the label the brain uses for Oura's own staging, and the time of
-/// its first epoch. Results are cached next to the database by input fingerprint.
-pub fn stage_nights(db: &Path, sleep_ranges: &[[i64; 3]], demo: &Demographics, stager: SleepStager) -> Option<Value> {
+/// its first epoch. Results are cached next to the database by input fingerprint. Every window
+/// that has inputs is staged, with no limit on the number of nights; `force` (an explicit
+/// recompute) ignores the cache and stages all of them again.
+pub fn stage_nights(
+    db: &Path,
+    sleep_ranges: &[[i64; 3]],
+    demo: &Demographics,
+    stager: SleepStager,
+    force: bool,
+) -> Option<Value> {
     if stager == SleepStager::Official && !official_available() {
         return None;
     }
@@ -315,7 +323,7 @@ pub fn stage_nights(db: &Path, sleep_ranges: &[[i64; 3]], demo: &Demographics, s
             };
             let key = fingerprint(&inputs, stager);
             used.push(key.clone());
-            let cached = cache.get(&key).and_then(|v| {
+            let cached = cache.get(&key).filter(|_| !force).and_then(|v| {
                 let stages: Vec<i64> = v["stages"].as_array()?.iter().filter_map(Value::as_i64).collect();
                 Some((stages, v["t0_unix"].as_f64()?))
             });
@@ -350,6 +358,57 @@ pub fn stage_nights(db: &Path, sleep_ranges: &[[i64; 3]], demo: &Demographics, s
         let _ = std::fs::write(cache_file, Value::Object(cache).to_string());
     }
     Some(Value::Array(results))
+}
+
+/// Stages one bedtime window with the stager in use ([`effective`]) and returns the hypnogram with
+/// its summary (`stages`, `asleep_min`, `efficiency_pct`, per-stage minutes, `start_local`,
+/// `end_local`, `source`), for tools that score a single night. `tz` is the UTC offset in hours of
+/// the local clock strings. The window's capture time is read from its `bedtime_period` event.
+pub fn stage_bedtime(db: &Path, start_ds: i64, end_ds: i64, tz: f64) -> Result<Value, String> {
+    let store = Store::open_read_only(db).map_err(|e| e.to_string())?;
+    let events = store.decoded_events().map_err(|e| e.to_string())?;
+    let captured = events
+        .iter()
+        .rev()
+        .find(|e| {
+            e.1 == 0x76
+                && serde_json::from_str::<Value>(&e.2).is_ok_and(|v| v["bedtime_start_ds"].as_i64() == Some(start_ds))
+        })
+        .map(|e| e.3)
+        .or_else(|| events.last().map(|e| e.3))
+        .ok_or("no events in the database")?;
+    let demo = crate::read_profile(db);
+    let stager = effective(db);
+    let staged = stage_nights(db, &[[start_ds, end_ds, captured]], &demo, stager, false)
+        .and_then(|v| v.get(0).cloned())
+        .filter(Value::is_object)
+        .or_else(|| {
+            // the chosen stager rejected the night: the built-in one is the fallback
+            (stager == SleepStager::Official)
+                .then(|| stage_nights(db, &[[start_ds, end_ds, captured]], &demo, SleepStager::Xgb, false))
+                .flatten()
+                .and_then(|v| v.get(0).cloned())
+                .filter(Value::is_object)
+        });
+    let mut out = staged.ok_or("the window cannot be staged (missing motion, beats or temperature)")?;
+    let clock = RingClock::from_events(&events);
+    let local = |ds: i64| {
+        let secs = (clock.unix_s(ds, captured) + tz * 3600.0).rem_euclid(86400.0) as i64;
+        format!("{:02}:{:02}", secs / 3600, secs % 3600 / 60)
+    };
+    let stages: Vec<i64> = out["stages"].as_array().map_or(vec![], |a| a.iter().filter_map(Value::as_i64).collect());
+    let minutes = |code: i64| stages.iter().filter(|&&c| c == code).count() as f64 * 0.5;
+    let asleep = minutes(1) + minutes(2) + minutes(3);
+    out["epochs"] = json!(stages.len());
+    out["in_bed_min"] = json!(stages.len() as f64 * 0.5);
+    out["asleep_min"] = json!(asleep);
+    out["deep_min"] = json!(minutes(1));
+    out["light_min"] = json!(minutes(2));
+    out["rem_min"] = json!(minutes(3));
+    out["wake_min"] = json!(minutes(4));
+    out["start_local"] = json!(local(start_ds));
+    out["end_local"] = json!(local(end_ds));
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -390,10 +449,11 @@ mod tests {
         assert_eq!(s["choice"], "official");
         assert_eq!(s["effective"], "xgb");
         assert_eq!(s["options"][0]["available"], false);
-        assert!(s["options"][0]["notice"].as_str().unwrap().contains(OFFICIAL_CLASSIFIER));
+        let notice = s["options"][0]["notice"].as_str().unwrap();
+        assert!(notice.contains("vendored classifier file") && !notice.contains("sleepstaging"));
         assert!(s["notice"].is_string());
         assert_eq!(s["options"][1]["available"], true);
-        assert!(stage_nights(&db, &[[0, 3000, 0]], &Demographics::default(), SleepStager::Official).is_none());
+        assert!(stage_nights(&db, &[[0, 3000, 0]], &Demographics::default(), SleepStager::Official, false).is_none());
     }
 
     #[test]

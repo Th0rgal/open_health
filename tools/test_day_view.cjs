@@ -47,14 +47,14 @@ assert(builtInLanes.some(t => t.includes('Stages · 5 min') && !t.includes('Oura
 // The sleep stager selector disables an option whose classifier file is missing and shows its notice.
 const stager = (official) => ({ choice: 'auto', effective: official ? 'official' : 'xgb', notice: null, options: [
   { id: 'official', label: 'Oura model', detail: 'official detail', available: official,
-    notice: official ? null : 'Not available in this build. Missing: sleepstaging_2_6_0_classifier.bin.' },
+    notice: official ? null : 'Not available in this build: the vendored classifier file is missing.' },
   { id: 'xgb', label: 'Built-in staging', detail: 'built-in detail', available: true, notice: null }] });
 w.setStager(stager(false));
 w.renderStagerChoice();
 const choice = w.document.getElementById('f-stager');
 const options = [...choice.options].map(o => [o.value, o.disabled]);
 assert.deepEqual(options, [['auto', false], ['official', true], ['xgb', false]]);
-assert(w.document.getElementById('f-stager-note').textContent.includes('sleepstaging_2_6_0_classifier.bin'));
+assert(w.document.getElementById('f-stager-note').textContent.includes('vendored classifier file'));
 w.setStager(stager(true));
 w.renderStagerChoice();
 assert(![...w.document.getElementById('f-stager').options].some(o => o.disabled));

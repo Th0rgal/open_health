@@ -152,6 +152,9 @@ fn run_py_json_stdin_optional(
 /// The web dashboard's [`ModelRunner`]: shells out to the Python torch runners for the activity,
 /// illness and cardiovascular models, and stages sleep in process (the vendor classifier or the
 /// built-in trees), with a signal-based estimate for nights neither can stage.
+/// Set when the profile is saved; the next summary build stages all nights again.
+static RESTAGE_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 struct PythonRunner;
 impl ModelRunner for PythonRunner {
     fn run(&self, input: ModelInputs) -> ModelOutputs {
@@ -204,12 +207,14 @@ impl ModelRunner for PythonRunner {
         let staged_any = |batch: &Option<Value>| {
             batch.as_ref().and_then(|v| v.as_array()).is_some_and(|a| a.iter().any(Value::is_object))
         };
+        // a saved profile is an explicit recompute: stage every night again, ignoring the caches
+        let force = RESTAGE_ALL.swap(false, std::sync::atomic::Ordering::SeqCst);
         let mut sleep_batch = None;
         if !sleep_ranges.is_empty() && sleep_stager == SleepStager::Official {
-            sleep_batch = oura_summary::sleep_stager::stage_nights(db, sleep_ranges, demo, SleepStager::Official);
+            sleep_batch = oura_summary::sleep_stager::stage_nights(db, sleep_ranges, demo, SleepStager::Official, force);
         }
         if !sleep_ranges.is_empty() && !staged_any(&sleep_batch) {
-            sleep_batch = oura_summary::sleep_stager::stage_nights(db, sleep_ranges, demo, SleepStager::Xgb);
+            sleep_batch = oura_summary::sleep_stager::stage_nights(db, sleep_ranges, demo, SleepStager::Xgb, force);
         }
         if !sleep_ranges.is_empty() {
             sleep_batch = Some(fill_with_signals(db, sleep_ranges, sleep_batch));
@@ -761,7 +766,10 @@ async fn handle(
         ("POST", "/api/profile") => {
             match serde_json::from_str::<Value>(body.trim_end_matches('\0')) {
                 Ok(v) => match write_profile(&db, &v) {
-                    Ok(_) => json_resp(&mut sock, &profile_json(&db)).await,
+                    Ok(_) => {
+                        RESTAGE_ALL.store(true, std::sync::atomic::Ordering::SeqCst);
+                        json_resp(&mut sock, &profile_json(&db)).await
+                    }
                     Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,
                 },
                 Err(e) => json_resp(&mut sock, &json!({ "error": e.to_string() })).await,

@@ -200,10 +200,22 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
-    /// Compute a Sleep Score for the latest night, live from ring data: Oura's
-    /// SleepNet hypnogram → durations/efficiency/latency, bedtime regularity, then
+    /// Stage one bedtime window with the selected sleep stager (see `dashboard
+    /// --sleep-stager`) and print the hypnogram and its summary as JSON. Used by
+    /// tools/score_sleep.py.
+    StageNight {
+        /// Bedtime start, ring deciseconds.
+        start_ds: i64,
+        /// Bedtime end, ring deciseconds.
+        end_ds: i64,
+        /// UTC offset (hours) for the start_local / end_local strings.
+        #[arg(long, default_value_t = local_tz_offset_hours(), value_parser = parse_tz_offset, allow_hyphen_values = true)]
+        tz_offset: f64,
+    },
+    /// Compute a Sleep Score for the latest night, live from ring data: the staged
+    /// hypnogram → durations/efficiency/latency, bedtime regularity, then
     /// the contributor curves + combiner weights calibrated from a trends export.
-    /// Runs via tools/score_sleep.py (needs the Python venv with torch).
+    /// Runs via tools/score_sleep.py (Python with numpy; staging comes from `stage-night`).
     SleepScore {
         /// Timezone offset (hours from UTC) for the bedtime clock.
         #[arg(long, default_value_t = local_tz_offset_hours(), value_parser = parse_tz_offset, allow_hyphen_values = true)]
@@ -492,6 +504,18 @@ async fn main() -> Result<()> {
             threshold,
             json,
         } => cmd_sessions(&cli, *tz_offset, *threshold, *json),
+        Command::StageNight {
+            start_ds,
+            end_ds,
+            tz_offset,
+        } => {
+            dashboard::register_official_stager();
+            let db = pyrunner::resolve_db(&cli.db)?;
+            let staged = oura_summary::sleep_stager::stage_bedtime(&db, *start_ds, *end_ds, *tz_offset)
+                .map_err(|e| anyhow!(e))?;
+            println!("{staged}");
+            Ok(())
+        }
         Command::SleepScore {
             tz_offset,
             csv,
@@ -720,9 +744,8 @@ fn cmd_sessions(cli: &Cli, tz_offset: f64, threshold: f64, json: bool) -> Result
 }
 
 /// Sleep Score for the latest night, computed live from ring data via
-/// tools/score_sleep.py (SleepNet hypnogram + calibrated contributor curves +
-/// combiner weights). Always shells out to Python, which already owns the torch
-/// model path; there is no native LibTorch backend for the scorer.
+/// tools/score_sleep.py (staged hypnogram + calibrated contributor curves +
+/// combiner weights). The scorer runs in Python and calls `oura stage-night` for the hypnogram.
 fn cmd_sleep_score(cli: &Cli, tz_offset: f64, csv: Option<PathBuf>, json: bool) -> Result<()> {
     let root =
         pyrunner::require_repo_root(Path::new("tools/score_sleep.py"), "tools/score_sleep.py")?;

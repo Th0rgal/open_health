@@ -16,6 +16,7 @@ Usage: python tools/score_sleep.py [DB] [--csv TRENDS.csv] [--start DS --end DS]
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -80,10 +81,17 @@ def timing_features(db, start_ds, end_ds, mid_hour):
 
 
 def hypnogram_for_window(db, start_ds, end_ds, tz):
-    """The torch NSSA runner (tools/run_sleep_model.py) is gone: staging runs in Rust now
-    (oura-summary `sleep_stager`), and this legacy scorer has no bridge to it yet."""
-    sys.exit("score_sleep.py needs a hypnogram runner and the torch sleep runner was removed. "
-             "Use the dashboard or the iOS app for the Sleep Score.")
+    """Stage one bedtime window with the Rust stager the apps use (`oura stage-night`), which
+    resolves the stager from profile.json the same way the summary does. Set OURA_BIN to the
+    binary; otherwise target/release/oura, target/debug/oura or `oura` on PATH is used."""
+    candidates = [os.environ.get("OURA_BIN"), str(REPO / "target" / "release" / "oura"),
+                  str(REPO / "target" / "debug" / "oura"), "oura"]
+    exe = next((c for c in candidates if c and (os.path.isfile(c) or c == "oura")), "oura")
+    cmd = [exe, "--db", str(db), "stage-night", str(start_ds), str(end_ds), "--tz-offset", str(tz)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        sys.exit(f"stage-night failed: {r.stderr.strip() or r.stdout.strip()}")
+    return json.loads(r.stdout)
 
 
 def metrics_from_night(db, start_ds, end_ds, tz=1):

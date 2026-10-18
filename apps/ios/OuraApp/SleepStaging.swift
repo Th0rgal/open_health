@@ -3,7 +3,7 @@ import Foundation
 /// Sleep staging on the phone. Both stagers run open_oura's Rust feature pipeline in process and
 /// produce per-30s stage arrays:
 /// - `official`: the vendor classifier (extracted by tools/extract_nssa_classifier.py) in place of
-///   the community-trained trees. Needs `sleepstaging_2_6_0_classifier.bin` in the bundle.
+///   the community-trained trees. Needs the vendored classifier file in the bundle.
 /// - `xgb`: the compiled-in community-trained tree ensemble. Always available.
 /// The shared brain (oura-summary `sleep_stager`) resolves which one runs from the profile choice
 /// and the registered classifier; each stager keeps its own cache file so switching never mixes

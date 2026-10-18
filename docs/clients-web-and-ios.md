@@ -230,18 +230,19 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
   cannot stage fall back to the signal estimate. With
   `steps_source = model`, desktop has no step counter weights loader and falls back to the
   ring's step count.
-- **Official stager coverage**: on the web the official stager stages every night. iOS stages
-  only the latest night automatically with it, as the built-in stager covers every night
-  (`SleepStaging.coversEveryNight`); older nights are staged on demand or by "Recompute
-  everything". Switching the stager on iOS re-stages from that stager's own cache. The forest
-  adds about two seconds to a 23-window database on a desktop, so iOS could cover every night; this
-  is not measured on a phone.
-- **Sleep staging without the model runtime**: `SleepStaging.swift` is still inside `#if TORCH`
-  together with `EventStore.swift` and `ModelCache.swift`, so a build without the model runtime
-  has no on-device staging although neither stager needs it now.
-- **Legacy Python sleep scorer**: `tools/score_sleep.py`, `tools/build_daily.py` sleep metrics and
-  `oura sleep-score` called the removed torch runner (`run_sleep_model.py`) and report that a
-  hypnogram runner is missing. The apps are unaffected.
+- **Staging coverage**: both clients stage every night that has data but no stored staging, with
+  either stager. An explicit recompute stages all nights again: on iOS "Recompute everything"
+  and a profile save (`restageAll`), on the web a profile save (the next summary build ignores
+  `official_stage_cache.json` / `xgb_stage_cache.json`). Switching the stager keeps each
+  stager's own cache. The stagers take well under a second a night on a desktop; the iOS cost
+  per night is not measured.
+- **Staging without the model runtime**: `SleepStaging.swift`, `EventStore.swift` and
+  `ModelCache.swift` are not behind `#if TORCH`, and `Core.withSleep` runs the sleep pass alone,
+  so a build without the on-device models still stages with both stagers. Activity, illness and
+  cardiovascular analysis stay torch-only.
+- **Sleep score scripts**: `tools/score_sleep.py` (and `build_daily.py`, `oura sleep-score`) stage
+  through `oura stage-night`, so they use the stager in `profile.json`. They need an `oura`
+  binary (`$OURA_BIN`, `target/{release,debug}/oura`, or on PATH).
 - **Sleep report without a hypnogram**: iOS still draws the time-in-bed strip and the
   signal lanes; the web returns early.
 - **Sleep score + breathing rate** (`nights[].sleep_score`, `breath_rate`).
