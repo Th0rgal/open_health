@@ -79,7 +79,7 @@ def timing_features(db, start_ds, end_ds, mid_hour):
     return {"mid_hour": mid_hour, "mid_opt": -((mid_hour - 27.0) ** 2), "mid_reg": reg}
 
 
-def hypnogram_for_window(db, start_ds, end_ds, tz=1):
+def hypnogram_for_window(db, start_ds, end_ds, tz):
     """The torch NSSA runner (tools/run_sleep_model.py) is gone: staging runs in Rust now
     (oura-summary `sleep_stager`), and this legacy scorer has no bridge to it yet."""
     sys.exit("score_sleep.py needs a hypnogram runner and the torch sleep runner was removed. "

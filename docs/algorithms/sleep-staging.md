@@ -10,7 +10,7 @@ the mismatch.
 This repository stages with the Rust port of that pipeline (open_oura,
 `oura_analysis::ported::sleepstaging`). Its classifier is either a community-trained tree
 ensemble that approximates the official staging (the built-in stager) or the vendor forest
-extracted from `libalgos.so` (the `official` stager, "Oura model" in the clients). Neither needs
+extracted from the vendor native library (the `official` stager, "Oura model" in the clients). Neither needs
 a model runtime. See [Choosing the stager](#choosing-the-stager).
 
 ## The official pipeline
@@ -28,9 +28,9 @@ a model runtime. See [Choosing the stager](#choosing-the-stager).
 | Store | `settings.fragment.health.c` (case 3) → `SleepHandler.calculateSleep` → ecore `calculate_sleep_score_numerical` | The digits pass through unchanged. Epoch *k* starts at floor30(bedtime start) + 30·k. |
 | Display | `DbSleepExtKt.sleepPhases5Min` → `SleepPhaseConverter.aggregate30SecTo5Min` | The sleep chart draws **5-minute blocks**: windows of 10 epochs; a last window shorter than 5 is dropped; ≥4 awake epochs → AWAKE; otherwise the mode, with ties broken AWAKE > DEEP > REM > LIGHT. |
 
-The graph calls five native ops from `libalgos.so`. The Rust port reimplements the four
-signal-processing ops (`oura_create_windows` @0x5602fc, `oura_find_indices` @0x561248,
-`oura_biquad_cascade` @0x55e860, `oura_find_peaks` @0x55ee1c) inside the feature pipeline. The
+The graph calls five native ops from the vendor library. The Rust port reimplements the four
+signal-processing ops (`oura_create_windows`, `oura_find_indices`, `oura_biquad_cascade`,
+`oura_find_peaks`) inside the feature pipeline. The
 fifth, `oura_sleep_classifier`, is a treelite forest of 2000 trees, 4 classes, 182 features and
 63 code units.
 
@@ -118,7 +118,7 @@ the local machine:
 python tools/extract_nssa_classifier.py config.arm64_v8a.apk
 ```
 
-The script needs the vendor `libalgos.so` (from the APK) and the packages listed in its header.
-Place the output in `notes/models/` (web; `$OURA_MODELS_DIR` overrides the directory) or add it
+The script needs the vendor native library (from the APK) and the packages listed in its header.
+Place the output in the models directory (web; `$OURA_MODELS_DIR` overrides the directory) or add it
 to the iOS bundle as `sleepstaging_2_6_0_classifier.bin` (optional resource in `project.yml`).
 Both files are gitignored. There is no graph (`.pt` or `.ptl`) requirement.
