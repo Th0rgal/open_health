@@ -326,15 +326,15 @@ struct ProfileSettingsView: View {
         }
     }
 
-    /// Which stager produces the hypnogram. An option whose model files are not in this build is
-    /// disabled and explained in the same muted style as the capture hints.
+    /// Which stager produces the hypnogram. An option whose classifier file is not in this build is
+    /// not offered and is explained in the same muted style as the capture hints.
     private var sleepStagingCard: some View {
         let status = SleepStagerStatus.load()
         let current = status?.options.first { $0.id == profile.sleepStager && $0.available }
         return Card(title: "Sleep staging", icon: "waveform.path.ecg",
-             note: "Automatic uses the official staging when its model files are in the build, otherwise the built-in staging. Saving re-stages your nights.") {
-            // A segment cannot be disabled in a segmented picker, so only options whose model files
-            // are in this build are offered. A stored choice that is not offered shows as Automatic.
+             note: "Automatic uses the Oura model staging when its classifier file is in the build, otherwise the built-in staging. Saving re-stages your nights.") {
+            // A segment cannot be disabled in a segmented picker, so only options whose classifier
+            // file is in this build are offered. A stored choice that is not offered shows as Automatic.
             let offered = (status?.options ?? []).filter { $0.available }
             Picker("Sleep staging", selection: Binding(
                 get: { profile.sleepStager == "auto" || offered.contains { $0.id == profile.sleepStager } ? profile.sleepStager : "auto" },
@@ -347,7 +347,7 @@ struct ProfileSettingsView: View {
             .pickerStyle(.segmented)
             .padding(.vertical, 12)
             if profile.sleepStager == "auto" {
-                Text("Using \(status?.effective == "official" ? "official" : "built-in") staging.")
+                Text("Using \(status?.effective == "official" ? "Oura model" : "built-in") staging.")
                     .font(Obs.sans(11)).foregroundStyle(Obs.ink2).padding(.bottom, 8)
             } else if let current {
                 Text(current.detail).font(Obs.sans(11)).foregroundStyle(Obs.ink2).padding(.bottom, 8)

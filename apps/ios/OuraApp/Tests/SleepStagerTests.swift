@@ -2,7 +2,7 @@ import XCTest
 @testable import OuraApp
 
 final class SleepStagerTests: XCTestCase {
-    func testStatusOffersTheBuiltInStagerAndReportsMissingOfficialFiles() throws {
+    func testStatusOffersTheBuiltInStagerAndReportsMissingOfficialClassifier() throws {
         let status = try XCTUnwrap(SleepStagerStatus.load())
         let builtIn = try XCTUnwrap(status.options.first { $0.id == "xgb" })
         XCTAssertTrue(builtIn.available)

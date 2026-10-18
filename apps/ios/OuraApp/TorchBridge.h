@@ -3,25 +3,6 @@
 #include <stdint.h>
 #include <sqlite3.h> // surfaced to Swift via the bridging header (no SQLite3 module needed)
 
-// Run Oura's NSSA sleep stager (sleepstaging_2_6_0.ptl) on one ring bedtime and
-// return its per-30s stage codes (1=DEEP 2=LIGHT 3=REM 4=WAKE) and epoch start
-// stamps (ms), matching tools/nssa_stager.py. Inputs as built by SleepStaging.swift
-// (twin of tools/nssa_inputs.py): acm_val n×6 [madIqr, madMax, madTmean, faIqr,
-// faMax, faMean], ibi_val n×3 [ibi, amplitude, validity] (ecore-corrected),
-// temp_val n, demographics [age, bmi, sex]. Returns the epoch count or -1.
-#ifdef __cplusplus
-extern "C" {
-#endif
-int oura_nssa(const char *model_path,
-              const int64_t *acm_ts, const float *acm_val, int n_acm,
-              const int64_t *ibi_ts, const float *ibi_val, int n_ibi,
-              const int64_t *temp_ts, const float *temp_val, int n_temp,
-              const float *demographics, int64_t bedtime_start_ms, int64_t bedtime_end_ms,
-              int *out_stages, int64_t *out_timestamps_ms, int max_out);
-// Where `oura_ops::oura_sleep_classifier` reads its forest (bundled
-// sleepstaging_2_6_0_classifier.bin, see tools/extract_nssa_classifier.py).
-void oura_nssa_set_classifier_path(const char *path);
-
 // Cardiovascular age (cva_2_1_5): forward(ppg [n_segs×1500] f32, demo [1×5] f32) →
 // (vascular_age, …, pwv, …). `ppg` is row-major; `demo` is [sex(-1/0/1), height_m,
 // age, ring, weight]. Writes vascular_age + pulse-wave velocity; returns 0 / -1.

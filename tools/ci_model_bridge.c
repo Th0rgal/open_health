@@ -1,11 +1,6 @@
 // Validation-only bridge: type-check Swift model plumbing without proprietary weights.
 // Never included by project.yml or project-ci.yml; no inference is performed here.
 #include "../apps/ios/OuraApp/TorchBridge.h"
-int oura_nssa(const char *path, const int64_t *at, const float *av, int na,
-              const int64_t *it, const float *iv, int ni,
-              const int64_t *tt, const float *tv, int nt, const float *demo,
-              int64_t start, int64_t end, int *stages, int64_t *timestamps, int cap) { return -1; }
-void oura_nssa_set_classifier_path(const char *path) {}
 int oura_cva(const char *path, const float *ppg, int n, const float *demo,
              double *age, double *pwv) { return -1; }
 const char *oura_activity_last_error(void) { return "validation stub: inference unavailable"; }

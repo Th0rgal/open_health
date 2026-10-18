@@ -2,7 +2,7 @@
 """Compute a Sleep Score for a night **live from ring data** — no cloud.
 
 Pipeline:
-  1. SleepNet (run_sleep_model.py) → hypnogram → durations / efficiency / latency.
+  1. SleepNet hypnogram (runner removed, see metrics_from_night) → hypnogram → durations / efficiency / latency.
   2. bedtime_period history → sleep-midpoint + 7-day regularity (circadian timing).
   3. contributor curves + combiner weights (fit from the trends export, see
      tools/fit_sleep_score.py / docs/algorithms/score-weights.md) map each raw
@@ -79,15 +79,17 @@ def timing_features(db, start_ds, end_ds, mid_hour):
     return {"mid_hour": mid_hour, "mid_opt": -((mid_hour - 27.0) ** 2), "mid_reg": reg}
 
 
+def hypnogram_for_window(db, start_ds, end_ds, tz=1):
+    """The torch NSSA runner (tools/run_sleep_model.py) is gone: staging runs in Rust now
+    (oura-summary `sleep_stager`), and this legacy scorer has no bridge to it yet."""
+    sys.exit("score_sleep.py needs a hypnogram runner and the torch sleep runner was removed. "
+             "Use the dashboard or the iOS app for the Sleep Score.")
+
+
 def metrics_from_night(db, start_ds, end_ds, tz=1):
     """Run SleepNet for the window and derive the raw metrics the curves expect
     (durations in seconds to match the export; efficiency in %; awake fraction)."""
-    cmd = [sys.executable, str(REPO / "tools" / "run_sleep_model.py"), "--json",
-           str(start_ds), str(end_ds), str(db), str(tz)]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0 or not r.stdout.strip():
-        sys.exit(f"SleepNet failed: {r.stderr.strip() or r.stdout.strip()}")
-    o = json.loads(r.stdout)
+    o = hypnogram_for_window(db, start_ds, end_ds, tz)
     stages = o["stages"]                       # 1=DEEP 2=LIGHT 3=REM 4=WAKE
     # sleep latency: time to first sustained sleep (>=10 min / 20 epochs non-WAKE)
     onset = next((i for i in range(len(stages))

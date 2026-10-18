@@ -31,8 +31,6 @@ xcrun -sdk iphonesimulator clang++ -std=c++17 -fobjc-arc -O1 -target "$TRIPLE" \
     -c "$APPDIR/TorchBridge.mm" -o "$BUILD/TorchBridge.o"
 xcrun -sdk iphonesimulator clang -std=c11 -O1 -target "$TRIPLE" \
     -c "$APPDIR/CrashCatch.c" -o "$BUILD/CrashCatch.o"
-xcrun -sdk iphonesimulator clang -std=c11 -O2 -ffp-contract=off -target "$TRIPLE" \
-    -c "$APPDIR/NssaOps.c" -o "$BUILD/NssaOps.o"
 
 echo "==> compile SwiftUI app (TORCH) + UniFFI bindings, link core + torch"
 # -O so simulator stage timings resemble the Release build that ships.
@@ -40,7 +38,7 @@ xcrun -sdk iphonesimulator swiftc -O \
     -target "$TRIPLE" -parse-as-library -D TORCH \
     -import-objc-header "$APPDIR/TorchBridge.h" \
     -I "$GEN/headers" \
-    "$GEN/oura_core.swift" "$APPDIR"/*.swift "$BUILD/TorchBridge.o" "$BUILD/CrashCatch.o" "$BUILD/NssaOps.o" \
+    "$GEN/oura_core.swift" "$APPDIR"/*.swift "$BUILD/TorchBridge.o" "$BUILD/CrashCatch.o" \
     -L "$XCF" -loura_core \
     -lc++ -lsqlite3 \
     -L "$LT/lib" -ltorch -ltorch_cpu -lc10 \
@@ -58,8 +56,7 @@ cp "$LT/lib/libtorch.dylib" "$LT/lib/libtorch_cpu.dylib" \
 cp "$REPO/notes/models/mobile/cva_2_1_5.ptl" "$APP/cva_2_1_5.ptl"
 cp "$REPO/notes/models/mobile/automatic_activity_detection_3_1_15.ptl" "$APP/automatic_activity_detection_3_1_15.ptl"
 cp "$REPO/notes/models/step_counter_1_3_0.bin" "$APP/step_counter_1_3_0.bin" 2>/dev/null || true
-# optional: the app reports a missing sleep model instead of failing the build
-cp "$REPO/notes/models/mobile/sleepstaging_2_6_0.ptl" "$APP/sleepstaging_2_6_0.ptl" 2>/dev/null || true
+# optional: the app offers only the built-in stager without the vendor classifier
 cp "$REPO/notes/models/mobile/sleepstaging_2_6_0_classifier.bin" "$APP/sleepstaging_2_6_0_classifier.bin" 2>/dev/null || true
 cp "$REPO/notes/models/mobile/illness_detection_0_5_1.ptl" "$APP/illness_detection_0_5_1.ptl"
 # the store runs in WAL mode; fold any -wal pages back in so the single-file copy

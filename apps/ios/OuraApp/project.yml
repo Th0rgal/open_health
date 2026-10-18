@@ -102,10 +102,6 @@ targets:
       - path: ModelCache.swift
       - path: ModelProgress.swift
       - path: SleepStaging.swift
-      - path: IbiCorrection.swift
-      - path: NssaOps.c
-        compilerFlags: [-ffp-contract=off]
-      - path: NssaOps.h
       - path: CvaModel.swift
       - path: ActivityModel.swift
       - path: IllnessModel.swift
@@ -122,11 +118,8 @@ targets:
       - path: ../../../notes/models/mobile/cva_2_1_5.ptl
         optional: true
         buildPhase: resources
-      # NSSA sleep stager + its tree-ensemble classifier (tools/extract_nssa_classifier.py).
-      # Optional: without them the app offers only the built-in stager.
-      - path: ../../../notes/models/mobile/sleepstaging_2_6_0.ptl
-        optional: true
-        buildPhase: resources
+      # The vendor sleep classifier (tools/extract_nssa_classifier.py), read by the Rust stager.
+      # Optional: without it the app offers only the built-in stager.
       - path: ../../../notes/models/mobile/sleepstaging_2_6_0_classifier.bin
         optional: true
         buildPhase: resources

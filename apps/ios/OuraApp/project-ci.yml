@@ -68,7 +68,6 @@ targets:
       - path: ProfileSettings.swift
       - path: ModelProgress.swift
       - path: SleepStaging.swift
-      - path: IbiCorrection.swift
       - path: CrashCatch.c
       - path: CrashCatch.h
       - path: Diagnostics.swift

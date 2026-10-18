@@ -8,15 +8,11 @@ enum ModelFiles {
         Bundle.main.path(forResource: name, ofType: ext)
     }
 
-    /// The official sleep stager (Oura's sleepstaging graph and its extracted classifier). The
-    /// check runs once and is reported to the shared brain, which decides the stager in use.
+    /// The official sleep stager's classifier (extracted from the vendor library, see
+    /// tools/extract_nssa_classifier.py). The check runs once and is reported to the shared brain,
+    /// which decides the stager in use. The classifier runs in Rust, so no model runtime is involved.
     static let officialSleepStager: Bool = {
-        #if TORCH
-        return setOfficialSleepStagerFiles(graphPath: bundled("sleepstaging_2_6_0", "ptl"),
-                                           classifierPath: bundled("sleepstaging_2_6_0_classifier", "bin"))
-        #else
-        return setOfficialSleepStagerFiles(graphPath: nil, classifierPath: nil)
-        #endif
+        setOfficialSleepStagerClassifier(classifierPath: bundled("sleepstaging_2_6_0_classifier", "bin"))
     }()
 
     #if TORCH

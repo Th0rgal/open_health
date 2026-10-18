@@ -48,7 +48,6 @@ NEWEST = [
     "pregnancy_biometrics_0_4_0",
     "sleepnet_bdi_0_4_0",
     "sleepnet_moonstone_1_2_0",
-    "sleepstaging_2_6_0",
     "step_counter_1_3_0",
     "steps_motion_decoder_2_0_0",
     "stress_daytime_sensing_1_1_0",
@@ -97,11 +96,6 @@ def export_one(name):
     if not src.exists():
         return name, None, "file missing"
     try:
-        if name.startswith("sleepstaging_"):
-            # NSSA calls oura_ops::* custom ops: register their schemas so the graph
-            # loads. The .ptl keeps the op names; the iOS app provides them natively
-            # (TorchBridge.mm + NssaOps.c).
-            import nssa_ops  # noqa: F401
         m = torch.jit.load(str(src), map_location="cpu").eval()
         if name == "automatic_activity_detection_3_1_15":
             m = repair_activity_empty_peaks(m)
