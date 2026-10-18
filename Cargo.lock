@@ -576,7 +576,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1272,7 +1272,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "oura-analysis"
 version = "0.1.0"
-source = "git+https://github.com/manueldeprada/open_oura?rev=5a425ab19798c52aa81e0515026cc33590737efa#5a425ab19798c52aa81e0515026cc33590737efa"
+source = "git+https://github.com/manueldeprada/open_oura?rev=d31d904789fd60493b7fabe84910071f2d7e7de1#d31d904789fd60493b7fabe84910071f2d7e7de1"
 dependencies = [
  "oura-protocol",
  "serde",
@@ -1343,7 +1343,7 @@ dependencies = [
 [[package]]
 name = "oura-link"
 version = "0.1.0"
-source = "git+https://github.com/manueldeprada/open_oura?rev=5a425ab19798c52aa81e0515026cc33590737efa#5a425ab19798c52aa81e0515026cc33590737efa"
+source = "git+https://github.com/manueldeprada/open_oura?rev=d31d904789fd60493b7fabe84910071f2d7e7de1#d31d904789fd60493b7fabe84910071f2d7e7de1"
 dependencies = [
  "async-trait",
  "btleplug",
@@ -1360,7 +1360,7 @@ dependencies = [
 [[package]]
 name = "oura-protocol"
 version = "0.1.0"
-source = "git+https://github.com/manueldeprada/open_oura?rev=5a425ab19798c52aa81e0515026cc33590737efa#5a425ab19798c52aa81e0515026cc33590737efa"
+source = "git+https://github.com/manueldeprada/open_oura?rev=d31d904789fd60493b7fabe84910071f2d7e7de1#d31d904789fd60493b7fabe84910071f2d7e7de1"
 dependencies = [
  "aes",
  "hex",
@@ -1372,7 +1372,7 @@ dependencies = [
 [[package]]
 name = "oura-store"
 version = "0.1.0"
-source = "git+https://github.com/manueldeprada/open_oura?rev=5a425ab19798c52aa81e0515026cc33590737efa#5a425ab19798c52aa81e0515026cc33590737efa"
+source = "git+https://github.com/manueldeprada/open_oura?rev=d31d904789fd60493b7fabe84910071f2d7e7de1#d31d904789fd60493b7fabe84910071f2d7e7de1"
 dependencies = [
  "oura-protocol",
  "rusqlite",
@@ -2470,7 +2470,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
