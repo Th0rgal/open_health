@@ -16,13 +16,14 @@ class StageNightBridgeTests(unittest.TestCase):
             # the stand-in prints its arguments back so the call shape is checked too
             exe.write_text("#!/bin/sh\necho '" + json.dumps(hyp)[:-1] + ', "argv": "\'"$*"\'"}\'\n')
             exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+            offset = 2
             os.environ["OURA_BIN"] = str(exe)
             try:
-                got = score_sleep.hypnogram_for_window("x.db", 10, 20, 2)
+                got = score_sleep.hypnogram_for_window("x.db", 10, 20, offset)
             finally:
                 del os.environ["OURA_BIN"]
         self.assertEqual(got["stages"], [2, 2, 1, 4])
-        self.assertEqual(got["argv"], "--db x.db stage-night 10 20 --tz-offset 2")
+        self.assertEqual(got["argv"], f"--db x.db stage-night 10 20 --tz-offset {offset}")
 
 
 if __name__ == "__main__":
