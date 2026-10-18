@@ -137,16 +137,6 @@ fn run_py_json(root: &Path, py: &Path, script: &str, args: &[String]) -> Option<
     run_py_json_stdin_optional(root, py, script, args, None)
 }
 
-fn run_py_json_stdin(
-    root: &Path,
-    py: &Path,
-    script: &str,
-    args: &[String],
-    input: &[u8],
-) -> Option<Value> {
-    run_py_json_stdin_optional(root, py, script, args, Some(input))
-}
-
 fn run_py_json_stdin_optional(
     root: &Path,
     py: &Path,
@@ -159,9 +149,9 @@ fn run_py_json_stdin_optional(
     model_output(command, input, std::time::Duration::from_secs(180))
 }
 
-/// The web dashboard's [`ModelRunner`]: shells out to the Python torch runners,
-/// exactly as before, and falls back to Rust signal-based sleep staging when the
-/// Python environment or private `.pt` model file is unavailable on a user's PC.
+/// The web dashboard's [`ModelRunner`]: shells out to the Python torch runners for the activity,
+/// illness and cardiovascular models, and stages sleep in process (the vendor classifier or the
+/// built-in trees), with a signal-based estimate for nights neither can stage.
 struct PythonRunner;
 impl ModelRunner for PythonRunner {
     fn run(&self, input: ModelInputs) -> ModelOutputs {
@@ -174,13 +164,6 @@ impl ModelRunner for PythonRunner {
         } = input;
         let root = repo_root();
         let py = root.as_deref().map(python_bin);
-        let sleep_stdin = serde_json::to_vec(sleep_ranges).unwrap_or_default();
-        let sleep_args = vec![
-            db.display().to_string(),
-            tz.to_string(),
-            "--json".into(),
-            "--batch".into(),
-        ];
         let cva_args = vec![
             db.display().to_string(),
             "--json".into(),
@@ -203,34 +186,30 @@ impl ModelRunner for PythonRunner {
         ];
         let illness_args = vec![db.display().to_string(), tz.to_string(), "--json".into()];
 
-        let (mut sleep_batch, cva, activity, illness) = match (root.as_deref(), py.as_deref()) {
+        let (cva, activity, illness) = match (root.as_deref(), py.as_deref()) {
             (Some(r), Some(p)) => std::thread::scope(|s| {
-                // the official stager is the Python NSSA runner; the built-in one runs below, in process
-                let sh = s.spawn(|| {
-                    (sleep_stager == SleepStager::Official).then(|| {
-                        run_py_json_stdin(r, p, "tools/run_sleep_model.py", &sleep_args, &sleep_stdin)
-                    })
-                    .flatten()
-                });
                 let ch = s.spawn(|| run_py_json(r, p, "tools/run_cva_model.py", &cva_args));
                 let ah = s.spawn(|| run_py_json(r, p, "tools/run_activity_model.py", &act_args));
                 let ih = s.spawn(|| run_py_json(r, p, "tools/run_illness_model.py", &illness_args));
                 (
-                    sh.join().ok().flatten(),
                     ch.join().ok().flatten(),
                     ah.join().ok().flatten(),
                     ih.join().ok().flatten(),
                 )
             }),
-            _ => (None, None, None, None),
+            _ => (None, None, None),
         };
-        // Stager order: the chosen one, then the built-in tree ensemble (when the official
-        // runner is unavailable or fails), then the signal estimate for windows still unstaged.
+        // Stager order: the chosen one, then the built-in tree ensemble (when the classifier is
+        // unavailable or staged nothing), then the signal estimate for windows still unstaged.
         let staged_any = |batch: &Option<Value>| {
             batch.as_ref().and_then(|v| v.as_array()).is_some_and(|a| a.iter().any(Value::is_object))
         };
+        let mut sleep_batch = None;
+        if !sleep_ranges.is_empty() && sleep_stager == SleepStager::Official {
+            sleep_batch = oura_summary::sleep_stager::stage_nights(db, sleep_ranges, demo, SleepStager::Official);
+        }
         if !sleep_ranges.is_empty() && !staged_any(&sleep_batch) {
-            sleep_batch = oura_summary::sleep_stager::stage_nights_xgb(db, sleep_ranges, demo);
+            sleep_batch = oura_summary::sleep_stager::stage_nights(db, sleep_ranges, demo, SleepStager::Xgb);
         }
         if !sleep_ranges.is_empty() {
             sleep_batch = Some(fill_with_signals(db, sleep_ranges, sleep_batch));
@@ -262,16 +241,13 @@ fn fill_with_signals(db: &Path, ranges: &[[i64; 3]], batch: Option<Value>) -> Va
     Value::Array(out)
 }
 
-/// Reports to the shared brain which files of the official sleep stager exist on this machine,
-/// searched where the Python runners search for models.
+/// Reports to the shared brain whether the vendor classifier exists on this machine, searched
+/// where the Python runners search for models.
 pub fn register_official_stager() {
     use oura_summary::sleep_stager as stager;
     let root = repo_root();
-    let find = |name: &str| root.as_deref().map(|r| crate::pyrunner::model_path(r, name));
-    stager::register_official_files(
-        find(&format!("{}.pt", stager::OFFICIAL_GRAPH)).as_deref(),
-        find(stager::OFFICIAL_CLASSIFIER).as_deref(),
-    );
+    let classifier = root.as_deref().map(|r| crate::pyrunner::model_path(r, stager::OFFICIAL_CLASSIFIER));
+    stager::register_official_classifier(classifier.as_deref());
 }
 
 /// `build_summary` for the web dashboard — runs the models via Python.

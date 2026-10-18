@@ -1,34 +1,35 @@
-//! Which sleep stager produces the hypnogram, and the tree-ensemble stager that is always present.
+//! Which sleep stager produces the hypnogram, and the in-process stagers that run it.
 //!
-//! Two stagers exist:
+//! Two stagers exist, both running on the Rust feature pipeline of open_oura
+//! (`oura_analysis::ported::sleepstaging`):
 //!
-//! * `official`: Oura's `sleepstaging_2_6_0` TorchScript graph together with the classifier
-//!   extracted from the vendor library (`tools/extract_nssa_classifier.py`). Both files are
-//!   proprietary and not part of the repository, so a build can lack them. The clients run it
-//!   (web: `tools/run_sleep_model.py`, iOS: `TorchBridge`) and register here which files they found.
-//! * `xgb`: the Rust pipeline of open_oura (`oura_analysis::ported::sleepstaging`) with a
-//!   compiled-in community-trained tree ensemble that approximates the official staging. It needs no files.
+//! * `official`: the vendor classifier (a 2000-tree forest extracted from the vendor library by
+//!   `tools/extract_nssa_classifier.py`) in place of the community-trained trees. The file is
+//!   proprietary and not part of the repository, so a build can lack it. A client registers
+//!   where it found the file ([`register_official_classifier`]); staging then runs in this
+//!   process through `vendor_forest::stage_night_forest`. No model runtime is needed.
+//! * `xgb`: the same pipeline with a compiled-in community-trained tree ensemble that approximates
+//!   the official staging. It needs no files.
 //!
 //! The choice is stored in `profile.json` as `"sleep_stager": "official" | "xgb"`; an absent key
-//! means automatic: official when its files are present, otherwise xgb. Every client resolves
+//! means automatic: official when the classifier is present, otherwise xgb. Every client resolves
 //! the choice through [`effective`], and the summary carries [`status`] for rendering.
 
 use crate::ring_time::RingClock;
 use crate::{profile_path, stager_inputs, Demographics};
-use oura_analysis::ported::sleepstaging::pipeline::{stage_night_default, Inputs};
+use oura_analysis::ported::sleepstaging::pipeline::{stage_night_default, Inputs, Output, StagingError};
+use oura_analysis::ported::sleepstaging::vendor_forest::{stage_night_forest, VendorForest};
 use oura_store::Store;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
-/// Display name of the vendor graph, as the notice lists it.
-pub const OFFICIAL_GRAPH: &str = "sleepstaging_2_6_0";
 /// File name of the extracted classifier.
 pub const OFFICIAL_CLASSIFIER: &str = "sleepstaging_2_6_0_classifier.bin";
 /// Magic bytes of the extracted classifier file.
 const CLASSIFIER_MAGIC: &[u8; 8] = b"NSSAFOR1";
-/// Bump when the xgb pipeline or its classifier changes, so cached hypnograms are recomputed.
-const XGB_CACHE_VERSION: &str = "xgb-r1";
+/// Bump when the stagers or their cache layout change, so cached hypnograms are recomputed.
+const CACHE_VERSION: &str = "r2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SleepStager {
@@ -53,19 +54,25 @@ impl SleepStager {
     }
 }
 
-/// Files of the official stager that a client reported missing; empty once both are present.
-/// `None` until a client registers (a client without the official runner never does).
-static OFFICIAL_MISSING: RwLock<Option<Vec<String>>> = RwLock::new(None);
+/// The registered vendor classifier. `None` until a client registers; a registration whose file
+/// is missing, lacks the magic or fails validation holds no forest.
+struct Registered {
+    path: Option<PathBuf>,
+    forest: Option<Arc<VendorForest>>,
+}
+static OFFICIAL: RwLock<Option<Registered>> = RwLock::new(None);
 
-/// Registers the official stager's files. `graph` is the TorchScript file the client would load,
-/// `classifier` the extracted forest; `None` or a path that does not point to a valid file counts
-/// as missing. Returns whether the official stager is available.
-pub fn register_official_files(graph: Option<&Path>, classifier: Option<&Path>) -> bool {
-    let mut missing = Vec::new();
-    if !graph.is_some_and(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() > 0)) {
-        missing.push(OFFICIAL_GRAPH.to_string());
+/// Registers the vendor classifier file. `None`, or a path that is not a valid classifier file,
+/// counts as missing. Registering the path that is already loaded keeps the loaded forest.
+/// Returns whether the official stager is available.
+pub fn register_official_classifier(classifier: Option<&Path>) -> bool {
+    let mut guard = OFFICIAL.write().unwrap_or_else(|e| e.into_inner());
+    if let (Some(reg), Some(path)) = (guard.as_ref(), classifier) {
+        if reg.forest.is_some() && reg.path.as_deref() == Some(path) {
+            return true;
+        }
     }
-    let classifier_ok = classifier.is_some_and(|p| {
+    let magic_ok = classifier.is_some_and(|p| {
         use std::io::Read;
         let mut magic = [0u8; 8];
         std::fs::File::open(p)
@@ -73,30 +80,22 @@ pub fn register_official_files(graph: Option<&Path>, classifier: Option<&Path>) 
             .is_ok()
             && &magic == CLASSIFIER_MAGIC
     });
-    if !classifier_ok {
-        missing.push(OFFICIAL_CLASSIFIER.to_string());
-    }
-    let available = missing.is_empty();
-    *OFFICIAL_MISSING.write().unwrap_or_else(|e| e.into_inner()) = Some(missing);
+    let forest = classifier
+        .filter(|_| magic_ok)
+        .and_then(|p| VendorForest::load(p).ok())
+        .map(Arc::new);
+    let available = forest.is_some();
+    *guard = Some(Registered { path: classifier.map(Path::to_path_buf), forest });
     available
 }
 
-/// Whether the official stager's files were registered and are all present.
+/// Whether a valid classifier was registered.
 pub fn official_available() -> bool {
-    OFFICIAL_MISSING
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .is_some_and(|m| m.is_empty())
+    official_forest().is_some()
 }
 
-fn official_missing() -> Vec<String> {
-    OFFICIAL_MISSING
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| vec![OFFICIAL_GRAPH.to_string(), OFFICIAL_CLASSIFIER.to_string()])
+fn official_forest() -> Option<Arc<VendorForest>> {
+    OFFICIAL.read().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|r| r.forest.clone())
 }
 
 /// The stager stored in `profile.json`, or `None` for automatic.
@@ -121,11 +120,9 @@ pub fn status(db: &Path) -> Value {
     let chosen = chosen(db);
     let effective = effective(db);
     let official = official_available();
-    let missing = official_missing();
     let official_notice = (!official).then(|| {
         format!(
-            "Not available in this build. Missing: {}. Add them to the models folder and rebuild, or use the built-in staging.",
-            missing.join(", ")
+            "Not available in this build. Missing: {OFFICIAL_CLASSIFIER}. Extract it with tools/extract_nssa_classifier.py, add it to the models folder, and rebuild, or use the built-in staging."
         )
     });
     json!({
@@ -134,8 +131,8 @@ pub fn status(db: &Path) -> Value {
         "options": [
             {
                 "id": "official",
-                "label": "Official",
-                "detail": "Oura's sleepstaging_2_6_0 graph with its extracted classifier, the stager behind the official app's hypnogram.",
+                "label": "Oura model",
+                "detail": "The vendor classifier extracted from Oura's sleepstaging_2_6_0, running on this app's Rust feature pipeline. It reproduces the official app's stages closely.",
                 "available": official,
                 "notice": official_notice,
             },
@@ -149,7 +146,7 @@ pub fn status(db: &Path) -> Value {
         ],
         // set when the stored choice cannot run and another stager is used instead
         "notice": (chosen == Some(SleepStager::Official) && !official).then(|| {
-            "Official staging is selected but its model files are missing, so the built-in staging is used.".to_string()
+            "Oura model staging is selected but its classifier file is missing, so the built-in staging is used.".to_string()
         }),
     })
 }
@@ -171,10 +168,35 @@ pub fn set_chosen(db: &Path, id: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── xgb batch stager (web and CLI) ────────────────────────────────────────────
+// ── batch stager (web and CLI) ────────────────────────────────────────────────
 
-fn cache_path(db: &Path) -> PathBuf {
-    db.parent().unwrap_or(Path::new(".")).join("xgb_stage_cache.json")
+/// One staging cache per stager, so a switch never reuses the other stager's hypnograms.
+fn cache_path(db: &Path, stager: SleepStager) -> PathBuf {
+    let name = match stager {
+        SleepStager::Official => "official_stage_cache.json",
+        SleepStager::Xgb => "xgb_stage_cache.json",
+    };
+    db.parent().unwrap_or(Path::new(".")).join(name)
+}
+
+/// Why [`stage_inputs`] produced no stages.
+#[derive(Debug)]
+pub enum StageError {
+    /// The official stager was asked for but no classifier is registered.
+    NoClassifier,
+    Staging(StagingError),
+}
+
+/// Stages one night with the given stager: the Rust pipeline with rerun after a long wake and
+/// the false-nap check, driven by the vendor forest (`official`) or the bundled trees (`xgb`).
+pub fn stage_inputs(stager: SleepStager, inputs: &Inputs) -> Result<Output, StageError> {
+    match stager {
+        SleepStager::Official => {
+            let forest = official_forest().ok_or(StageError::NoClassifier)?;
+            stage_night_forest(&forest, inputs, true, true).map_err(StageError::Staging)
+        }
+        SleepStager::Xgb => stage_night_default(inputs, true, true).map_err(StageError::Staging),
+    }
 }
 
 /// FNV-1a over the bytes of the stager inputs, so an unchanged night is not staged again.
@@ -196,9 +218,10 @@ impl Fnv {
     }
 }
 
-fn fingerprint(i: &stager_inputs::StagerInputs) -> String {
+fn fingerprint(i: &stager_inputs::StagerInputs, stager: SleepStager) -> String {
     let mut h = Fnv::new();
-    h.bytes(XGB_CACHE_VERSION.as_bytes());
+    h.bytes(CACHE_VERSION.as_bytes());
+    h.bytes(stager.id().as_bytes());
     h.i64(i.start_ms);
     h.i64(i.end_ms);
     for (t, a, b, c) in &i.beats {
@@ -217,9 +240,9 @@ fn fingerprint(i: &stager_inputs::StagerInputs) -> String {
     format!("{:016x}", h.0)
 }
 
-/// Stage codes of one window with the bundled classifier (1 deep, 2 light, 3 REM, 4 wake per 30 s),
-/// or `None` when the stager rejects the night.
-fn stage_window(i: &stager_inputs::StagerInputs) -> Option<Vec<i64>> {
+/// Stage codes of one window (1 deep, 2 light, 3 REM, 4 wake per 30 s) and the Unix time in
+/// seconds of the first epoch, or `None` when the stager rejects the night.
+fn stage_window(i: &stager_inputs::StagerInputs, stager: SleepStager) -> Option<(Vec<i64>, f64)> {
     let acm_ts: Vec<i64> = i.acm.iter().map(|a| a.0).collect();
     let acm: Vec<[f32; 6]> = i.acm.iter().map(|a| a.1).collect();
     let beat_ts: Vec<i64> = i.beats.iter().map(|b| b.0).collect();
@@ -236,9 +259,10 @@ fn stage_window(i: &stager_inputs::StagerInputs) -> Option<Vec<i64>> {
         scalars: i.scalars,
         bedtime: [i.start_ms, i.end_ms],
     };
-    let out = stage_night_default(&inputs, true, true).ok()?;
+    let out = stage_inputs(stager, &inputs).ok()?;
     let stages: Vec<i64> = out.stages.col(0).iter().map(|&x| x.round() as i64).collect();
-    (!stages.is_empty() && stages.iter().all(|c| (1..=4).contains(c))).then_some(stages)
+    let t0 = *out.timestamps_ms.first()? as f64 / 1000.0;
+    (!stages.is_empty() && stages.iter().all(|c| (1..=4).contains(c))).then_some((stages, t0))
 }
 
 /// The batch JSON of a staged window, in the shape `run_sleep_model.py --batch` returns.
@@ -262,15 +286,21 @@ pub fn hypnogram_json(start_ds: i64, end_ds: i64, captured_unix: i64, stages: &[
     })
 }
 
-/// Stages every `[start_ds, end_ds, captured_unix]` window with the xgb pipeline, returning the same
-/// batch shape as `run_sleep_model.py` (`null` for a window that cannot be staged). Results are
-/// cached next to the database by input fingerprint.
-pub fn stage_nights_xgb(db: &Path, sleep_ranges: &[[i64; 3]], demo: &Demographics) -> Option<Value> {
+/// Stages every `[start_ds, end_ds, captured_unix]` window with `stager`, returning the batch
+/// shape the web dashboard reads (`null` for a window that cannot be staged). The `official`
+/// batch carries source `nssa`, the label the brain uses for Oura's own staging, and the time of
+/// its first epoch. Results are cached next to the database by input fingerprint.
+pub fn stage_nights(db: &Path, sleep_ranges: &[[i64; 3]], demo: &Demographics, stager: SleepStager) -> Option<Value> {
+    if stager == SleepStager::Official && !official_available() {
+        return None;
+    }
+    let source = if stager == SleepStager::Official { "nssa" } else { "xgb" };
     let store = Store::open_read_only(db).ok()?;
     let events = store.decoded_events().ok()?;
     let clock = RingClock::from_events(&events);
     let scalars = stager_inputs::profile_scalars(demo.age, demo.height_m, demo.weight_kg, demo.sex);
-    let mut cache: serde_json::Map<String, Value> = std::fs::read_to_string(cache_path(db))
+    let cache_file = cache_path(db, stager);
+    let mut cache: serde_json::Map<String, Value> = std::fs::read_to_string(&cache_file)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| v.as_object().cloned())
@@ -283,22 +313,33 @@ pub fn stage_nights_xgb(db: &Path, sleep_ranges: &[[i64; 3]], demo: &Demographic
             let Ok(inputs) = stager_inputs::collect(&events, &clock, start_ds, end_ds, captured_unix, scalars) else {
                 return Value::Null;
             };
-            let key = fingerprint(&inputs);
+            let key = fingerprint(&inputs, stager);
             used.push(key.clone());
-            let stages: Option<Vec<i64>> = match cache.get(&key) {
-                Some(v) => v.as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()),
+            let cached = cache.get(&key).and_then(|v| {
+                let stages: Vec<i64> = v["stages"].as_array()?.iter().filter_map(Value::as_i64).collect();
+                Some((stages, v["t0_unix"].as_f64()?))
+            });
+            let staged = match cached {
+                Some(c) => Some(c),
                 None => {
-                    let staged = stage_window(&inputs);
-                    cache.insert(key, json!(staged.clone().unwrap_or_default()));
+                    let staged = stage_window(&inputs, stager);
+                    let entry = staged
+                        .as_ref()
+                        .map_or(json!({ "stages": [], "t0_unix": 0 }), |(s, t0)| json!({ "stages": s, "t0_unix": t0 }));
+                    cache.insert(key, entry);
                     dirty = true;
                     staged
                 }
             };
             // the window and the stager's epochs must agree, as for the iOS sidecar
             let expected = (end_ds - start_ds) as f64 / 300.0;
-            match stages {
-                Some(s) if !s.is_empty() && (s.len() as f64 - expected).abs() <= 2.0 => {
-                    hypnogram_json(start_ds, end_ds, captured_unix, &s, "xgb")
+            match staged {
+                Some((s, t0)) if !s.is_empty() && (s.len() as f64 - expected).abs() <= 2.0 => {
+                    let mut h = hypnogram_json(start_ds, end_ds, captured_unix, &s, source);
+                    if stager == SleepStager::Official {
+                        h["stages_t0_unix"] = json!(t0);
+                    }
+                    h
                 }
                 _ => Value::Null,
             }
@@ -306,7 +347,7 @@ pub fn stage_nights_xgb(db: &Path, sleep_ranges: &[[i64; 3]], demo: &Demographic
         .collect();
     if dirty {
         cache.retain(|k, _| used.contains(k));
-        let _ = std::fs::write(cache_path(db), Value::Object(cache).to_string());
+        let _ = std::fs::write(cache_file, Value::Object(cache).to_string());
     }
     Some(Value::Array(results))
 }
@@ -338,10 +379,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_official_files_fall_back_to_xgb_with_a_notice() {
+    fn missing_classifier_falls_back_to_xgb_with_a_notice() {
         let _guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         let db = temp_db("fallback");
-        assert!(!register_official_files(None, None));
+        assert!(!register_official_classifier(None));
         assert_eq!(effective(&db), SleepStager::Xgb);
         set_chosen(&db, Some("official")).unwrap();
         assert_eq!(effective(&db), SleepStager::Xgb);
@@ -352,24 +393,32 @@ mod tests {
         assert!(s["options"][0]["notice"].as_str().unwrap().contains(OFFICIAL_CLASSIFIER));
         assert!(s["notice"].is_string());
         assert_eq!(s["options"][1]["available"], true);
+        assert!(stage_nights(&db, &[[0, 3000, 0]], &Demographics::default(), SleepStager::Official).is_none());
     }
 
     #[test]
-    fn present_official_files_are_the_automatic_default() {
+    fn classifier_without_magic_or_with_bad_body_is_missing() {
+        let _guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        let db = temp_db("magic");
+        let classifier = db.parent().unwrap().join("c.bin");
+        std::fs::write(&classifier, b"garbage!").unwrap();
+        assert!(!register_official_classifier(Some(&classifier)));
+        // right magic, malformed body: the forest reader rejects it
+        std::fs::write(&classifier, b"NSSAFOR1rest").unwrap();
+        assert!(!register_official_classifier(Some(&classifier)));
+        assert_eq!(effective(&db), SleepStager::Xgb);
+    }
+
+    /// With the real classifier (never in the repository), set `OURA_TEST_CLASSIFIER` to its path.
+    #[test]
+    fn real_classifier_is_the_automatic_default() {
+        let Some(path) = std::env::var_os("OURA_TEST_CLASSIFIER") else { return };
         let _guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         let db = temp_db("present");
-        let dir = db.parent().unwrap();
-        let graph = dir.join("g.ptl");
-        let classifier = dir.join("c.bin");
-        std::fs::write(&graph, b"graph").unwrap();
-        std::fs::write(&classifier, b"NSSAFOR1rest").unwrap();
-        assert!(register_official_files(Some(&graph), Some(&classifier)));
+        assert!(register_official_classifier(Some(Path::new(&path))));
         assert_eq!(effective(&db), SleepStager::Official);
         set_chosen(&db, Some("xgb")).unwrap();
         assert_eq!(effective(&db), SleepStager::Xgb);
-        // a classifier without the magic does not count
-        std::fs::write(&classifier, b"garbage!").unwrap();
-        assert!(!register_official_files(Some(&graph), Some(&classifier)));
-        assert_eq!(status(&db)["options"][0]["notice"].as_str().map(|n| n.contains(OFFICIAL_CLASSIFIER)), Some(true));
+        register_official_classifier(None);
     }
 }

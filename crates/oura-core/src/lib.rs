@@ -1746,9 +1746,28 @@ pub fn stager_inputs_batch(
 /// one bundled with open_oura's `oura-analysis`.
 #[uniffi::export]
 pub fn stage_night_rust(record: StagerInputsRecord) -> Vec<i32> {
-    use oura_analysis::ported::sleepstaging::pipeline::{stage_night_default, Inputs};
+    stage_record(oura_summary::sleep_stager::SleepStager::Xgb, record).stages
+}
+
+/// Stages of one night and the Unix time of its first epoch.
+#[derive(uniffi::Record)]
+pub struct StagedNight {
+    pub stages: Vec<i32>,
+    pub t0_unix: f64,
+}
+
+/// Stages one night with the vendor classifier registered by `set_official_sleep_stager_classifier`.
+/// `stages` is empty when no classifier is registered or the stager rejects the night.
+#[uniffi::export]
+pub fn stage_night_official(record: StagerInputsRecord) -> StagedNight {
+    stage_record(oura_summary::sleep_stager::SleepStager::Official, record)
+}
+
+fn stage_record(stager: oura_summary::sleep_stager::SleepStager, record: StagerInputsRecord) -> StagedNight {
+    use oura_analysis::ported::sleepstaging::pipeline::Inputs;
+    let none = StagedNight { stages: vec![], t0_unix: 0.0 };
     if record.error.is_some() || record.scalars.len() != 3 {
-        return vec![];
+        return none;
     }
     let beats: Vec<[f32; 3]> = record.beats.chunks_exact(3).map(|b| [b[0], b[1], b[2]]).collect();
     let acm: Vec<[f32; 6]> = record.acm.chunks_exact(6).map(|a| [a[0], a[1], a[2], a[3], a[4], a[5]]).collect();
@@ -1762,21 +1781,20 @@ pub fn stage_night_rust(record: StagerInputsRecord) -> Vec<i32> {
         scalars: [record.scalars[0], record.scalars[1], record.scalars[2]],
         bedtime: [record.start_ms, record.end_ms],
     };
-    match stage_night_default(&inputs, true, true) {
-        Ok(out) => out.stages.col(0).iter().map(|&x| x.round() as i32).collect(),
-        Err(_) => vec![],
+    match oura_summary::sleep_stager::stage_inputs(stager, &inputs) {
+        Ok(out) => StagedNight {
+            stages: out.stages.col(0).iter().map(|&x| x.round() as i32).collect(),
+            t0_unix: out.timestamps_ms.first().map_or(0.0, |&t| t as f64 / 1000.0),
+        },
+        Err(_) => none,
     }
 }
 
-/// Tells the shared brain which files of the official sleep stager this build has (the TorchScript
-/// graph and the extracted classifier; `None` when the bundle lacks one). Returns whether the
-/// official stager is available.
+/// Tells the shared brain where the vendor classifier is (`None` when the bundle lacks it).
+/// Returns whether the official stager is available.
 #[uniffi::export]
-pub fn set_official_sleep_stager_files(graph_path: Option<String>, classifier_path: Option<String>) -> bool {
-    oura_summary::sleep_stager::register_official_files(
-        graph_path.as_deref().map(std::path::Path::new),
-        classifier_path.as_deref().map(std::path::Path::new),
-    )
+pub fn set_official_sleep_stager_classifier(classifier_path: Option<String>) -> bool {
+    oura_summary::sleep_stager::register_official_classifier(classifier_path.as_deref().map(std::path::Path::new))
 }
 
 /// The stager in use for this database: `"official"` or `"xgb"`. Resolves the stored choice and the
