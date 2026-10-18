@@ -1504,6 +1504,75 @@ public func FfiConverterTypePairReport_lower(_ value: PairReport) -> RustBuffer 
 
 
 /**
+ * Stages of one night and the Unix time of its first epoch.
+ */
+public struct StagedNight {
+    public var stages: [Int32]
+    public var t0Unix: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(stages: [Int32], t0Unix: Double) {
+        self.stages = stages
+        self.t0Unix = t0Unix
+    }
+}
+
+
+
+extension StagedNight: Equatable, Hashable {
+    public static func ==(lhs: StagedNight, rhs: StagedNight) -> Bool {
+        if lhs.stages != rhs.stages {
+            return false
+        }
+        if lhs.t0Unix != rhs.t0Unix {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(stages)
+        hasher.combine(t0Unix)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStagedNight: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StagedNight {
+        return
+            try StagedNight(
+                stages: FfiConverterSequenceInt32.read(from: &buf), 
+                t0Unix: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StagedNight, into buf: inout [UInt8]) {
+        FfiConverterSequenceInt32.write(value.stages, into: &buf)
+        FfiConverterDouble.write(value.t0Unix, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStagedNight_lift(_ buf: RustBuffer) throws -> StagedNight {
+    return try FfiConverterTypeStagedNight.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStagedNight_lower(_ value: StagedNight) -> RustBuffer {
+    return FfiConverterTypeStagedNight.lower(value)
+}
+
+
+/**
  * The stager's inputs for one window, flattened for the torch bridge. `beats` holds
  * `[ibi, amplitude, valid]` per beat, `acm` six statistics per epoch. `error` is set (and the
  * arrays are empty) when the window cannot be staged.
@@ -2887,14 +2956,12 @@ public func rmssd(ibiMs: [UInt16]) -> Double {
 })
 }
 /**
- * Tells the shared brain which files of the official sleep stager this build has (the TorchScript
- * graph and the extracted classifier; `None` when the bundle lacks one). Returns whether the
- * official stager is available.
+ * Tells the shared brain where the vendor classifier is (`None` when the bundle lacks it).
+ * Returns whether the official stager is available.
  */
-public func setOfficialSleepStagerFiles(graphPath: String?, classifierPath: String?) -> Bool {
+public func setOfficialSleepStagerClassifier(classifierPath: String?) -> Bool {
     return try!  FfiConverterBool.lift(try! rustCall() {
-    uniffi_oura_core_fn_func_set_official_sleep_stager_files(
-        FfiConverterOptionString.lower(graphPath),
+    uniffi_oura_core_fn_func_set_official_sleep_stager_classifier(
         FfiConverterOptionString.lower(classifierPath),$0
     )
 })
@@ -2907,6 +2974,17 @@ public func sleepStagerStatusJson(dbPath: String) -> String {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_oura_core_fn_func_sleep_stager_status_json(
         FfiConverterString.lower(dbPath),$0
+    )
+})
+}
+/**
+ * Stages one night with the vendor classifier registered by `set_official_sleep_stager_classifier`.
+ * `stages` is empty when no classifier is registered or the stager rejects the night.
+ */
+public func stageNightOfficial(record: StagerInputsRecord) -> StagedNight {
+    return try!  FfiConverterTypeStagedNight.lift(try! rustCall() {
+    uniffi_oura_core_fn_func_stage_night_official(
+        FfiConverterTypeStagerInputsRecord.lower(record),$0
     )
 })
 }
@@ -3043,10 +3121,13 @@ private var initializationResult: InitializationResult = {
     if (uniffi_oura_core_checksum_func_rmssd() != 51404) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_oura_core_checksum_func_set_official_sleep_stager_files() != 40241) {
+    if (uniffi_oura_core_checksum_func_set_official_sleep_stager_classifier() != 4916) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_func_sleep_stager_status_json() != 33835) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_func_stage_night_official() != 43111) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_func_stage_night_rust() != 13870) {
