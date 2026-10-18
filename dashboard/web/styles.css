@@ -208,8 +208,8 @@ body {
 .score circle { fill: none; stroke-width: 4; }
 .score .s-track { stroke: var(--line); }
 .score .s-arc { stroke: var(--accent); stroke-linecap: round; }
-.score .s-val { fill: var(--text); font-family: var(--mono); font-size: 20px; }
-.score .s-label { font-family: var(--mono); font-size: 10px; letter-spacing: 0.11em; text-transform: uppercase; color: var(--faint); }
+.score .s-val { fill: var(--text); font-variant-numeric: tabular-nums; font-size: 20px; }
+.score .s-label { font-size: 12px; color: var(--faint); }
 .brief {
   display: grid; grid-template-columns: 168px minmax(0, 1fr); align-items: baseline;
   gap: var(--s4); margin: 0 0 var(--s4); padding: var(--s3) 2px var(--s4);
