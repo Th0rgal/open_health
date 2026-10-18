@@ -2036,8 +2036,8 @@ function openProfile() {
   $("profile-dialog").showModal();
 }
 
-// The sleep stager selector. Options whose model files are missing are disabled and say so,
-// the same notice the summary carries. "Automatic" means official when present, else built-in.
+// The sleep stager selector. An option whose classifier file is missing is disabled and says so,
+// the same notice the summary carries. "Automatic" means the Oura model when present, else built-in.
 function renderStagerChoice() {
   const st = CURRENT_STAGER, sel = $("f-stager"), note = $("f-stager-note");
   sel.replaceChildren();
@@ -2055,7 +2055,7 @@ function renderStagerChoice() {
   const text = () => {
     const lines = [];
     const picked = st.options.find((o) => o.id === sel.value);
-    if (sel.value === "auto") lines.push("Uses the official staging when its model files are present, otherwise the built-in staging.");
+    if (sel.value === "auto") lines.push("Uses the Oura model staging when its classifier file is present, otherwise the built-in staging.");
     else if (picked) lines.push(picked.detail);
     for (const o of st.options) if (o.notice) lines.push(`${o.label}: ${o.notice}`);
     if (st.notice) lines.push(st.notice);
