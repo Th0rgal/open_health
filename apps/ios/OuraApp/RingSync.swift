@@ -483,9 +483,7 @@ final class RingSync: ObservableObject {
             UserDefaults.standard.removeObject(forKey: Self.lastSuccessfulSyncKey)
             clearIncompleteSync()
             SummaryCache.clear()
-            #if TORCH
             ModelCacheStore.clearAll()
-            #endif
             connectionIssue = nil
             status = "local sync data reset"
             dlog("db", status)

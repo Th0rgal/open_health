@@ -1,4 +1,3 @@
-#if TORCH
 import CryptoKit
 import Foundation
 
@@ -212,4 +211,3 @@ enum ModelCacheStore {
         DB.readPath() == DB.url.path ? "store" : "seed"
     }
 }
-#endif

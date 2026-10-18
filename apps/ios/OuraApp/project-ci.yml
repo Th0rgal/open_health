@@ -67,6 +67,8 @@ targets:
       - path: RingSync.swift
       - path: ProfileSettings.swift
       - path: ModelProgress.swift
+      - path: EventStore.swift
+      - path: ModelCache.swift
       - path: SleepStaging.swift
       - path: CrashCatch.c
       - path: CrashCatch.h

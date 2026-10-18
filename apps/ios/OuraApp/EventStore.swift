@@ -1,6 +1,5 @@
-#if TORCH
 import Foundation
-// sqlite3 comes from the bridging header (TorchBridge.h includes <sqlite3.h>)
+import SQLite3
 
 // Shared DB reader for the on-device models. SleepStaging and ActivityModel both need
 // the same decoded-JSON event stream and time anchor; this is that read in one place
@@ -359,4 +358,3 @@ enum EventStore {
         }
     }
 }
-#endif

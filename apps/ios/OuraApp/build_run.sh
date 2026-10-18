@@ -27,8 +27,8 @@ xcrun -sdk iphonesimulator swiftc \
     "$GEN/oura_core.swift" "$APPDIR/Theme.swift" "$APPDIR/OuraApp.swift" \
     "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" "$APPDIR/Reports.swift" \
     "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" "$APPDIR/ProfileSettings.swift" \
-    "$APPDIR/ModelProgress.swift" "$APPDIR/Diagnostics.swift" "$APPDIR/HealthExport.swift" "$APPDIR/DayExport.swift" "$APPDIR/WorkCoordinator.swift" \
-    "$APPDIR/HeartRate.swift" "$APPDIR/Scores.swift" "$APPDIR/Viz.swift" "$APPDIR/Home.swift" "$APPDIR/Detail.swift" "$APPDIR/LiveHR.swift" "$APPDIR/RawData.swift" "$APPDIR/ResearchExport.swift" "$BUILD/CrashCatch.o" \
+    "$APPDIR/ModelProgress.swift" "$APPDIR/ModelFiles.swift" "$APPDIR/EventStore.swift" "$APPDIR/ModelCache.swift" "$APPDIR/SleepStaging.swift" "$APPDIR/Diagnostics.swift" "$APPDIR/HealthExport.swift" "$APPDIR/DayExport.swift" "$APPDIR/WorkCoordinator.swift" \
+    "$APPDIR/HeartRate.swift" "$APPDIR/Scores.swift" "$APPDIR/Viz.swift" "$APPDIR/Home.swift" "$APPDIR/Detail.swift" "$APPDIR/LiveHR.swift" "$APPDIR/RawData.swift" "$APPDIR/ResearchExport.swift" "$APPDIR/CaptureSettings.swift" "$APPDIR/CaptureNeeds.swift" "$APPDIR/WalkMath.swift" "$APPDIR/WalkTest.swift" "$APPDIR/Vo2Views.swift" "$APPDIR/ActivityLog.swift" "$APPDIR/ActivityViews.swift" "$BUILD/CrashCatch.o" \
     -L "$XCF" -loura_core -lsqlite3 \
     -o "$APP/OuraApp"
 # Xcode expands $(PRODUCT_BUNDLE_IDENTIFIER) at build time; the raw-swiftc path doesn't,

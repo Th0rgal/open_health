@@ -71,10 +71,12 @@ enum Core {
         }
     }
 
-    #if TORCH
-    /// Launch and sync only fill the latest night's missing analysis. Historical
-    /// results stay visible, and older missing nights are refreshed on demand.
-    static func automaticSleepPlan(nights: [NightRow], previous: Summary?, revalidateLatest: Bool = false) -> (saved: [String: [Int]], pending: [NightRow]) {
+    /// Sleep staging plan. Every night that has data but no staging is pending, and the latest
+    /// night is also pending when `revalidateLatest` is set. `forceAll` (an explicit recompute)
+    /// makes every night pending. The stagers take well under a second a night, and the readiness
+    /// baselines read the whole history.
+    static func automaticSleepPlan(nights: [NightRow], previous: Summary?, revalidateLatest: Bool = false,
+                                   forceAll: Bool = false) -> (saved: [String: [Int]], pending: [NightRow]) {
         var saved: [String: [Int]] = [:]
         for night in nights {
             guard night.start_ds != nil else { continue }
@@ -96,15 +98,24 @@ enum Core {
             if lw != rw { return lw < rw }
             return lhs.offset > rhs.offset
         }?.element
-        guard let latest, latest.start_ds != nil,
-              latest.end_ds != nil, revalidateLatest || saved[latest.stagingKey] == nil else { return (saved, []) }
-        return (saved, [latest])
+        var pending: [NightRow] = []
+        for night in nights {
+            guard night.start_ds != nil, night.end_ds != nil else { continue }
+            let isLatest = latest.map { $0.stagingKey == night.stagingKey } ?? false
+            let missing = saved[night.stagingKey] == nil && (night.hasSignals || isLatest)
+            if forceAll || missing || (isLatest && revalidateLatest) {
+                if !pending.contains(where: { $0.stagingKey == night.stagingKey }) { pending.append(night) }
+            }
+        }
+        return (forceAll ? [:] : saved, pending)
     }
 
     /// Refresh one report without running unrelated models or discarding other days.
     static func refreshAnalysis(_ previous: Summary, request: DayAnalysisRequest,
                                 progress: @escaping @Sendable (String) -> Void = { _ in }) -> (summary: Summary, error: String?) {
+        #if TORCH
         defer { oura_torch_release() }
+        #endif
         let base = Core.base()
         guard base.error == nil else { return (previous, "Couldn’t read saved data. Try again.") }
         do {
@@ -135,6 +146,7 @@ enum Core {
                 } else { updated.nights.append(night) }
                 applySleepStages(result.staged, to: &updated)
             case .activity:
+                #if TORCH
                 guard base.activity_profile[request.day] != nil else {
                     return (previous, "No activity data is saved for this day.")
                 }
@@ -147,6 +159,9 @@ enum Core {
                 // The aggregate message names only the first failed day; a successful
                 // rerun of that day means the list is stale either way.
                 updated.modelErrors.removeAll { $0.hasPrefix("Activity analysis failed for") }
+                #else
+                return (previous, "Activity analysis needs the on-device models, which this build does not include.")
+                #endif
             }
             try events.validate()
             try AnalysisRun.check()
@@ -163,6 +178,7 @@ enum Core {
         init(_ message: String) { description = message }
     }
 
+    #if TORCH
     /// The slow part: run the three on-device torch models and fold their results into
     /// the summary. Call off the main thread (see RootView.load); never on launch.
     ///
@@ -176,7 +192,7 @@ enum Core {
     /// `withIllness`.
     final class Pending { var illness = false }
 
-    static func withModels(_ base: Summary, previous: Summary?, pending: Pending? = nil,
+    static func withModels(_ base: Summary, previous: Summary?, pending: Pending? = nil, restageAll: Bool = false,
                            progress: @escaping @Sendable (String) -> Void = { _ in }) -> Summary {
         var s = base
         let profile = base.profile
@@ -204,18 +220,11 @@ enum Core {
         progress("Reading ring data")
         let storeDigest = EventStore.Events(path: DB.readPath()).digest()
         let sleepPlan = automaticSleepPlan(nights: base.nights, previous: validPrevious,
-                                           revalidateLatest: storeDigest == nil || validPrevious?.analysis_digest != storeDigest)
+                                           revalidateLatest: storeDigest == nil || validPrevious?.analysis_digest != storeDigest,
+                                           forceAll: restageAll)
         var staged = SleepStaging.cachedStages(nights: base.nights)
         staged.merge(sleepPlan.saved) { _, fresh in fresh }
-        var sleepPending = sleepPlan.pending
-        // The built-in stager takes about a second a night, so it covers every night (the readiness
-        // baselines read the whole history). The official one stages the latest night here.
-        for night in (SleepStaging.coversEveryNight ? base.nights[...] : base.nights[0..<0]) {
-            guard night.start_ds != nil, night.end_ds != nil, night.hasSignals,
-                  staged[night.stagingKey] == nil,
-                  !sleepPending.contains(where: { $0.stagingKey == night.stagingKey }) else { continue }
-            sleepPending.append(night)
-        }
+        let sleepPending = sleepPlan.pending
         if sleepPending.isEmpty,
            let rAct = ActivityModel.cachedRun(profile: profile, storeDigest: storeDigest),
            let rIll = IllnessModel.cachedRun(profile: profile, storeDigest: storeDigest) {
@@ -248,7 +257,7 @@ enum Core {
                 let rSleep = sleepPending.isEmpty
                     ? (staged: [String: [Int]](), error: Optional<String>.none)
                     : SleepStaging.run(nights: sleepPending, events: events, clock: clock,
-                                       profile: profile, pruneCache: false, progress: progress)
+                                       profile: profile, force: restageAll, pruneCache: false, progress: progress)
                 staged.merge(rSleep.staged) { _, fresh in fresh }
                 sleepErr = rSleep.error
                 dlog("models", "sleep automatic saved=\(staged.count) pending=\(sleepPending.count)")
@@ -338,6 +347,48 @@ enum Core {
         return out
     }
 
+    #endif
+
+    /// Stages sleep only, for builds without the on-device models (and shared by them): the same
+    /// plan, sidecar and folding as `withModels`.
+    static func withSleep(_ base: Summary, previous: Summary?, restageAll: Bool = false,
+                          progress: @escaping @Sendable (String) -> Void = { _ in }) -> Summary {
+        var s = base
+        progress("Reading ring data")
+        let storeDigest = EventStore.Events(path: DB.readPath()).digest()
+        let validPrevious = previous?.analysis_version == ModelCacheStore.version ? previous : nil
+        let plan = automaticSleepPlan(nights: base.nights, previous: validPrevious,
+                                      revalidateLatest: storeDigest == nil || validPrevious?.analysis_digest != storeDigest,
+                                      forceAll: restageAll)
+        var staged = SleepStaging.cachedStages(nights: base.nights)
+        staged.merge(plan.saved) { _, fresh in fresh }
+        var sleepErr: String?
+        if !plan.pending.isEmpty {
+            guard let events = try? EventStore.decodedEvents(dbPath: DB.readPath()), !events.isEmpty,
+                  events.error == nil, !AnalysisRun.cancelled else { return previous ?? base }
+            let clock = EventStore.RingClock(events: events)
+            let r = SleepStaging.run(nights: plan.pending, events: events, clock: clock, profile: base.profile,
+                                     force: restageAll, pruneCache: false, progress: progress)
+            staged.merge(r.staged) { _, fresh in fresh }
+            sleepErr = r.error
+        }
+        if AnalysisRun.cancelled { return previous ?? base }
+        s.analysis_digest = storeDigest
+        s.analysis_version = ModelCacheStore.version
+        if writeStagedSidecar(staged, nights: base.nights, meta: SleepStaging.cachedEntries(nights: base.nights)) {
+            let rebuilt = Core.base()
+            if rebuilt.error == nil {
+                s = rebuilt
+                s.analysis_digest = storeDigest
+                s.analysis_version = ModelCacheStore.version
+            }
+        }
+        applySleepStages(staged, to: &s)
+        s.modelErrors = [sleepErr].compactMap { $0 }
+        for error in s.modelErrors { dlog("models", "failed: \(error)") }
+        return s
+    }
+
     /// Writes `staged_hypnograms.json` beside the database (see `oura_summary::staged_path`).
     /// Returns true when the file's content changed.
     private static func writeStagedSidecar(_ staged: [String: [Int]], nights: [NightRow],
@@ -392,6 +443,5 @@ enum Core {
             s.nights[i].sleep_score = nil // The base score describes a different hypnogram.
         }
     }
-    #endif
 }
 

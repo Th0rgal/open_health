@@ -787,11 +787,9 @@ struct RootView: View {
             let mode = args.firstIndex(of: "-bleMode").flatMap { $0 + 1 < args.count ? Int32(args[$0 + 1]) : nil } ?? -1
             Task { await ring.benchDrain(days: days, bleMode: mode) }
         }
-        #if TORCH
         if args.contains("-recomputeAll") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { recomputeAll() }
         }
-        #endif
         if let index = args.firstIndex(of: "-openDay"), index + 1 < args.count {
             report = ReportSel(day: args[index + 1], sleep: !args.contains("activity"))
         }
@@ -814,6 +812,7 @@ struct RootView: View {
     @State private var isRefreshingSummary = false
     @State private var automaticSyncRequested = false
     @State private var reloadPending = false
+    @State private var reloadRestageAll = false
     @StateObject private var ring = RingSync()
     @StateObject private var live = LiveHeartRate()
     @StateObject private var modelProgress = ModelProgress()
@@ -859,10 +858,8 @@ struct RootView: View {
         .sheet(isPresented: $showRadar) {
             if let s, let radar = s.symptomRadar { RadarDetailView(s: s, illness: radar, day: shownDay(s)) }
         }
-        #if TORCH
         .environment(\.dayAnalysis, DayAnalysisContext(summary: s,
             isBusy: isRefreshingSummary || ring.busy, refresh: refreshDayAnalysis))
-        #endif
         .onAppear {
             // A cached summary makes launch immediate; this forced load replaces it
             // with SQLite + model output without blanking the existing Today card.
@@ -881,24 +878,18 @@ struct RootView: View {
         }
     }
 
-    /// The profile screen's "Recompute everything": only where the models exist.
+    /// The profile screen's "Recompute everything".
     private var recomputeHook: RecomputeHook? {
-        #if TORCH
         RecomputeHook(run: recomputeAll, label: modelProgress.label, busy: isRefreshingSummary || ring.busy)
-        #else
-        nil
-        #endif
     }
 
-    #if TORCH
-    /// Drops every cached model result and reruns the models over all saved data. The
-    /// current summary stays on screen until the new one is complete.
+    /// Drops every cached model result and reruns the models over all saved data, staging
+    /// every night again. The current summary stays on screen until the new one is complete.
     private func recomputeAll() {
         guard !isRefreshingSummary, !ring.busy else { return }
         ModelCacheStore.clearAll()
-        load(force: true, clearCurrent: false)
+        load(force: true, clearCurrent: false, restageAll: true)
     }
-    #endif
 
     // re-read the DB after a sync brought in new events
     private func reload() {
@@ -907,9 +898,7 @@ struct RootView: View {
 
     private func resetAndReload() {
         SummaryCache.clear()
-        #if TORCH
         ModelCacheStore.clearAll()
-        #endif
         reload()
     }
 
@@ -917,7 +906,8 @@ struct RootView: View {
     /// summary already on screen. Keep the last complete result visible until every
     /// derived model has finished, avoiding a transient sleep-debt regression.
     private func refreshDerivedData() {
-        load(force: true, clearCurrent: false)
+        // a saved profile can change the stager and the staging inputs: stage every night again
+        load(force: true, clearCurrent: false, restageAll: true)
     }
 
     /// New ring events invalidate every derived view. In particular this reruns AAD
@@ -944,7 +934,6 @@ struct RootView: View {
         }
     }
 
-    #if TORCH
     @MainActor private func refreshDayAnalysis(_ request: DayAnalysisRequest) async -> String? {
         guard !isRefreshingSummary, !ring.busy, let previous = s else {
             return "Wait for sync and analysis to finish, then try again."
@@ -994,13 +983,12 @@ struct RootView: View {
         dlog("models", "refresh end day=\(request.day) kind=\(request.kind.rawValue) cancelled=\(run.isCancelled)")
         return canPublish ? result.error : "Refresh paused. Keep the app open and try again."
     }
-    #endif
 
-    private func load(force: Bool = false, clearCurrent: Bool = false) {
+    private func load(force: Bool = false, clearCurrent: Bool = false, restageAll: Bool = false) {
         guard force || s == nil else { return }
         // Lifecycle notifications and sync completion can request the same load.
         // Queue one refresh instead of repeatedly cancelling its predecessor.
-        guard !isRefreshingSummary else { reloadPending = true; return }
+        guard !isRefreshingSummary else { reloadPending = true; reloadRestageAll = reloadRestageAll || restageAll; return }
         let run = WorkCoordinator.shared.newAnalysis()
         loadGeneration += 1
         let generation = loadGeneration
@@ -1013,7 +1001,9 @@ struct RootView: View {
             defer {
                 if reloadPending {
                     reloadPending = false
-                    load(force: true, clearCurrent: false)
+                    let again = reloadRestageAll
+                    reloadRestageAll = false
+                    load(force: true, clearCurrent: false, restageAll: again)
                 }
             }
             modelProgress.report(generation, "Waiting for ring data")
@@ -1038,9 +1028,10 @@ struct RootView: View {
                         let base = Core.base()
                         #if TORCH
                         return base.error == nil && !run.isCancelled
-                            ? Core.withModels(base, previous: previous, pending: pending, progress: progress) : base
+                            ? Core.withModels(base, previous: previous, pending: pending, restageAll: restageAll, progress: progress) : base
                         #else
-                        return base
+                        return base.error == nil && !run.isCancelled
+                            ? Core.withSleep(base, previous: previous, restageAll: restageAll, progress: progress) : base
                         #endif
                     }
                     completion.resume(returning: summary)

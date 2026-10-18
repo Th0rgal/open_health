@@ -1,6 +1,5 @@
 import Foundation
 
-#if TORCH
 /// Sleep staging on the phone. Both stagers run open_oura's Rust feature pipeline in process and
 /// produce per-30s stage arrays:
 /// - `official`: the vendor classifier (extracted by tools/extract_nssa_classifier.py) in place of
@@ -24,10 +23,6 @@ enum SleepStaging {
         _ = ModelFiles.officialSleepStager   // registers the bundled files with the brain
         return effectiveSleepStager(dbPath: DB.readPath())
     }
-
-    /// The xgb stager takes about a second a night, so it covers every night (the readiness
-    /// baselines read the whole history). The official one stages the latest night automatically.
-    static var coversEveryNight: Bool { stager == Kind.xgb }
 
     /// `StagedNightEntry.source` of a night the active stager staged.
     static var source: String { stager == Kind.official ? "nssa" : "xgb" }
@@ -166,4 +161,3 @@ enum SleepStaging {
     }
 
 }
-#endif
