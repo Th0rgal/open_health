@@ -265,7 +265,7 @@ fn stage_window(i: &stager_inputs::StagerInputs, stager: SleepStager) -> Option<
     (!stages.is_empty() && stages.iter().all(|c| (1..=4).contains(c))).then_some((stages, t0))
 }
 
-/// The batch JSON of a staged window, in the shape `run_sleep_model.py --batch` returns.
+/// The batch JSON of a staged window, as the web dashboard's runner returns it.
 pub fn hypnogram_json(start_ds: i64, end_ds: i64, captured_unix: i64, stages: &[i64], source: &str) -> Value {
     let share = |code: i64| {
         let n = stages.iter().filter(|&&c| c == code).count();

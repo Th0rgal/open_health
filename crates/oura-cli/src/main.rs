@@ -282,9 +282,9 @@ enum Command {
         /// via `$OURA_BLOOD_FILES`.
         #[arg(long, value_name = "DIR")]
         blood_files: Option<PathBuf>,
-        /// Sleep stager: `auto` (official when its model files are present, else
-        /// built-in), `official` (Oura's sleepstaging graph and its classifier) or `xgb`
-        /// (the built-in Rust pipeline). Stored in profile.json; omit to keep the stored choice.
+        /// Sleep stager: `auto` (official when the vendor classifier file is present, else
+        /// built-in), `official` (the vendor classifier on the Rust pipeline) or `xgb`
+        /// (the built-in community-trained trees on the same pipeline). Stored in profile.json; omit to keep the stored choice.
         #[arg(long, value_name = "MODE", value_parser = ["auto", "official", "xgb"])]
         sleep_stager: Option<String>,
     },

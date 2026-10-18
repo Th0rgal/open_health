@@ -10,7 +10,7 @@ each can and can't do.
 | tool | model(s) | output | status |
 | --- | --- | --- | --- |
 | `oura sessions` / `tools/run_activity_model.py` | activity detection | activity/workout segments + type label | ✅ runs |
-| `tools/run_sleep_model.py` | `sleepstaging_2_6_0` (NSSA, the official app's stager) | DEEP/LIGHT/REM/WAKE hypnogram per ring bedtime + efficiency | ✅ runs (custom ops + classifier, see [sleep-staging.md](algorithms/sleep-staging.md)) |
+| (Rust, `oura_summary::sleep_stager`) | `sleepstaging_2_6_0` classifier, extracted to `sleepstaging_2_6_0_classifier.bin` | DEEP/LIGHT/REM/WAKE hypnogram per bedtime; no Python or torch, see [sleep-staging.md](algorithms/sleep-staging.md) | ✅ runs when the extracted classifier file is present; the built-in stager runs otherwise |
 | `tools/run_models.py bdi` | `sleepnet_bdi_0_4_0` | hypnogram + apnea/breathing-disturbance | ✅ runs |
 | `tools/run_cva_model.py` | `cva_2_1_5` | cardiovascular (vascular) age + pulse-wave velocity | ✅ runs (needs `cva_ppg` on — see [cva-cardiovascular-age.md](cva-cardiovascular-age.md)) |
 | `tools/run_spo2.py` | (no model — Oura's calibration) | overnight SpO2 % | ✅ runs (see [spo2-calibration.md](spo2-calibration.md)) |

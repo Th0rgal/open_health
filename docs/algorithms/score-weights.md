@@ -97,7 +97,7 @@ than the export aggregates — a follow-on that uses ring data, not this CSV.
 `tools/score_sleep.py` (and the `oura sleep-score` CLI command) compute a night's
 Sleep Score live, no cloud:
 
-1. SleepNet (`run_sleep_model.py`) → hypnogram → total-sleep / efficiency / REM /
+1. SleepNet hypnogram (the torch runner was removed, see Known gaps in clients-web-and-ios.md) → total-sleep / efficiency / REM /
    deep durations + sleep latency (first sustained-sleep epoch).
 2. `bedtime_period` history → real-clock sleep midpoint (from the hypnogram's
    local times) + 7-day regularity (a deciseconds delta, phase-independent).

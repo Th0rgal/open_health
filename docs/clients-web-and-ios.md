@@ -55,7 +55,7 @@ metric there once and both clients receive it in the JSON.
 | Steps / active calories / **distance** | activity report stats | activity day stats | `activity_daily` (incl. `distance_m`) | — |
 | Readiness (ported `readiness_calculate`, baseline carried night to night), breathing rate (ported from IBI) | `scores.readiness` | `scores.readiness` | `nights[].oura_readiness`, `breath_rate`, `breath_rate_port` | no contributor display yet; rest mode not wired (rest-mode ring events are not stored) |
 | Ideal sleep midpoint (sleep score timing) | profile dialog, `f-midpoint` | `ProfileSettingsView` | `profile.ideal_midpoint`, `profile.json` `chronotype` | — |
-| **Sleep stager choice** (official NSSA staging, built-in tree-ensemble staging, or automatic; an option whose model files are missing is disabled with a notice) | profile dialog, `f-stager` (`renderStagerChoice`); `oura dashboard --sleep-stager` | `ProfileSettingsView` `sleepStagingCard` (`SleepStagerStatus`) | `sleep_stager` (`choice`, `effective`, `options[]`), `profile.json` `sleep_stager`; resolved once in `oura_summary::sleep_stager` | NSSA (`sleepstaging_2_6_0` + extracted classifier) or the built-in stager |
+| **Sleep stager choice** (Oura model staging, built-in staging, or automatic; an option whose classifier file is missing is not offered and carries a notice) | profile dialog, `f-stager` (`renderStagerChoice`); `oura dashboard --sleep-stager` | `ProfileSettingsView` `sleepStagingCard` (`SleepStagerStatus`) | `sleep_stager` (`choice`, `effective`, `options[]`), `profile.json` `sleep_stager`; resolved once in `oura_summary::sleep_stager` | Vendor classifier on the Rust pipeline (`official`) or the built-in community-trained trees (`xgb`) |
 | Activity score + contributors (ported `actinfo` and activity score) | `activitySection` | `ActivityReport` | `activity_daily` (`score`, `contributors`, `class_min`) | — |
 | **Daily scores and contributors** (readiness 9, sleep 7, activity 6 sub-scores; band colors; history) | — | `TodayTab` contributors, `ScoreDetailView`, `Heatmap` (`Home.swift`, `Detail.swift`, `Viz.swift`) | `scores`, `nights[].{oura_readiness,oura_sleep_score}.contributors`, `activity_daily[].contributors` | ported daily scorer |
 | **Vitals tiles and metric history** (value, change vs 14-day mean, series; scrubbable chart, daily table) | — | `VitalsTab`, `MetricDetailView` | `nights[]`, `vitals`, `activity_daily`, `cardio`, `fitness` | — |
@@ -161,17 +161,19 @@ smoothing window or a metric definition, change **both** implementations. Oura's
 for whichever stager ran. Only an NSSA night carries the "Oura app" label on that lane.
 
 **Sleep stager choice.** `oura_summary::sleep_stager` is the single place that resolves it.
-`profile.json` holds `"sleep_stager": "official" | "xgb"` (absent means automatic). The official
-stager is Oura's `sleepstaging_2_6_0` graph plus its extracted classifier
-`sleepstaging_2_6_0_classifier.bin`. Both files are gitignored model files, so a build can lack
-them. The built-in stager (`xgb`) is open_oura's Rust pipeline with a tree ensemble trained
-privately by the author, compiled in, and always available. Automatic picks official when its
-files are present, otherwise built-in. Each client reports which files it found
-(`register_official_files`; web: the models directory or `$OURA_MODELS_DIR`, iOS: the app bundle
-through `set_official_sleep_stager_files`), and the summary's `sleep_stager` object carries the
-choice, the stager in use and a notice per unavailable option. iOS keeps one staging cache file per
-stager; the sidecar `staged_hypnograms.json` carries each night's `source` so the brain treats
-NSSA nights verbatim (`is_oura_staging`) and built-in nights as before.
+`profile.json` holds `"sleep_stager": "official" | "xgb"` (absent means automatic). Both stagers
+run open_oura's Rust pipeline in process. The official stager ("Oura model") swaps in the vendor
+classifier `sleepstaging_2_6_0_classifier.bin`, a gitignored file extracted locally by
+`tools/extract_nssa_classifier.py`, so a build can lack it. The built-in stager (`xgb`) uses a
+community-trained tree ensemble that approximates the official staging, compiled in and always
+available. Automatic picks official when the classifier is present, otherwise built-in. Each
+client reports where it found the file (`register_official_classifier`; web: the models
+directory or `$OURA_MODELS_DIR`, iOS: the app bundle through
+`set_official_sleep_stager_classifier`), and the summary's `sleep_stager` object carries the
+choice, the stager in use and a notice per unavailable option. iOS stages through
+`stage_night_official` / `stage_night_rust`, keeps one staging cache file per stager, and the
+sidecar `staged_hypnograms.json` carries each night's `source` so the brain treats official
+(`nssa`) nights verbatim (`is_oura_staging`) and built-in nights as before.
 
 **Autonomic-by-stage** (mean HR/HRV per sleep stage) is the same story: Rust
 `autonomic_by_stage` fills `nights[].autonomic` for the web; iOS recomputes in Swift
@@ -221,20 +223,25 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
   15 ms connection interval (a Gen 3 batch arrives in ~420 ms instead of ~850 ms; the mode
   lasts one connection), and a paired ring shows a status card with the key collapsed. The web
   dashboard reads a local database and has no BLE sync.
-- **Sleep staging on desktop**: the web dashboard stages with the same two stagers as iOS (the
-  NSSA runner `tools/run_sleep_model.py`, or the built-in Rust stager in
-  `oura_summary::sleep_stager::stage_nights_xgb`, cached in `xgb_stage_cache.json`). The
-  official stager needs Python with torch and the model files; if the runner returns nothing the
-  built-in stager runs, and nights it cannot stage fall back to the signal estimate. With
+- **Sleep staging on desktop**: the web dashboard stages with the same two stagers as iOS, in
+  process through `oura_summary::sleep_stager::stage_nights` (caches `official_stage_cache.json`
+  and `xgb_stage_cache.json` next to the database). The official stager needs only the
+  classifier file; if it is missing or stages nothing, the built-in stager runs, and nights it
+  cannot stage fall back to the signal estimate. With
   `steps_source = model`, desktop has no step counter weights loader and falls back to the
   ring's step count.
-- **Official stager coverage**: on the web the official stager stages every night (about 60 s for a
-  full database, cached in `nssa_cache.json`). iOS stages only the latest night automatically
-  with it, as the built-in stager covers every night; older nights are staged on demand or by
-  "Recompute everything". Switching the stager on iOS re-stages from that stager's own cache.
-- **Third stager**: there are two stagers, not three. The Rust port cannot load the extracted NSSA
-  classifier (a different forest format), so "NSSA features with the vendor classifier in Rust"
-  does not exist; the official stager always runs the vendor graph.
+- **Official stager coverage**: on the web the official stager stages every night. iOS stages
+  only the latest night automatically with it, as the built-in stager covers every night
+  (`SleepStaging.coversEveryNight`); older nights are staged on demand or by "Recompute
+  everything". Switching the stager on iOS re-stages from that stager's own cache. The forest
+  adds about two seconds to a 23-window database on a desktop, so iOS could cover every night; this
+  is not measured on a phone.
+- **Sleep staging without the model runtime**: `SleepStaging.swift` is still inside `#if TORCH`
+  together with `EventStore.swift` and `ModelCache.swift`, so a build without the model runtime
+  has no on-device staging although neither stager needs it now.
+- **Legacy Python sleep scorer**: `tools/score_sleep.py`, `tools/build_daily.py` sleep metrics and
+  `oura sleep-score` called the removed torch runner (`run_sleep_model.py`) and report that a
+  hypnogram runner is missing. The apps are unaffected.
 - **Sleep report without a hypnogram**: iOS still draws the time-in-bed strip and the
   signal lanes; the web returns early.
 - **Sleep score + breathing rate** (`nights[].sleep_score`, `breath_rate`).
@@ -359,8 +366,8 @@ The clock logic lives in **three places that must stay in sync**:
 
 - `crates/oura-summary/src/ring_time.rs` — the shared `RingClock`; fixes night/activity/
   movement **dates for both clients** at once.
-- `tools/epoch_time.py` (helper) used by `tools/run_activity_model.py` and
-  `tools/run_sleep_model.py` — the **web** on-model session/hypnogram times.
+- `tools/epoch_time.py` (helper) used by `tools/run_activity_model.py` — the **web**
+  on-model session times. Web hypnogram times come from the shared `RingClock`.
 - `apps/ios/OuraApp/EventStore.swift` (`epochs` / `unixSeconds`) used by
   `ActivityModel.swift` and `SleepStaging.swift` — the **iOS** on-device model times.
   iOS must be rebuilt to pick this up.

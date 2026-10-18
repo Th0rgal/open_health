@@ -7,6 +7,12 @@ returns stages, but the app only keeps its apnea and SpO₂ outputs (`SleepNetHa
 `DbApnea`). Both clients used moonstone's stages until October 2026, and that was the root of
 the mismatch.
 
+This repository stages with the Rust port of that pipeline (open_oura,
+`oura_analysis::ported::sleepstaging`). Its classifier is either a community-trained tree
+ensemble that approximates the official staging (the built-in stager) or the vendor forest
+extracted from `libalgos.so` (the `official` stager, "Oura model" in the clients). Neither needs
+a model runtime. See [Choosing the stager](#choosing-the-stager).
+
 ## The official pipeline
 
 | Step | Android code | What it does |
@@ -22,19 +28,17 @@ the mismatch.
 | Store | `settings.fragment.health.c` (case 3) → `SleepHandler.calculateSleep` → ecore `calculate_sleep_score_numerical` | The digits pass through unchanged. Epoch *k* starts at floor30(bedtime start) + 30·k. |
 | Display | `DbSleepExtKt.sleepPhases5Min` → `SleepPhaseConverter.aggregate30SecTo5Min` | The sleep chart draws **5-minute blocks**: windows of 10 epochs; a last window shorter than 5 is dropped; ≥4 awake epochs → AWAKE; otherwise the mode, with ties broken AWAKE > DEEP > REM > LIGHT. |
 
-The graph calls five native ops from `libalgos.so`. We reimplement them in
-`apps/ios/OuraApp/NssaOps.c`, which the iOS app compiles and the desktop runner loads through
-ctypes. `tools/nssa_ops.py` holds the pure-Python reference.
+The graph calls five native ops from `libalgos.so`. The Rust port reimplements the four
+signal-processing ops (`oura_create_windows` @0x5602fc, `oura_find_indices` @0x561248,
+`oura_biquad_cascade` @0x55e860, `oura_find_peaks` @0x55ee1c) inside the feature pipeline. The
+fifth, `oura_sleep_classifier`, is a treelite forest of 2000 trees, 4 classes, 182 features and
+63 code units.
 
-- `oura_create_windows` @0x5602fc
-- `oura_find_indices` @0x561248: running "low" index; the first probe is x[j+1].
-- `oura_biquad_cascade` @0x55e860 / step @0x564234: TDF-II with float32 `fmadd`.
-- `oura_find_peaks` @0x55ee1c: scipy's `_local_maxima_1d`.
-- `oura_sleep_classifier`: a treelite forest of 2000 trees, 4 classes, 182 features and 63 code units.
-  - `tools/extract_nssa_classifier.py` lifts it symbolically from the arm64 code into `sleepstaging_2_6_0_classifier.bin`.
-  - That file holds Oura's weights, so it is gitignored next to the models.
-  - NaN becomes a treelite "missing" entry.
-  - Units are summed in native `fadd` order, then softmax, then a cast to float32.
+- `tools/extract_nssa_classifier.py` lifts it symbolically from the arm64 code into `sleepstaging_2_6_0_classifier.bin` (magic `NSSAFOR1`, 7.3 MB).
+- That file holds Oura's weights. It is produced locally from a library the user supplies and is never committed.
+- NaN becomes a treelite "missing" entry.
+- Units are summed in native `fadd` order, then softmax, then a cast to float32.
+- `oura_analysis::ported::sleepstaging::vendor_forest` reads the file and implements the same evaluation in Rust.
 
 **IBI validity** (ecore `rr_validity_indicator_t`):
 
@@ -51,7 +55,7 @@ Correction init: at most 4 outputs per call, max gap 5000 ms, HR mode, max HR 15
 
 | # | Ours before | Official |
 | --- | --- | --- |
-| 1 | `sleepnet_moonstone_1_2_0` stages (tools/run_sleep_model.py, iOS SleepStaging.swift) | `sleepstaging_2_6_0` (NSSA). Its five custom ops are now implemented. |
+| 1 | `sleepnet_moonstone_1_2_0` stages | `sleepstaging_2_6_0` (NSSA). The Rust port runs its pipeline, and the extracted forest runs its classifier. |
 | 2 | Motion input = `motion_seconds` from 0x47 | 0x72 `sleep_acm_period`: one 30 s window, six statistics in the column order above. Our decoder also labelled all six `acm_mad` and rounded them to 4 decimals. |
 | 3 | IBI validity = 300–2000 ms plus a "tail noise" heuristic; 0x80 beats merged in; beats synthesized from 0x5D when IBI was missing | 0x60 only, corrected by ecore. On 2026-10-15 ecore flags 1,202 of 23,178 beats invalid and refills 660; the old rule accepted all of them. |
 | 4 | Beat k stamped event time + cumulative IBI (about one packet, ~5 s, too late), no clamping | Event time − IBIs that follow, clamped to be non-decreasing. |
@@ -62,7 +66,7 @@ Correction init: at most 4 outputs per call, max gap 5000 ms, HR mode, max HR 15
 | 9 | A second 5-epoch majority filter (`smooth_stages` / `Sleep.smooth`) on every hypnogram | Smoothing happens only inside the graph. Oura stagings (`nssa`, `ring`) are now used verbatim. |
 | 10 | Epochs assumed end-stamped and laid on a grid starting at `start_ds` | The grid is wall-clock aligned to floor30(bedtime start). Epochs land on the summary grid by midpoint; `stages_t0_unix` and `nssa_periods` keep the exact times. |
 | 11 | 30 s hypnogram only | Official chart = 5-min blocks (`stages_5min`, new "Stages · 5 min (Oura app)" lane). |
-| 12 | Web dashboard: the Python batch exceeded the 180 s timeout on a full DB, so the web showed the signal fallback | The C ops make NSSA run all nights in about 60 s. Results are cached per input fingerprint (`nssa_cache.json`). |
+| 12 | Web dashboard: the Python batch exceeded the 180 s timeout on a full DB, so the web showed the signal fallback | Staging runs in process in Rust. Results are cached per input fingerprint (`official_stage_cache.json`, `xgb_stage_cache.json`). |
 
 ## Verification
 
@@ -72,15 +76,16 @@ The fixtures are synthetic. Personal ring data stays local.
   - Lifted DAG vs the native units under unicorn: 18,900/18,900 bit-exact.
   - Full `predict_multiclass`, margins and probabilities: 2000/2000 bit-exact.
   - Exported blob vs the lifter: 3000/3000.
-  - C vs numpy: `tools/test_nssa_ops.py`.
+  - The Rust reader gives the same probabilities as the Python `Forest` loader (`tools/nssa_classifier.py`) on 14,378 rows.
 - **IBI correction**: the Python port matches emulated libappecore on the real night and on 160 synthetic streams.
 - **0x60 decoder**: identical to the native decoder on all 106,797 rows.
-- **Ops**
-  - Biquad step: emulated, 60,000 fuzz cases bit-exact.
-  - The other three ops: transcribed and cross-checked by reading the code.
-  - C and Python twins are bit-identical (`tools/test_nssa_ops.py`).
-- **Lite interpreter**: `sleepstaging_2_6_0.ptl` loaded in the lite interpreter gives the same epochs as the full model. The model's own `aggregate_30sec_to_5min` equals the Kotlin rule.
-- **Swift twins**: `apps/ios/OuraApp/Tests/NssaParityFixture.json` (written by `tools/make_nssa_fixture.py`) pins the Swift input builder, the IBI correction and the 5-min aggregation to the Python outputs.
+- **Rust path against the graph and the app** (one wearer, 14 nights, 30 s epochs): Rust features with the vendor forest, which also decides the wake-trim rerun, agree with the TorchScript graph on 0.9999 of epochs (1 of about 12,500) and with the official app's stages on 0.998 (the graph itself: 0.998). The built-in stager agrees with the app on about 0.92. With the surrogate deciding the rerun and the forest classifying, agreement with the app is 0.9935, so the forest has to drive the rerun. The remaining differences come from breathing-rate features in `hrv_low`.
+- **Fixture parity**: `crates/oura-summary/tests/nssa_parity.rs` checks `apps/ios/OuraApp/Tests/NssaParityFixture.json` (written by `tools/make_nssa_fixture.py` from the Python reference in `tools/nssa_inputs.py` and `tools/ibi_correction.py`) against the Rust code:
+  - sleep ACM decode (`oura_protocol`, 40 bodies, to the decoder's 4-decimal rounding) and the model column order;
+  - sleep temperature decode and 30 s spacing;
+  - IBI correction (`oura_analysis::ported::ibi_correction::correct_ibis`), bit-exact on 6 streams;
+  - 5-minute aggregation (`aggregate_30s_to_5min`).
+- **Fixture fields with no Rust test.** The IBI beat expansion with clamping (`ibi_events`) and the inclusive window (`ibi_windows`) have no separate Rust function: `sleepstaging::events::collect` expands and filters inline and does not clamp stamps (the corrector drops beats that go back in time instead). The demographics vector is not in the fixture; `profile_scalars` encodes sex as 2 (male), 1 (female) and -1, where the Python reference used 1, -1 and 0, and truncated age to an integer. None of the three scalars is a classifier column.
 
 ## Still unconfirmed without an official export
 
@@ -91,12 +96,29 @@ The fixtures are synthetic. Personal ring data stays local.
 
 ## Choosing the stager
 
-The clients can stage with the NSSA graph above or with the built-in Rust stager (open_oura's
-`sleepstaging` port with a compiled-in tree ensemble trained privately by the author). The choice
-is `"sleep_stager"` in `profile.json`, resolved by `oura_summary::sleep_stager` and set from the
-profile screen of either client or `oura dashboard --sleep-stager`. NSSA needs
-`sleepstaging_2_6_0` (`.pt` on desktop, `.ptl` on iOS) and `sleepstaging_2_6_0_classifier.bin`.
-When either is missing the option is disabled with a notice and automatic mode uses the built-in
-stager. The built-in stager reads the same bedtime inputs (`stager_inputs`) and its classifier
-format differs from the extracted forest, so the Rust pipeline does not load the NSSA classifier.
-Both stagers feed the same 30 s grid, the 5-minute lane and the sleep score.
+Both stagers run the same Rust feature pipeline, wake-trim rerun, smoothing, bedtime grid and
+false-nap check (`stage_night_forest` with the rerun and the false-nap check on, and
+`stage_night_default` for the built-in trees). They differ in the classifier:
+
+- `official` ("Oura model"): the vendor forest in `sleepstaging_2_6_0_classifier.bin`. The
+  hypnogram carries source `nssa`, so the brain shows it verbatim and labels the 5-minute lane
+  "Oura app".
+- `xgb` ("Built-in"): a community-trained tree ensemble that approximates the official staging,
+  compiled into open_oura. It needs no files.
+
+The choice is `"sleep_stager"` in `profile.json`, resolved by `oura_summary::sleep_stager` and
+set from the profile screen of either client or `oura dashboard --sleep-stager`. Automatic mode
+uses `official` when the classifier file is registered and valid, otherwise `xgb`. An
+unavailable option is not offered and carries a notice.
+
+**Producing the classifier file.** The file is extracted from the vendor library and stays on
+the local machine:
+
+```sh
+python tools/extract_nssa_classifier.py config.arm64_v8a.apk
+```
+
+The script needs the vendor `libalgos.so` (from the APK) and the packages listed in its header.
+Place the output in `notes/models/` (web; `$OURA_MODELS_DIR` overrides the directory) or add it
+to the iOS bundle as `sleepstaging_2_6_0_classifier.bin` (optional resource in `project.yml`).
+Both files are gitignored. There is no graph (`.pt` or `.ptl`) requirement.

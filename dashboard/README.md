@@ -63,10 +63,9 @@ actual state. It's best-effort — a failed read never fails the sync.
   endpoints require a same-origin `X-Oura-Dash` header (CSRF guard) and the server is
   loopback-only with a Host-header check.
 - **The AI models run via the Python runners**, shelled out exactly like
-  `oura sessions`: the sleep hypnogram (`run_sleep_model.py`), activity sessions
-  (`run_activity_model.py`), and cardiovascular age (`run_cva_model.py`). Each is
-  invoked with `--json`. `/api/summary` runs them **concurrently** (sleep scores every
-  night in one batched process) and **caches** the result, recomputing only when
+  `oura sessions`: activity sessions (`run_activity_model.py`), illness and cardiovascular
+  age (`run_cva_model.py`). Each is invoked with `--json`. Sleep staging runs in process in
+  Rust. `/api/summary` runs them **concurrently** and **caches** the result, recomputing only when
   `oura.db` or `profile.json` changes — so the first load pays the cost and refreshes
   are instant.
 - **Frontend** (`dashboard/web/`): vanilla HTML/CSS/JS, no build step, no external

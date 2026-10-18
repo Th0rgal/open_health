@@ -96,7 +96,7 @@ pub struct ModelInputs<'a> {
 /// Raw model outputs, matching the Python runners' `--json` shape.
 #[derive(Default)]
 pub struct ModelOutputs {
-    pub sleep_batch: Option<Value>, // run_sleep_model.py --batch
+    pub sleep_batch: Option<Value>, // sleep_stager::stage_nights batch
     pub cva: Option<Value>,         // run_cva_model.py
     pub activity: Option<Value>,    // run_activity_model.py
     pub illness: Option<Value>,     // run_illness_model.py (Symptom Radar)
@@ -1511,7 +1511,7 @@ pub fn stage_night_from_signals(
 
 /// Fallback batch stager for desktop/CLI runs where no sleep stager model is available. Signal
 /// staging is the desktop fallback (known gap: the ported classifier is not wired in here).
-/// Reads nocturnal `hrv_event` (`0x5d`) and `motion_event` (`0x47`) streams from `db` and returns the same JSON batch shape as `run_sleep_model.py`.
+/// Reads nocturnal `hrv_event` (`0x5d`) and `motion_event` (`0x47`) streams from `db` and returns the same JSON batch shape as `sleep_stager::stage_nights`.
 pub fn stage_nights_from_signals(db: &Path, sleep_ranges: &[[i64; 3]]) -> Option<Value> {
     if sleep_ranges.is_empty() {
         return Some(Value::Array(Vec::new()));

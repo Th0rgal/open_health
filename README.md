@@ -32,11 +32,16 @@ cargo run --release -p oura-cli -- dashboard
 
 ## Models
 
-The repository contains no third-party model files. The activity, illness, CVA and
-Oura sleep-staging models (see [model runners](docs/model-runners.md)) are not
-distributed. If a build lacks them, the matching widgets still appear and show a
-notice naming what is missing. Sleep staging has a built-in option, a community-trained
-tree ensemble that approximates the official staging and is always available. Settings lets you choose
-between it and the Oura staging when those model files are present.
+The repository contains no third-party model files. The activity, illness and CVA models
+(see [model runners](docs/model-runners.md)) are not distributed. If a build lacks them, the
+matching widgets still appear and show a notice naming what is missing.
+
+Sleep staging runs in Rust and needs no model runtime. The built-in option is a
+community-trained tree ensemble that approximates the official staging and is always available.
+The "Oura model" option runs the vendor classifier on the same pipeline. It needs
+`sleepstaging_2_6_0_classifier.bin`, which you extract on your own machine from the vendor
+library with `tools/extract_nssa_classifier.py` (see
+[sleep staging](docs/algorithms/sleep-staging.md#choosing-the-stager)). The file is not
+distributed. Settings lets you choose between the two when the file is present.
 
 MIT licensed. See [LICENSE](LICENSE).
