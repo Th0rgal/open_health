@@ -7,7 +7,7 @@
 //!   proprietary and not part of the repository, so a build can lack them. The clients run it
 //!   (web: `tools/run_sleep_model.py`, iOS: `TorchBridge`) and register here which files they found.
 //! * `xgb`: the Rust pipeline of open_oura (`oura_analysis::ported::sleepstaging`) with a
-//!   compiled-in tree ensemble trained privately by the author. It needs no files.
+//!   compiled-in community-trained tree ensemble that approximates the official staging. It needs no files.
 //!
 //! The choice is stored in `profile.json` as `"sleep_stager": "official" | "xgb"`; an absent key
 //! means automatic: official when its files are present, otherwise xgb. Every client resolves
@@ -142,7 +142,7 @@ pub fn status(db: &Path) -> Value {
             {
                 "id": "xgb",
                 "label": "Built-in",
-                "detail": "A Rust pipeline with a tree ensemble trained privately by the author. Always available.",
+                "detail": "A community-trained tree ensemble that approximates the official staging. It needs no model files, so it is always available.",
                 "available": true,
                 "notice": Value::Null,
             },

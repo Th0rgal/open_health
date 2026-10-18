@@ -18,7 +18,7 @@ private struct EditableProfile {
     init(_ profile: Profile?) {
         let stored = (try? JSONSerialization.jsonObject(with: Data(contentsOf: DB.url.deletingLastPathComponent()
             .appendingPathComponent("profile.json"))) as? [String: Any])?["steps_source"] as? String
-        stepsSource = stored == "model" ? "model" : "ring"
+        stepsSource = stored == "model" && ModelFiles.stepCounter ? "model" : "ring"
         let stager = (try? JSONSerialization.jsonObject(with: Data(contentsOf: DB.url.deletingLastPathComponent()
             .appendingPathComponent("profile.json"))) as? [String: Any])?["sleep_stager"] as? String
         sleepStager = stager == "official" || stager == "xgb" ? stager! : "auto"
@@ -307,12 +307,18 @@ struct ProfileSettingsView: View {
              note: ModelFiles.stepCounter
                 ? "Ring counter uses the step count the ring reports. Step model counts steps from the ring's real-step records with the step counter; days without real-step records count 0. Real steps must be switched on under Ring capture."
                 : "Ring counter uses the step count the ring reports. The step model is not included in this build.") {
-            Picker("Step count", selection: $profile.stepsSource) {
-                Text("Ring counter").tag("ring")
-                Text("Step model").tag("model").disabled(!ModelFiles.stepCounter)
+            // A segment cannot be disabled in a segmented picker, so an option whose model is not in
+            // this build is not offered; the note above says why.
+            if ModelFiles.stepCounter {
+                Picker("Step count", selection: $profile.stepsSource) {
+                    Text("Ring counter").tag("ring")
+                    Text("Step model").tag("model")
+                }
+                .pickerStyle(.segmented)
+                .padding(.vertical, 12)
+            } else {
+                Text("Ring counter").font(Obs.sans(13)).foregroundStyle(Obs.ink2).padding(.vertical, 12)
             }
-            .pickerStyle(.segmented)
-            .padding(.vertical, 12)
         }
     }
 
@@ -320,13 +326,18 @@ struct ProfileSettingsView: View {
     /// disabled and explained in the same muted style as the capture hints.
     private var sleepStagingCard: some View {
         let status = SleepStagerStatus.load()
-        let current = status?.options.first { $0.id == profile.sleepStager }
+        let current = status?.options.first { $0.id == profile.sleepStager && $0.available }
         return Card(title: "Sleep staging", icon: "waveform.path.ecg",
              note: "Automatic uses the official staging when its model files are in the build, otherwise the built-in staging. Saving re-stages your nights.") {
-            Picker("Sleep staging", selection: $profile.sleepStager) {
+            // A segment cannot be disabled in a segmented picker, so only options whose model files
+            // are in this build are offered. A stored choice that is not offered shows as Automatic.
+            let offered = (status?.options ?? []).filter { $0.available }
+            Picker("Sleep staging", selection: Binding(
+                get: { profile.sleepStager == "auto" || offered.contains { $0.id == profile.sleepStager } ? profile.sleepStager : "auto" },
+                set: { profile.sleepStager = $0 })) {
                 Text("Automatic").tag("auto")
-                ForEach(status?.options ?? []) { option in
-                    Text(option.label).tag(option.id).disabled(!option.available)
+                ForEach(offered) { option in
+                    Text(option.label).tag(option.id)
                 }
             }
             .pickerStyle(.segmented)
