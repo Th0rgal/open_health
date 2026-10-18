@@ -803,6 +803,7 @@ struct RootView: View {
     @State private var showSync = false
     @State private var showProfile = false
     @State private var showSleepDebt = false
+    @State private var showVo2 = false
     @State private var vital: VitalKind?
     @State private var tab: AppTab = .today
     @State private var scoreKind: ScoreKind = .sleep
@@ -844,6 +845,7 @@ struct RootView: View {
         .sheet(isPresented: $showProfile) {
             ProfileSettingsView(profile: s?.profile, recompute: recomputeHook, ring: ring, onSaved: refreshDerivedData)
         }
+        .sheet(isPresented: $showVo2) { if let s { Vo2DetailView(s: s) } }
         .sheet(isPresented: $showSleepDebt) {
             if let s { DebtDetailView(s: s, day: shownDay(s), onOpenDay: openReport) }
         }
@@ -1050,6 +1052,7 @@ struct RootView: View {
                         s = full
                         SummaryCache.save(full)
                         HealthExport.shared.push(full)
+                        Task { await Vo2Walk.scan(full) }
                     } else if s == nil { s = full }
                     modelProgress.report(generation, full.error == nil ? nil : "Couldn’t refresh data.")
                 } else { modelProgress.report(generation, "Analysis paused") }
@@ -1090,6 +1093,7 @@ struct RootView: View {
         case .metric(let m): metricSheet = m
         case .vital(let v): vital = v
         case .debt: showSleepDebt = true
+        case .vo2: showVo2 = true
         case .radar: showRadar = true
         case .allDays: showAllDays = true
         case .activities: showActivities = true

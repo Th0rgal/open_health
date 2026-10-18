@@ -185,6 +185,14 @@ which is why Oura's own app has no per-night HRV trend either.
 
 ## Known gaps (iOS-only, not yet on the web)
 
+- **VO2 max from 6-minute walks** (iOS, `WalkMath.swift`, `WalkTest.swift`, `Vo2Views.swift`):
+  walking or running started under Activities records a GPS route (`routes/<id>.json` beside the
+  database, while the exercise runs only). Walks the ring detected use the phone's step counter
+  distance for the best six minutes. A window of at least 480 m, with the median of the ring's
+  per-minute heart rate over its last 70 s, goes to `vo2max_walk_6min` (open_oura
+  `vo2max_ukk_6min`) and is kept in `vo2.json`. The VO2 max tile shows the latest reading, and its
+  detail screen charts them against the age, sex and weight formula. The web has no location or
+  step counter source and still shows the formula value alone.
 - **Sleep need setting and explanation** (iOS, `ProfileSettings.swift`, `Detail.swift`): the
   Profile Sleep card sets `sleep_need_h`, and the Sleep debt screen shows why the estimated need
   is what it is and when it moved. The web reads the same summary fields but shows neither.

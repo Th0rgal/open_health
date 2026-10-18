@@ -27,11 +27,16 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
+		<string>location</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Open Oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Open Oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Open Oura records the route of walks and runs you start in the app to measure distance, which is used to estimate your VO2 max. The route stays on this iPhone.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Open Oura reads walking distance from the iPhone's motion data to estimate your VO2 max from walks the ring detected. It stays on this iPhone.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Open Oura can read selected Apple Health data to compare it with your ring metrics on-device.</string>
 	<key>NSHealthUpdateUsageDescription</key>

@@ -15,6 +15,28 @@ pub fn core_version() -> String {
     format!("oura-core {}", env!("CARGO_PKG_VERSION"))
 }
 
+/// VO2max (ml/kg/min, whole number) from a 6-minute walk: the UKK estimate behind Cardio
+/// Capacity, from the route length of the 6-minute window and the median workout heart rate of
+/// its last 70 s. `sex` is `M` or `F`; the estimate is undefined for any other value, and
+/// 0 is returned.
+#[uniffi::export]
+pub fn vo2max_walk_6min(
+    age_years: f64,
+    weight_kg: f64,
+    sex: String,
+    distance_m: f64,
+    height_cm: f64,
+    hr_bpm: f64,
+) -> f64 {
+    let gender = match sex.as_str() {
+        "F" => 1,
+        "M" => 2,
+        _ => 0,
+    };
+    oura_analysis::ported::metabolic::vo2max_ukk_6min(age_years, weight_kg, gender, distance_m, height_cm, hr_bpm)
+        .round()
+}
+
 /// HRV RMSSD (ms) over inter-beat intervals — the shared `oura-analysis` algorithm,
 /// reachable natively. Returns -1 when the input is too short.
 #[uniffi::export]

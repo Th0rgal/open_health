@@ -10,7 +10,7 @@ enum Route {
     case score(ScoreKind)
     case metric(MetricID)
     case vital(VitalKind)
-    case debt, radar, allDays, activities
+    case debt, radar, allDays, activities, vo2
     case day(String, sleep: Bool)
 }
 
@@ -529,6 +529,12 @@ struct VitalsPage: View {
         }
     }
 
+    @ObservedObject private var vo2Store = Vo2Store.shared
+    private static func ymd(_ unix: Double) -> String {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.timeZone = .current
+        return f.string(from: Date(timeIntervalSince1970: unix))
+    }
+
     @ViewBuilder private var cardio: some View {
         let va = s.cardio?.vascular_age, vo2 = s.fitness?.vo2max
         VStack(alignment: .leading, spacing: 10) {
@@ -548,9 +554,18 @@ struct VitalsPage: View {
                     }
                     .buttonStyle(.plain)
                 }
-                if let vo2 {
-                    MetricTile(title: "VO₂ max", value: String(format: "%.1f", vo2), unit: "ml/kg/min",
-                               icon: "lungs.fill", chevron: false)
+                if let latest = vo2Store.file.readings.last {
+                    Button { open(.vo2) } label: {
+                        MetricTile(title: "VO₂ max", value: String(format: "%.0f", latest.vo2), unit: "ml/kg/min",
+                                   icon: "lungs.fill", status: "6-minute walk, \(DayFmt.short(Self.ymd(latest.atUnix)))")
+                    }
+                    .buttonStyle(.plain)
+                } else if let vo2 {
+                    Button { open(.vo2) } label: {
+                        MetricTile(title: "VO₂ max", value: String(format: "%.1f", vo2), unit: "ml/kg/min",
+                                   icon: "lungs.fill", status: "From age, sex and weight")
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }

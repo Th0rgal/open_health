@@ -507,6 +507,11 @@ RustBuffer uniffi_oura_core_fn_func_step_motion_rows(RustBuffer db_path, RustCal
 RustBuffer uniffi_oura_core_fn_func_summary_json(RustBuffer db_path, int64_t tz_offset, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_FUNC_VO2MAX_WALK_6MIN
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_FN_FUNC_VO2MAX_WALK_6MIN
+double uniffi_oura_core_fn_func_vo2max_walk_6min(double age_years, double weight_kg, RustBuffer sex, double distance_m, double height_cm, double hr_bpm, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_OURA_CORE_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_OURA_CORE_RUSTBUFFER_ALLOC
 RustBuffer ffi_oura_core_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -904,6 +909,12 @@ uint16_t uniffi_oura_core_checksum_func_step_motion_rows(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_FUNC_SUMMARY_JSON
 #define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_FUNC_SUMMARY_JSON
 uint16_t uniffi_oura_core_checksum_func_summary_json(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_FUNC_VO2MAX_WALK_6MIN
+#define UNIFFI_FFIDEF_UNIFFI_OURA_CORE_CHECKSUM_FUNC_VO2MAX_WALK_6MIN
+uint16_t uniffi_oura_core_checksum_func_vo2max_walk_6min(void
     
 );
 #endif

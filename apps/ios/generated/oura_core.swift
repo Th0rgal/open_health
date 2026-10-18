@@ -2973,6 +2973,24 @@ public func summaryJson(dbPath: String, tzOffset: Int64) -> String {
     )
 })
 }
+/**
+ * VO2max (ml/kg/min, whole number) from a 6-minute walk: the UKK estimate behind Cardio
+ * Capacity, from the route length of the 6-minute window and the median workout heart rate of
+ * its last 70 s. `sex` is `M` or `F`; the estimate is undefined for any other value, and
+ * 0 is returned.
+ */
+public func vo2maxWalk6min(ageYears: Double, weightKg: Double, sex: String, distanceM: Double, heightCm: Double, hrBpm: Double) -> Double {
+    return try!  FfiConverterDouble.lift(try! rustCall() {
+    uniffi_oura_core_fn_func_vo2max_walk_6min(
+        FfiConverterDouble.lower(ageYears),
+        FfiConverterDouble.lower(weightKg),
+        FfiConverterString.lower(sex),
+        FfiConverterDouble.lower(distanceM),
+        FfiConverterDouble.lower(heightCm),
+        FfiConverterDouble.lower(hrBpm),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -3047,6 +3065,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_func_summary_json() != 60689) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oura_core_checksum_func_vo2max_walk_6min() != 12735) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oura_core_checksum_method_ringsession_apply_capture_settings() != 29888) {

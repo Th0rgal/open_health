@@ -322,6 +322,7 @@ struct ExerciseView: View {
     let s: Summary
     @ObservedObject var store: ActivityLogStore
     @ObservedObject var ring: RingSync
+    @ObservedObject private var recorder = RouteRecorder.shared
     var onFinished: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var type = ExerciseType.all[0]
@@ -347,7 +348,7 @@ struct ExerciseView: View {
                         .surface()
                         button("Stop exercise", symbol: "stop.fill") { Task { await stop(active) } }
                         if stopFailed {
-                            Button(role: .destructive) { store.clearActive(); stopFailed = false } label: {
+                            Button(role: .destructive) { RouteRecorder.shared.stop(); store.clearActive(); stopFailed = false } label: {
                                 Text("Discard this exercise (the ring could not be reached)").font(Obs.sans(11))
                             }
                         }
@@ -366,11 +367,19 @@ struct ExerciseView: View {
                     } else if let message {
                         Text(message).font(Obs.sans(11)).foregroundStyle(Obs.ink2)
                     }
+                    if recorder.denied {
+                        Text("Location access is off, so this exercise has no route. Turn it on in Settings to measure distance.")
+                            .font(Obs.sans(11)).foregroundStyle(Obs.bad)
+                    }
                     Text("Starting tells the ring this is a workout, as the official app does, so it records exercise heart rate. The phone does not need to stay connected. Stopping puts the ring back as it was and syncs. Heart rate for the session comes from the beats saved on this iPhone after the sync.")
                         .font(Obs.sans(11)).foregroundStyle(Obs.muted)
                     Spacer()
                 }
                 .padding(.horizontal, 20).padding(.top, 8)
+            }
+            .onAppear {
+                // an exercise still running after a relaunch keeps recording its route
+                if let a = store.log.active, RouteRecorder.tracked.contains(a.type) { RouteRecorder.shared.start(id: a.id) }
             }
             .navigationTitle("Exercise")
             .navigationBarTitleDisplayMode(.inline)
@@ -400,8 +409,10 @@ struct ExerciseView: View {
         switch result {
         case .success(let started):
             let previous = started.previousMode.map { $0 <= 1 ? $0 : 0 } ?? 0
-            store.begin(ActiveExercise(id: UUID().uuidString, startUnix: Date().timeIntervalSince1970,
-                                       type: type.name, activityId: type.id, previousMode: previous))
+            let active = ActiveExercise(id: UUID().uuidString, startUnix: Date().timeIntervalSince1970,
+                                        type: type.name, activityId: type.id, previousMode: previous)
+            store.begin(active)
+            if RouteRecorder.tracked.contains(type.name) { RouteRecorder.shared.start(id: active.id) }
             if started.modeAfter != 2 { message = "The ring did not report the workout mode. It is recording anyway; check Ring capture in Profile." }
         case .failure(let e):
             message = e.text
@@ -421,12 +432,19 @@ struct ExerciseView: View {
             let logged = LoggedActivity(id: active.id, startUnix: active.startUnix, endUnix: end, type: active.type)
             store.add(logged)
             store.clearActive()
+            let route = RouteRecorder.tracked.contains(active.type) ? RouteRecorder.shared.stop() : []
+            let distance = WalkMath.totalDistance(route)
+            if distance > 0 { store.update(active.id, distanceM: distance) }
             message = "Saved. Syncing the ring for heart rate."
             if let key = Keychain.loadKey() {
                 _ = await ring.run(keyHex: key, source: "exercise")
                 let hr = await Task.detached { ExerciseMetrics.heartRate(startUnix: active.startUnix, endUnix: end) }.value
                 if let hr { store.update(active.id, hr: hr); message = "Saved with heart rate." }
                 else { message = "Saved. The ring has no heart-rate beats for this window yet." }
+                await Vo2Walk.fromRoute(route, id: active.id, activity: active.type, profile: s.profile)
+                if let reading = Vo2Store.shared.file.readings.first(where: { $0.id == active.id }) {
+                    message = "Saved. VO₂ max from this walk: \(Int(reading.vo2)) ml/kg/min."
+                }
             }
             working = false
             onFinished()

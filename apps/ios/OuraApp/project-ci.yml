@@ -46,6 +46,9 @@ targets:
       - path: Components.swift
       - path: CaptureSettings.swift
       - path: CaptureNeeds.swift
+      - path: WalkMath.swift
+      - path: WalkTest.swift
+      - path: Vo2Views.swift
       - path: ActivityLog.swift
       - path: ActivityViews.swift
       - path: ModelFiles.swift

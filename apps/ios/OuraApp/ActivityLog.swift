@@ -31,6 +31,8 @@ struct LoggedActivity: Codable, Identifiable, Equatable {
     var hrAvg: Double?
     var hrMax: Double?
     var hrSamples: Int?
+    /// Length of the recorded route, meters (walks, runs and rides started in the app).
+    var distanceM: Double?
 }
 
 struct ActivityTag: Codable, Equatable {
@@ -86,6 +88,12 @@ final class ActivityLogStore: ObservableObject {
     func update(_ id: String, hr: HeartRateWindow) {
         guard let i = log.activities.firstIndex(where: { $0.id == id }) else { return }
         log.activities[i].hrAvg = hr.avg; log.activities[i].hrMax = hr.max; log.activities[i].hrSamples = hr.count
+        save()
+    }
+
+    func update(_ id: String, distanceM: Double) {
+        guard let i = log.activities.firstIndex(where: { $0.id == id }) else { return }
+        log.activities[i].distanceM = distanceM
         save()
     }
 
@@ -151,7 +159,7 @@ struct TimelineItem: Identifiable {
 }
 
 enum DayTimeline {
-    private static let timeFormat: DateFormatter = {
+    static let timeFormat: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"; f.timeZone = .current; return f
     }()
     private static let dayFormat: DateFormatter = {
