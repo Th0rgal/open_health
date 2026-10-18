@@ -26,7 +26,7 @@ calls for Swift and keeps no ring logic. Activity tags and user-started exercise
 
 Cargo fetches the open_oura crates from
 [manueldeprada/open_oura](https://github.com/manueldeprada/open_oura) at `rev`
-`a0d3eada2fa8a48f16217e5ccfca6680eddf9c1e`, set in the manifests of `oura-cli`, `oura-core`,
+`5a425ab19798c52aa81e0515026cc33590737efa`, set in the manifests of `oura-cli`, `oura-core`,
 `oura-summary`, and `oura-ffi` (all four use the same `rev`). That revision carries the changes in
 [Th0rgal/open_oura#32](https://github.com/Th0rgal/open_oura/pull/32). When the pull request is
 merged, point the four manifests at `https://github.com/Th0rgal/open_oura` with the merged commit
