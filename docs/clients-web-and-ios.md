@@ -162,6 +162,10 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
 
 - **Sleep report without a hypnogram**: iOS still draws the time-in-bed strip and the
   signal lanes; the web returns early.
+- **Apple Health HRV export** uses the RMSSD type on iOS 27 and later. On older
+  systems, ring RMSSD remains visible in the app rather than being mislabeled as
+  SDNN. Reconciliation removes only this exporter's legacy `openoura.hrv.*` SDNN
+  records, using existing authorization; it requests no new SDNN access.
 - **Sleep score + breathing rate** (`nights[].sleep_score`, `breath_rate`).
 - **Skin temperature / latest HR vitals and trend pages**, **hourly heart rate**
   (`hourly_hr` is FFI-only; no `/api` endpoint yet).
@@ -184,7 +188,7 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
 - **Advanced & debugging**: on-ring feature toggles (`/api/feature`) and the per-type
   event stream. Profile editing is now native on iOS, including optional Apple Health
   import for date of birth, biological sex, height, and weight, plus optional export
-  of workouts (add/remove as detections change), sleep stages, heart rate, HRV,
+  of workouts (add/remove as detections change), sleep stages, heart rate, RMSSD HRV (iOS 27+),
   resting HR, steps, calories, and distance.
 - **Polysomnograph crosshair**: web has a hover crosshair; iOS uses a touch scrubber
   (drag across the lanes) — same idea, adapted to the input.

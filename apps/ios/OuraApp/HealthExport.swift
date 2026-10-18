@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import HealthKit
+import Darwin
 
 /// Writes ring-derived samples to Apple Health and removes ones we previously
 /// saved that no longer exist (a dropped false-positive hike, a restaged night).
@@ -11,6 +12,17 @@ final class HealthExport: ObservableObject {
     private static let enabledKey = "health.export.enabled"
     private static let fingerprintKey = "health.export.fp"
     private static let syncPrefix = "openoura."
+
+    /// RMSSD and SDNN are different measurements. SDKs before iOS 27 do not
+    /// declare RMSSD, so resolve the public constant only on supporting systems.
+    static let ringHRVType: HKQuantityType? = {
+        guard #available(iOS 27, *), let handle = dlopen(nil, RTLD_LAZY) else { return nil }
+        defer { dlclose(handle) }
+        guard let symbol = dlsym(handle, "HKQuantityTypeIdentifierHeartRateVariabilityRMSSD"),
+              let value = symbol.assumingMemoryBound(to: UnsafeRawPointer?.self).pointee else { return nil }
+        let identifier = Unmanaged<NSString>.fromOpaque(value).takeUnretainedValue() as String
+        return HKObjectType.quantityType(forIdentifier: HKQuantityTypeIdentifier(rawValue: identifier))
+    }()
 
     @Published var enabled: Bool {
         didSet { UserDefaults.standard.set(enabled, forKey: Self.enabledKey) }
@@ -25,16 +37,35 @@ final class HealthExport: ObservableObject {
         enabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
     }
 
-    private var shareTypes: Set<HKSampleType> {
+    static var shareTypes: Set<HKSampleType> {
         var types: Set<HKSampleType> = [HKObjectType.workoutType()]
         if let t = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .heartRate) { types.insert(t) }
-        if let t = HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN) { types.insert(t) }
+        if let t = ringHRVType { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .restingHeartRate) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .stepCount) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning) { types.insert(t) }
         return types
+    }
+
+    /// Previously authorized SDNN is queried only to remove this exporter's old
+    /// RMSSD records. Do not request new SDNN write access for that cleanup.
+    static func reconciliationTypes(canShare: (HKSampleType) -> Bool) -> Set<HKSampleType> {
+        var types = shareTypes
+        if let legacy = HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN), canShare(legacy) {
+            types.insert(legacy)
+        }
+        return types
+    }
+
+    static func legacyHRVSamples(_ samples: [HKObject]) -> [HKObject] {
+        samples.filter { sample in
+            guard let quantity = sample as? HKQuantitySample,
+                  quantity.quantityType.identifier == HKQuantityTypeIdentifier.heartRateVariabilitySDNN.rawValue,
+                  let id = syncID(sample) else { return false }
+            return id.hasPrefix(syncPrefix + "hrv.")
+        }
     }
 
     func setEnabled(_ on: Bool, summary: Summary?) {
@@ -62,7 +93,7 @@ final class HealthExport: ObservableObject {
     func push(_ summary: Summary, force: Bool = false) {
         guard enabled, summary.error == nil else { return }
         guard HKHealthStore.isHealthDataAvailable() else { return }
-        let fp = fingerprint(summary)
+        let fp = Self.fingerprint(summary)
         if !force, fp == UserDefaults.standard.string(forKey: Self.fingerprintKey) { return }
         queue.async { [weak self] in
             guard let self, !self.pushing else { return }
@@ -77,7 +108,7 @@ final class HealthExport: ObservableObject {
             guard let self else { return }
             let group = DispatchGroup()
             var errorText: String?
-            for type in self.shareTypes {
+            for type in Self.reconciliationTypes(canShare: self.canShare) {
                 group.enter()
                 self.allOurs(type) { samples, error in
                     if let error { errorText = error.localizedDescription; group.leave(); return }
@@ -102,7 +133,7 @@ final class HealthExport: ObservableObject {
                                       userInfo: [NSLocalizedDescriptionKey: "Apple Health is unavailable on this device."]))
             return
         }
-        store.requestAuthorization(toShare: shareTypes, read: []) { ok, error in
+        store.requestAuthorization(toShare: Self.shareTypes, read: []) { ok, error in
             completion(ok, error)
         }
     }
@@ -130,25 +161,29 @@ final class HealthExport: ObservableObject {
         let samples = buildSamples(summary)
         let workouts = plannedWorkouts(summary.workouts)
         dlog("health", "export \(samples.count) samples, \(workouts.count) workouts")
-        if samples.isEmpty, workouts.isEmpty {
-            DispatchQueue.main.async { self.status = "Nothing to export. Check Apple Health permissions for Open Oura." }
-            return
-        }
-        let types = shareTypes
+        let types = Self.reconciliationTypes(canShare: canShare)
         let collect = DispatchGroup()
+        let collectionLock = NSLock()
         var ours: [HKObject] = []
         var queryError: Error?
         for type in types {
             collect.enter()
             allOurs(type) { found, error in
+                collectionLock.lock()
                 if let error { queryError = error }
                 ours.append(contentsOf: found)
+                collectionLock.unlock()
                 collect.leave()
             }
         }
         collect.wait()
         if let queryError {
             DispatchQueue.main.async { self.status = queryError.localizedDescription }
+            return
+        }
+        // Even a now-empty export must reconcile legacy HRV records.
+        if samples.isEmpty, workouts.isEmpty, ours.isEmpty {
+            DispatchQueue.main.async { self.status = "Nothing to export. Check Apple Health permissions for Open Oura." }
             return
         }
 
@@ -207,13 +242,17 @@ final class HealthExport: ObservableObject {
         let pred = HKQuery.predicateForObjects(from: HKSource.default())
         let query = HKSampleQuery(sampleType: type, predicate: pred, limit: HKObjectQueryNoLimit,
                                   sortDescriptors: nil) { _, samples, error in
-            completion(samples ?? [], error)
+            let ours: [HKObject] = samples ?? []
+            completion(type.identifier == HKQuantityTypeIdentifier.heartRateVariabilitySDNN.rawValue
+                ? Self.legacyHRVSamples(ours) : ours, error)
         }
         store.execute(query)
     }
 
-    private func fingerprint(_ s: Summary) -> String {
-        var parts: [String] = []
+    static func fingerprint(_ s: Summary) -> String {
+        // Force one reconciliation after upgrading from the mislabeled SDNN
+        // writer, and another when the OS first supports the proper RMSSD type.
+        var parts = ["hrv-rmssd-v1:\(ringHRVType?.identifier ?? "unavailable")"]
         parts.append(contentsOf: s.workouts.filter { $0.isWorkout >= 0.5 }.map(\.id).sorted())
         for n in s.nights {
             let st = n.hypnogram ?? []
@@ -229,12 +268,12 @@ final class HealthExport: ObservableObject {
     private func buildSamples(_ s: Summary) -> [HKObject] {
         var out: [HKObject] = []
         for night in s.nights { out.append(contentsOf: sleepSamples(night)) }
-        for night in s.nights { out.append(contentsOf: heartSamples(night)) }
+        for night in s.nights { out.append(contentsOf: Self.heartSamples(night, canShare: canShare)) }
         out.append(contentsOf: dailySamples(s.activity_daily))
         return out
     }
 
-    private func meta(_ id: String) -> [String: Any] {
+    private static func meta(_ id: String) -> [String: Any] {
         [HKMetadataKeySyncIdentifier: Self.syncPrefix + id,
          HKMetadataKeySyncVersion: 1]
     }
@@ -277,7 +316,7 @@ final class HealthExport: ObservableObject {
         group.enter()
         builder.beginCollection(withStart: plan.start) { success, error in
             guard success else { fail(error, fallback: "Could not start workout collection."); return }
-            builder.addMetadata(self.meta("workout.\(plan.id)")) { success, error in
+            builder.addMetadata(Self.meta("workout.\(plan.id)")) { success, error in
                 guard success else { fail(error, fallback: "Could not tag workout."); return }
                 builder.endCollection(withEnd: plan.end) { success, error in
                     guard success else { fail(error, fallback: "Could not end workout collection."); return }
@@ -299,7 +338,7 @@ final class HealthExport: ObservableObject {
         var out: [HKObject] = []
         let key = "\(night.start_ds ?? 0)"
         out.append(HKCategorySample(type: type, value: HKCategoryValueSleepAnalysis.inBed.rawValue,
-                                    start: start, end: end, metadata: meta("sleep.inbed.\(key)")))
+                                    start: start, end: end, metadata: Self.meta("sleep.inbed.\(key)")))
         guard let stages = night.hypnogram, stages.count > 1 else { return out }
         let epoch = end.timeIntervalSince(start) / Double(stages.count)
         var i = 0
@@ -318,21 +357,22 @@ final class HealthExport: ObservableObject {
             let a = start.addingTimeInterval(Double(i) * epoch)
             let b = start.addingTimeInterval(Double(j) * epoch)
             out.append(HKCategorySample(type: type, value: value.rawValue, start: a, end: max(b, a.addingTimeInterval(1)),
-                                        metadata: meta("sleep.\(key).\(i).\(j)")))
+                                        metadata: Self.meta("sleep.\(key).\(i).\(j)")))
             i = j
         }
         return out
     }
 
-    private func heartSamples(_ night: NightRow) -> [HKObject] {
+    /// Sample construction is separate from HealthKit authorization and writes.
+    static func heartSamples(_ night: NightRow, canShare: (HKSampleType) -> Bool) -> [HKObject] {
         var out: [HKObject] = []
         guard let (start, end) = Self.nightInterval(night) else { return out }
         let key = "\(night.start_ds ?? 0)"
-        if let type = HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN),
-           canShare(type), let hrv = night.hrv_ms, hrv > 0 {
+        if let type = ringHRVType,
+           canShare(type), let hrv = night.hrv_ms, hrv.isFinite, hrv > 0 {
             let q = HKQuantity(unit: .secondUnit(with: .milli), doubleValue: hrv)
             out.append(HKQuantitySample(type: type, quantity: q, start: end, end: end,
-                                        metadata: meta("hrv.\(key)")))
+                                        metadata: meta("hrv.rmssd.\(key)")))
         }
         if let type = HKObjectType.quantityType(forIdentifier: .restingHeartRate),
            canShare(type), let rhr = night.rhr, rhr > 0 {
@@ -374,19 +414,19 @@ final class HealthExport: ObservableObject {
                let steps = st.steps, steps > 0 {
                 let q = HKQuantity(unit: .count(), doubleValue: steps)
                 out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
-                                            metadata: meta("steps.\(day)")))
+                                            metadata: Self.meta("steps.\(day)")))
             }
             if let type = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned), canShare(type),
                let kcal = st.active_kcal, kcal > 0 {
                 let q = HKQuantity(unit: .kilocalorie(), doubleValue: kcal)
                 out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
-                                            metadata: meta("kcal.\(day)")))
+                                            metadata: Self.meta("kcal.\(day)")))
             }
             if let type = HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning), canShare(type),
                let metres = st.distance_m, metres > 0 {
                 let q = HKQuantity(unit: .meter(), doubleValue: metres)
                 out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
-                                            metadata: meta("dist.\(day)")))
+                                            metadata: Self.meta("dist.\(day)")))
             }
         }
         return out
