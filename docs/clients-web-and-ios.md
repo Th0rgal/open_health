@@ -162,6 +162,12 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
 
 - **Sleep report without a hypnogram**: iOS still draws the time-in-bed strip and the
   signal lanes; the web returns early.
+- **iOS NSSA cache admission** includes the current model demographics before the
+  automatic planner reuses a night. The web runner already fingerprints demographics
+  with each request; iOS also checks them before its shortcut can skip that request.
+  Cache entries bind their mapped window, so a changed bedtime end cannot reuse cells
+  from the old interval. Saved NSSA summaries can satisfy the automatic plan; older
+  SleepNet summaries cannot substitute for NSSA.
 - **Sleep score + breathing rate** (`nights[].sleep_score`, `breath_rate`).
 - **Skin temperature / latest HR vitals and trend pages**, **hourly heart rate**
   (`hourly_hr` is FFI-only; no `/api` endpoint yet).

@@ -148,10 +148,10 @@ final class StabilityTests: XCTestCase {
         let older = NightRow(ymd: "2026-09-08", start_ds: 100, end_ds: 190, start: "23:00", end: "07:00")
         var savedLatest = latest
         savedLatest.stages = [1, 2, 3, 4]
-        savedLatest.staging_source = "sleepnet"
+        savedLatest.staging_source = "nssa"
         var savedOlder = older
         savedOlder.stages = [2, 3, 2, 1]
-        savedOlder.staging_source = "sleepnet"
+        savedOlder.staging_source = "nssa"
         let nights = [latest, older]
 
         let firstLaunch = Core.automaticSleepPlan(nights: nights, previous: nil)

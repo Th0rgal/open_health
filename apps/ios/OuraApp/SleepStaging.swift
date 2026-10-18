@@ -152,17 +152,35 @@ enum SleepStaging {
     struct Staged { let stages: [Int]; let source: String; let t0Unix: Double? }
 
     /// Load already-cached sleep stage arrays keyed by `NightRow.stagingKey`.
-    static func cachedStages(nights: [NightRow]) -> [String: [Int]] {
-        cachedEntries(nights: nights).mapValues(\.stages)
+    static func cachedStages(nights: [NightRow], profile: Profile?,
+                             cacheFile: String = ModelCacheStore.stagingFile) -> [String: [Int]] {
+        cachedEntries(nights: nights, profile: profile, cacheFile: cacheFile).mapValues(\.stages)
     }
 
-    static func cachedEntries(nights: [NightRow]) -> [String: StagedNightEntry] {
-        let globalKey = ModelCacheStore.globalKey(profile: nil, timezone: false)
-        let cache: [String: StagedNightEntry] = ModelCacheStore.load(ModelCacheStore.stagingFile,
+    /// The cheap cache path must use the same demographics as `run`. Otherwise a
+    /// profile edit can keep old nights without reaching their input fingerprint
+    /// check. Ring size and display timezone are not NSSA inputs.
+    static func cacheKey(profile: Profile?) -> String {
+        var fp = FNV64()
+        for byte in modelId.utf8 { fp.combine(Int(byte)) }
+        for scalar in demographics(profile) { fp.combine(scalar) }
+        return ModelCacheStore.globalKey(profile: nil, timezone: false) + "|" + fp.hex
+    }
+
+    static func windowKey(_ night: NightRow) -> String {
+        "\(night.stagingKey)|\(night.end_ds.map(String.init) ?? "nil")"
+            + "|\(night.end_unix.map(String.init) ?? "nil")|\(night.durationS.bitPattern)"
+    }
+
+    static func cachedEntries(nights: [NightRow], profile: Profile?,
+                              cacheFile: String = ModelCacheStore.stagingFile) -> [String: StagedNightEntry] {
+        let globalKey = cacheKey(profile: profile)
+        let cache: [String: StagedNightEntry] = ModelCacheStore.load(cacheFile,
                                                                      globalKey: globalKey)
         var out: [String: StagedNightEntry] = [:]
         for night in nights where night.start_ds != nil {
-            if let entry = cache[night.stagingKey], !entry.stages.isEmpty { out[night.stagingKey] = entry }
+            if let entry = cache[night.stagingKey], entry.windowKey == windowKey(night),
+               !entry.stages.isEmpty { out[night.stagingKey] = entry }
         }
         return out
     }
@@ -207,7 +225,7 @@ enum SleepStaging {
             return latest.values.sorted { $0.0 < $1.0 }
         }
 
-        let globalKey = ModelCacheStore.globalKey(profile: nil, timezone: false)
+        let globalKey = cacheKey(profile: profile)
         var cache: [String: StagedNightEntry] = ModelCacheStore.load(ModelCacheStore.stagingFile, globalKey: globalKey)
         var result: [String: [Int]] = [:]
         var currentKeys = Set<String>()
@@ -237,7 +255,8 @@ enum SleepStaging {
                 inputsList.append(inp)
             }
             let fpHex = fp.hex
-            if !force, let entry = cache[key], entry.fp == fpHex, !entry.stages.isEmpty {
+            if !force, let entry = cache[key], entry.fp == fpHex,
+               entry.windowKey == windowKey(night), !entry.stages.isEmpty {
                 result[key] = entry.stages
                 continue
             }
@@ -257,7 +276,8 @@ enum SleepStaging {
             }
             guard let stages, !stages.isEmpty else { failures += 1; continue }
             result[key] = stages
-            cache[key] = StagedNightEntry(fp: fpHex, stages: stages, source: source, t0Unix: t0)
+            cache[key] = StagedNightEntry(fp: fpHex, stages: stages, windowKey: windowKey(night),
+                                           source: source, t0Unix: t0)
             ModelCacheStore.save(ModelCacheStore.stagingFile, globalKey: globalKey, entries: cache)
         }
         guard events.error == nil, !AnalysisRun.cancelled else { return ([:], "analysis interrupted") }

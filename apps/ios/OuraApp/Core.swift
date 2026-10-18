@@ -73,15 +73,18 @@ enum Core {
     #if TORCH
     /// Launch and sync only fill the latest night's missing analysis. Historical
     /// results stay visible, and older missing nights are refreshed on demand.
-    static func automaticSleepPlan(nights: [NightRow], previous: Summary?, revalidateLatest: Bool = false) -> (saved: [String: [Int]], pending: [NightRow]) {
+    static func automaticSleepPlan(nights: [NightRow], previous: Summary?, revalidateLatest: Bool = false,
+                                   profile: Profile? = nil) -> (saved: [String: [Int]], pending: [NightRow]) {
+        let compatiblePrevious = SleepStaging.demographics(previous?.profile) == SleepStaging.demographics(profile)
+            ? previous : nil
         var saved: [String: [Int]] = [:]
         for night in nights {
             guard night.start_ds != nil else { continue }
-            if let old = previous?.nights.first(where: {
+            if let old = compatiblePrevious?.nights.first(where: {
                 $0.start_ds == night.start_ds && $0.end_ds == night.end_ds
                     && $0.ymd == night.ymd && $0.start == night.start && $0.end == night.end
                     && $0.start_unix == night.start_unix && $0.end_unix == night.end_unix
-            }), old.staging_source == "sleepnet", let stages = old.hypnogram, !stages.isEmpty {
+            }), old.staging_source == "nssa", let stages = old.hypnogram, !stages.isEmpty {
                 saved[night.stagingKey] = stages
             }
         }
@@ -197,8 +200,9 @@ enum Core {
         progress("Reading ring data")
         let storeDigest = EventStore.Events(path: DB.readPath()).digest()
         let sleepPlan = automaticSleepPlan(nights: base.nights, previous: validPrevious,
-                                           revalidateLatest: storeDigest == nil || validPrevious?.analysis_digest != storeDigest)
-        var staged = SleepStaging.cachedStages(nights: base.nights)
+                                           revalidateLatest: storeDigest == nil || validPrevious?.analysis_digest != storeDigest,
+                                           profile: profile)
+        var staged = SleepStaging.cachedStages(nights: base.nights, profile: profile)
         staged.merge(sleepPlan.saved) { _, fresh in fresh }
         var sleepPending = sleepPlan.pending
         for night in base.nights.prefix(7) {
@@ -290,7 +294,7 @@ enum Core {
 
     private static func applySleepStages(_ staged: [String: [Int]], to s: inout Summary) {
         // Source + first-epoch time of each staged night (NSSA, or the signal estimate).
-        let meta = SleepStaging.cachedEntries(nights: s.nights)
+        let meta = SleepStaging.cachedEntries(nights: s.nights, profile: s.profile)
         for i in s.nights.indices {
             guard s.nights[i].start_ds != nil, var stages = staged[s.nights[i].stagingKey], !stages.isEmpty else { continue }
             let entry = meta[s.nights[i].stagingKey]

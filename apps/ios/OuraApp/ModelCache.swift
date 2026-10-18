@@ -43,6 +43,8 @@ struct FingerprintedEntry<Value: Codable>: Codable {
 struct StagedNightEntry: Codable {
     var fp: String
     var stages: [Int]
+    /// Summary window that these cells were mapped onto. Missing in older caches.
+    var windowKey: String? = nil
     /// "nssa" (Oura's sleepstaging model) or "signals" (our estimate when NSSA cannot run).
     var source: String? = nil
     /// Wall-clock start (unix s) of the first NSSA epoch (floor30 of the bedtime start).
