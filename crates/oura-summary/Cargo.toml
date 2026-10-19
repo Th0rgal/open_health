@@ -7,9 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-oura-protocol = { git = "https://github.com/manueldeprada/open_oura", rev = "d31d904789fd60493b7fabe84910071f2d7e7de1" }
-oura-store = { git = "https://github.com/manueldeprada/open_oura", rev = "d31d904789fd60493b7fabe84910071f2d7e7de1" }
-oura-analysis = { git = "https://github.com/manueldeprada/open_oura", rev = "d31d904789fd60493b7fabe84910071f2d7e7de1" }
+oura-protocol = { git = "https://github.com/manueldeprada/open_oura", rev = "a234e080f49b10a6ef64e22185e83436ea7e51a3" }
+oura-store = { git = "https://github.com/manueldeprada/open_oura", rev = "a234e080f49b10a6ef64e22185e83436ea7e51a3" }
+oura-analysis = { git = "https://github.com/manueldeprada/open_oura", rev = "a234e080f49b10a6ef64e22185e83436ea7e51a3" }
 serde_json = "1"
 anyhow = "1"
 rusqlite = "0.31"

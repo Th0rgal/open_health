@@ -1272,7 +1272,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "oura-analysis"
 version = "0.1.0"
-source = "git+https://github.com/manueldeprada/open_oura?rev=d31d904789fd60493b7fabe84910071f2d7e7de1#d31d904789fd60493b7fabe84910071f2d7e7de1"
+source = "git+https://github.com/manueldeprada/open_oura?rev=a234e080f49b10a6ef64e22185e83436ea7e51a3#a234e080f49b10a6ef64e22185e83436ea7e51a3"
 dependencies = [
  "oura-protocol",
  "serde",
@@ -1343,7 +1343,7 @@ dependencies = [
 [[package]]
 name = "oura-link"
 version = "0.1.0"
-source = "git+https://github.com/manueldeprada/open_oura?rev=d31d904789fd60493b7fabe84910071f2d7e7de1#d31d904789fd60493b7fabe84910071f2d7e7de1"
+source = "git+https://github.com/manueldeprada/open_oura?rev=a234e080f49b10a6ef64e22185e83436ea7e51a3#a234e080f49b10a6ef64e22185e83436ea7e51a3"
 dependencies = [
  "async-trait",
  "btleplug",
@@ -1360,7 +1360,7 @@ dependencies = [
 [[package]]
 name = "oura-protocol"
 version = "0.1.0"
-source = "git+https://github.com/manueldeprada/open_oura?rev=d31d904789fd60493b7fabe84910071f2d7e7de1#d31d904789fd60493b7fabe84910071f2d7e7de1"
+source = "git+https://github.com/manueldeprada/open_oura?rev=a234e080f49b10a6ef64e22185e83436ea7e51a3#a234e080f49b10a6ef64e22185e83436ea7e51a3"
 dependencies = [
  "aes",
  "hex",
@@ -1372,7 +1372,7 @@ dependencies = [
 [[package]]
 name = "oura-store"
 version = "0.1.0"
-source = "git+https://github.com/manueldeprada/open_oura?rev=d31d904789fd60493b7fabe84910071f2d7e7de1#d31d904789fd60493b7fabe84910071f2d7e7de1"
+source = "git+https://github.com/manueldeprada/open_oura?rev=a234e080f49b10a6ef64e22185e83436ea7e51a3#a234e080f49b10a6ef64e22185e83436ea7e51a3"
 dependencies = [
  "oura-protocol",
  "rusqlite",
