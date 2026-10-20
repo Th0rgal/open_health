@@ -305,6 +305,31 @@ pub(crate) fn packed_sample_ds(packet_ds: i64, i: usize, len: usize, step_ds: i6
     packet_ds - (len as i64 - 1 - i as i64) * step_ds
 }
 
+/// Timestamped `(sample_ds, value)` pairs for a packed HR/HRV array under one event.
+///
+/// Samples are `step_ds` deciseconds apart and the array *ends* at `packet_ds`
+/// (walk back — see [`packed_sample_ds`]). `step_ds` is the spacing: the firmware's
+/// `interval_min` averages use `interval_min * 600`; a burst that all shares the
+/// packet stamp (green-LED beat estimates) passes `0`. Non-numeric entries are
+/// skipped; value thresholds (e.g. `> 0`, physiologic range) stay at the call site.
+pub(crate) fn packed_series<'a>(
+    packet_ds: i64,
+    arr: &'a [Value],
+    step_ds: i64,
+) -> impl Iterator<Item = (i64, f64)> + 'a {
+    let len = arr.len();
+    arr.iter()
+        .enumerate()
+        .filter_map(move |(i, x)| x.as_f64().map(|v| (packed_sample_ds(packet_ds, i, len, step_ds), v)))
+}
+
+/// Decisecond spacing of a firmware `hrv_event`'s packed averages (`interval_min`
+/// minutes apart, default 5), for [`packed_series`].
+pub(crate) fn hrv_step_ds(v: &Value) -> i64 {
+    v["interval_min"].as_i64().unwrap_or(5).max(1) * 600
+}
+
+
 fn date_label(unix_s: f64, tz: impl Into<OffsetHours>) -> String {
     let tz = tz.into().0;
     let days = (unix_s as i64 + offset_seconds(tz)).div_euclid(86400);
@@ -1259,20 +1284,12 @@ pub fn stage_nights_from_signals(db: &Path, sleep_ranges: &[[i64; 3]]) -> Option
             }
             if *tag == 0x5d {
                 if let Ok(v) = serde_json::from_str::<Value>(jstr) {
-                    let step_ds = v["interval_min"].as_i64().unwrap_or(5).max(1) * 600;
+                    let step_ds = hrv_step_ds(&v);
                     if let Some(a) = v["hr_bpm"].as_array() {
-                        for (i, x) in a.iter().enumerate() {
-                            if let Some(val) = x.as_f64().filter(|&v| v > 0.0) {
-                                hr_t.push((packed_sample_ds(*ds, i, a.len(), step_ds), val));
-                            }
-                        }
+                        hr_t.extend(packed_series(*ds, a, step_ds).filter(|&(_, val)| val > 0.0));
                     }
                     if let Some(a) = v["rmssd_ms"].as_array() {
-                        for (i, x) in a.iter().enumerate() {
-                            if let Some(val) = x.as_f64().filter(|&v| v > 0.0) {
-                                hrv_t.push((packed_sample_ds(*ds, i, a.len(), step_ds), val));
-                            }
-                        }
+                        hrv_t.extend(packed_series(*ds, a, step_ds).filter(|&(_, val)| val > 0.0));
                     }
                 }
             } else if *tag == 0x47 {
@@ -2293,27 +2310,19 @@ pub fn build_summary(
             "hrv_event" => {
                 // Each array element is an `interval_min`-minute average; the event's
                 // ring timestamp marks the packet's LAST sample, so the averages walk
-                // back from it (see `packed_sample_ds`). Keep both the flat vecs
+                // back from it (see `packed_series`). Keep both the flat vecs
                 // (mean/min) and the timestamped samples (stage-resolved autonomics).
-                let step_ds = v["interval_min"].as_i64().unwrap_or(5).max(1) * 600;
+                let step_ds = hrv_step_ds(&v);
                 if let Some(a) = v["rmssd_ms"].as_array() {
-                    for (i, x) in a.iter().enumerate() {
-                        if let Some(val) = x.as_f64() {
-                            if val > 0.0 {
-                                nights[idx].rmssd.push(val);
-                                nights[idx].hrv_t.push((packed_sample_ds(*ds, i, a.len(), step_ds), val));
-                            }
-                        }
+                    for (ts, val) in packed_series(*ds, a, step_ds).filter(|&(_, val)| val > 0.0) {
+                        nights[idx].rmssd.push(val);
+                        nights[idx].hrv_t.push((ts, val));
                     }
                 }
                 if let Some(a) = v["hr_bpm"].as_array() {
-                    for (i, x) in a.iter().enumerate() {
-                        if let Some(val) = x.as_f64() {
-                            if val > 0.0 {
-                                nights[idx].hr.push(val);
-                                nights[idx].hr_t.push((packed_sample_ds(*ds, i, a.len(), step_ds), val));
-                            }
-                        }
+                    for (ts, val) in packed_series(*ds, a, step_ds).filter(|&(_, val)| val > 0.0) {
+                        nights[idx].hr.push(val);
+                        nights[idx].hr_t.push((ts, val));
                     }
                 }
             }

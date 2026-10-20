@@ -164,27 +164,22 @@ pub fn hr_bins(
         let Some(bpms) = v["hr_bpm"].as_array() else {
             continue;
         };
-        // hrv_event packs `interval_min`-minute averages; the event's ring timestamp
-        // marks the packet's last sample, so the averages walk back from it.
-        let step_ds = if name == "hrv_event" {
-            v["interval_min"].as_i64().unwrap_or(5).max(1) * 600
-        } else {
-            0
-        };
-        let len = bpms.len();
-        for (i, x) in bpms.iter().enumerate() {
-            let Some(bpm) = x.as_f64() else { continue };
+        // hrv_event packs `interval_min`-minute averages that walk back from the
+        // event's ring timestamp (its last sample); green beat estimates all share
+        // the stamp (step 0). See `packed_series`.
+        let is_avg = name == "hrv_event";
+        let step_ds = if is_avg { crate::hrv_step_ds(&v) } else { 0 };
+        for (sample_ds, bpm) in crate::packed_series(*ds, bpms, step_ds) {
             if !(MIN_BPM..=MAX_BPM).contains(&bpm) {
                 continue;
             }
-            let at = clock.unix_s(crate::packed_sample_ds(*ds, i, len, step_ds), *cu);
+            let at = clock.unix_s(sample_ds, *cu);
             let bar = bins.entry(bucket_start(at, tz, span)).or_default();
             bar.add(bpm);
-            if name == "hrv_event" {
+            if is_avg {
                 bar.averages += 1;
             }
-            if name == "green_ibi_quality_event" && latest.map_or(true, |(current, _)| at > current)
-            {
+            if !is_avg && latest.map_or(true, |(current, _)| at > current) {
                 latest = Some((at, bpm));
             }
         }
