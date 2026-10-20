@@ -155,6 +155,32 @@ hair. We expose per-stage means (esp. deep-sleep HRV) rather than an overnight H
 nocturnal HRV is stage-driven (deep ↑, REM ↓), so a slope tracks stage order, not recovery —
 which is why Oura's own app has no per-night HRV trend either.
 
+## Packed HR/HRV samples are stamped at the packet's *last* sample
+
+A firmware `hrv_event` carries several `interval_min`-minute averages (`hr_bpm`,
+`rmssd_ms`) under **one** ring timestamp, and the raw beat packets (`0x60`,
+`ibi_and_amplitude`) carry several beats under one stamp. In every case the ring
+stamps the packet at its **last (newest)** sample and the earlier ones lead up to
+it — so element `i` of `len` sits `(len-1-i) * step` *before* the stamp, never
+after it. A 7-sample 5-minute packet therefore spans the 30 minutes **ending** at
+the stamp.
+
+Placing samples *forward* from the stamp instead pushes the newest one up to a full
+packet span into the future of its own emission and shifts the whole nocturnal
+HR/HRV series late by that span (~30 min), desynchronising it from the motion
+stream and the hypnogram — which under-detects deep sleep (N3 refinement reads the
+wrong HR/HRV window). This bit us once; keep every client on the walk-back rule:
+
+- **Rust** (`crates/oura-summary`): go through `packed_series` / `packed_sample_ds`
+  (and `hrv_step_ds`); never re-derive `ds + i*step` by hand.
+- **Python**: `tools/nssa_inputs.py` (`expand_ibi_event`, temp expansion) and the
+  model runners walk back; match them when adding a runner.
+- **Reference**: `research_export::beat_times` and its CSV note ("packet time is the
+  last beat, earlier beats walk back") are the canonical statement of the rule.
+
+The real end state is to stamp each sample **once in the `open_oura` decoder** so no
+client re-derives packet timing at all — tracked as a follow-up.
+
 ## Known gaps (iOS-only, not yet on the web)
 
 Now on both: the model-free Symptom Radar (`symptoms`, used when the Python runner
