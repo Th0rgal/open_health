@@ -218,12 +218,34 @@ impl ModelRunner for PythonRunner {
             }),
             _ => (None, None, None, None),
         };
-        let needs_fallback = sleep_batch
+        // A window the Python model could not stage comes back as `null` (no torch, no
+        // `.pt`), which is not a "batch present" signal: fill those windows from the
+        // ring's own signals so the dashboard still gets a hypnogram.
+        let staged: Vec<Value> = sleep_batch
             .as_ref()
             .and_then(|v| v.as_array())
-            .is_none_or(|a| a.is_empty());
-        if needs_fallback && !sleep_ranges.is_empty() {
-            sleep_batch = oura_summary::stage_nights_from_signals(db, sleep_ranges);
+            .cloned()
+            .unwrap_or_default();
+        let missing: Vec<[i64; 3]> = sleep_ranges
+            .iter()
+            .copied()
+            .filter(|r| {
+                staged
+                    .iter()
+                    .find(|h| h["start_ds"].as_i64() == Some(r[0]))
+                    .is_none_or(|h| {
+                        h["stages"]
+                            .as_array()
+                            .is_none_or(|s| s.is_empty())
+                    })
+            })
+            .collect();
+        if !missing.is_empty() {
+            if let Some(sig) = oura_summary::stage_nights_from_signals(db, &missing) {
+                let mut merged = staged;
+                merged.extend(sig.as_array().cloned().unwrap_or_default());
+                sleep_batch = Some(Value::Array(merged));
+            }
         }
         ModelOutputs {
             sleep_batch,

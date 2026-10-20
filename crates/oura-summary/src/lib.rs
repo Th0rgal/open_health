@@ -1224,6 +1224,32 @@ pub fn stage_night_from_signals(
     smooth_stages(&refined, 5)
 }
 
+/// RMSSD over one epoch's beat intervals, with the same artifact filters the store's
+/// derived `hrv_rmssd` series uses: physiologic band, at least four usable intervals,
+/// and successive differences above 20% of the prior interval dropped as missed or
+/// extra beats.
+fn window_rmssd(ibis: &[f64]) -> Option<f64> {
+    let usable: Vec<f64> = ibis
+        .iter()
+        .copied()
+        .filter(|v| (200.0..=3000.0).contains(v))
+        .collect();
+    if usable.len() < 4 {
+        return None;
+    }
+    let mut sq = 0.0f64;
+    let mut n = 0u32;
+    for w in usable.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if (b - a).abs() > 0.2 * a {
+            continue;
+        }
+        sq += (b - a) * (b - a);
+        n += 1;
+    }
+    (n >= 3).then(|| (sq / n as f64).sqrt())
+}
+
 /// Fallback batch stager for desktop/CLI runs when the proprietary `.pt` model is
 /// unavailable on the machine. Reads nocturnal `hrv_event` (`0x5d`) and `motion_event`
 /// (`0x47`) streams from `db` and returns the same JSON batch shape as `run_sleep_model.py`.
@@ -1238,6 +1264,9 @@ pub fn stage_nights_from_signals(db: &Path, sleep_ranges: &[[i64; 3]]) -> Option
         let mut hr_t = Vec::new();
         let mut hrv_t = Vec::new();
         let mut motion_t = Vec::new();
+        // Beat-interval stream for this window, kept separate so RMSSD is computed per
+        // 30 s epoch instead of once per night.
+        let mut ibi_t: Vec<(i64, f64)> = Vec::new();
         for (ds, tag, jstr, _cu) in &events {
             if *ds < start_ds - 600 || *ds > end_ds + 600 {
                 continue;
@@ -1260,11 +1289,53 @@ pub fn stage_nights_from_signals(db: &Path, sleep_ranges: &[[i64; 3]]) -> Option
                         }
                     }
                 }
+            } else if *tag == 0x60 || *tag == 0x80 {
+                // Dense beat stream (`ibi_and_amplitude_event`, `green_ibi_quality_event`):
+                // stamp each beat at the start of its interval, exactly as the decoder
+                // does, so the stager gets an HR/HRV series with real coverage instead
+                // of interpolating a handful of 5-minute averages across the night.
+                if let Ok(v) = serde_json::from_str::<Value>(jstr) {
+                    let Some(ibis) = v["ibi_ms"].as_array() else { continue };
+                    let quality = v["quality"].as_array();
+                    let mut t = *ds;
+                    for (i, x) in ibis.iter().enumerate() {
+                        let Some(ibi) = x.as_f64() else { continue };
+                        if !(200.0..=3000.0).contains(&ibi) {
+                            continue;
+                        }
+                        let step = (ibi / 100.0).round() as i64;
+                        let ok = quality
+                            .and_then(|q| q.get(i))
+                            .and_then(|q| q.as_f64())
+                            .is_none_or(|q| q >= 2.0);
+                        if ok {
+                            let hr = 60000.0 / ibi;
+                            if (30.0..140.0).contains(&hr) {
+                                hr_t.push((t, hr));
+                                ibi_t.push((t, ibi));
+                            }
+                        }
+                        t += step;
+                    }
+                }
             } else if *tag == 0x47 {
                 if let Ok(v) = serde_json::from_str::<Value>(jstr) {
                     if let Some(s) = v["motion_seconds"].as_f64() {
                         motion_t.push((*ds, s));
                     }
+                }
+            }
+        }
+        // RMSSD per 30 s epoch from the corrected beat stream.
+        if !ibi_t.is_empty() {
+            let mut buckets: std::collections::BTreeMap<i64, Vec<f64>> = Default::default();
+            for &(ds, ibi) in &ibi_t {
+                let idx = (ds - start_ds) / 300;
+                buckets.entry(idx.max(0)).or_default().push(ibi);
+            }
+            for (idx, vals) in buckets {
+                if let Some(r) = window_rmssd(&vals) {
+                    hrv_t.push((start_ds + idx * 300 + 150, r));
                 }
             }
         }
