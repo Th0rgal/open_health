@@ -1554,6 +1554,20 @@ const hhmmOf = (unix) => {
   return `${s.slice(5, 10).replace("-", "/")} ${s.slice(11, 16)}`;
 };
 
+// "Recorded <date> <hm> (Xd/Xh/<1h ago)" for a battery reading, or "" if unknown.
+// Shared by the device card and the toolbar battery pill so the two cannot drift.
+function batteryRecordedLabel(dev) {
+  if (!dev.battery_recorded) return "";
+  let rec = `Recorded ${dev.battery_recorded}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}`;
+  const h = dev.battery_fresh_hours;
+  if (h != null) {
+    if (h >= 24) rec += ` (${Math.round(h / 24)}d ago)`;
+    else if (h >= 1) rec += ` (${Math.round(h)}h ago)`;
+    else rec += ` (<1h ago)`;
+  }
+  return rec;
+}
+
 function renderDevice(d) {
   const box = $("device");
   const dev = d.device || {};
@@ -1565,17 +1579,7 @@ function renderDevice(d) {
   const bstat = stat("Battery", bpct != null ? bpct : "—", "%");
   if (bpct != null && bpct < 20) bstat.classList.add("low");
   if (dev.battery_recorded) {
-    let rec = `Recorded ${dev.battery_recorded}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}`;
-    if (dev.battery_fresh_hours != null) {
-      if (dev.battery_fresh_hours >= 24) {
-        rec += ` (${Math.round(dev.battery_fresh_hours / 24)}d ago)`;
-      } else if (dev.battery_fresh_hours >= 1) {
-        rec += ` (${Math.round(dev.battery_fresh_hours)}h ago)`;
-      } else {
-        rec += ` (<1h ago)`;
-      }
-    }
-    bstat.title = `Battery: ${bpct != null ? bpct + "%" : "—"}${dev.battery_v ? " (" + dev.battery_v + " V)" : ""}\n${rec}`;
+    bstat.title = `Battery: ${bpct != null ? bpct + "%" : "—"}${dev.battery_v ? " (" + dev.battery_v + " V)" : ""}\n${batteryRecordedLabel(dev)}`;
   }
   stats.append(bstat);
   const fresh = dev.fresh_hours != null ? (dev.fresh_hours < 1 ? "<1" : Math.round(dev.fresh_hours)) : "—";
@@ -2001,20 +2005,8 @@ function renderActions(d) {
     b.hidden = false;
     let title = `Ring battery ${dev.battery_pct}%`;
     if (dev.battery_v) title += ` · ${dev.battery_v} V`;
-    if (dev.battery_recorded) {
-      let rec = `Recorded ${dev.battery_recorded}${dev.battery_recorded_hm ? " " + dev.battery_recorded_hm : ""}`;
-      if (dev.battery_fresh_hours != null) {
-        if (dev.battery_fresh_hours >= 24) {
-          const days = Math.round(dev.battery_fresh_hours / 24);
-          rec += ` (${days}d ago)`;
-        } else if (dev.battery_fresh_hours >= 1) {
-          rec += ` (${Math.round(dev.battery_fresh_hours)}h ago)`;
-        } else {
-          rec += ` (<1h ago)`;
-        }
-      }
-      title += `\n${rec}`;
-    }
+    const rec = batteryRecordedLabel(dev);
+    if (rec) title += `\n${rec}`;
     b.title = title;
   } else {
     b.hidden = true;

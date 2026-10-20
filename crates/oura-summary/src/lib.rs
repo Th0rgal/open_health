@@ -329,6 +329,24 @@ pub(crate) fn hrv_step_ds(v: &Value) -> i64 {
     v["interval_min"].as_i64().unwrap_or(5).max(1) * 600
 }
 
+/// Whether a newly-seen battery reading should become the headline pick.
+///
+/// The debug_data events are not strictly time-ordered (sync replays, multi-boot
+/// epochs), so the last one iterated is not necessarily the most recent — taking it
+/// blindly mis-dated `battery_recorded` / `battery_fresh_hours`. Prefer the newest
+/// *dated* reading by wall-clock; before any dated reading appears keep the
+/// last-seen (undated) one; never let an undated reading override a dated one.
+/// `new_unix` is the candidate's wall-clock (None = undated), `best_dated_unix` the
+/// wall-clock of the current dated pick (None = none chosen yet).
+fn prefer_battery_reading(new_unix: Option<f64>, best_dated_unix: Option<f64>) -> bool {
+    match (new_unix, best_dated_unix) {
+        (Some(u), Some(best)) => u >= best,
+        (Some(_), None) => true,
+        (None, None) => true,
+        (None, Some(_)) => false,
+    }
+}
+
 
 fn date_label(unix_s: f64, tz: impl Into<OffsetHours>) -> String {
     let tz = tz.into().0;
@@ -2939,19 +2957,23 @@ pub fn build_summary(
         insight("Stress / resilience", false, "needs cloud scores"),
     ]);
     let mut battery: Option<(i64, i64, Option<f64>)> = None;
+    let mut battery_best_unix: Option<f64> = None;
     let mut battery_readings: Vec<(f64, i64)> = Vec::new();
     for (ds, tag, jstr, cu) in &events {
         if name_of(*tag) == "debug_data" && jstr.contains("battery_pct") {
             if let Ok(v) = serde_json::from_str::<Value>(jstr) {
                 if let Some(p) = v["battery_pct"].as_i64() {
-                    let b_unix = if is_dated(*ds, *cu) {
-                        Some(unix_s_at(*ds, *cu))
-                    } else {
-                        None
-                    };
-                    battery = Some((p, v["voltage_mv"].as_i64().unwrap_or(0), b_unix));
-                    if (0..=100).contains(&p) && is_dated(*ds, *cu) {
-                        battery_readings.push((b_unix.unwrap(), p));
+                    let b_unix = is_dated(*ds, *cu).then(|| unix_s_at(*ds, *cu));
+                    if prefer_battery_reading(b_unix, battery_best_unix) {
+                        battery = Some((p, v["voltage_mv"].as_i64().unwrap_or(0), b_unix));
+                        if b_unix.is_some() {
+                            battery_best_unix = b_unix;
+                        }
+                    }
+                    if let Some(u) = b_unix {
+                        if (0..=100).contains(&p) {
+                            battery_readings.push((u, p));
+                        }
                     }
                 }
             }
@@ -3111,6 +3133,20 @@ pub fn build_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn battery_headline_prefers_the_newest_dated_reading() {
+        // A newer dated reading wins; an older dated one does not.
+        assert!(prefer_battery_reading(Some(200.0), Some(100.0)));
+        assert!(prefer_battery_reading(Some(100.0), Some(100.0))); // ties take the later-iterated
+        assert!(!prefer_battery_reading(Some(50.0), Some(100.0)));
+        // The first dated reading beats a provisional undated pick.
+        assert!(prefer_battery_reading(Some(100.0), None));
+        // Before any dated reading, keep following the last-seen undated one.
+        assert!(prefer_battery_reading(None, None));
+        // An undated reading must never override a dated pick (the replay-safety case).
+        assert!(!prefer_battery_reading(None, Some(100.0)));
+    }
 
     #[test]
     fn packed_samples_walk_back_from_the_packet_stamp() {
