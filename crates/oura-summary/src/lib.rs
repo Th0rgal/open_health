@@ -290,6 +290,21 @@ fn offset_seconds(tz: f64) -> i64 {
     (tz * 3600.0).round() as i64
 }
 
+/// Ring deciseconds of element `i` of `len` interval-averaged samples (HR/HRV)
+/// packed under ONE event whose ring timestamp `packet_ds` marks the packet.
+///
+/// The ring stamps the packet at its LAST (newest) sample and the averages lead up
+/// to it, so the array ends — it does not start — at `packet_ds`: element `i` sits
+/// `(len - 1 - i) * step_ds` deciseconds *before* it. This is the same timing rule
+/// `research_export::beat_times` uses for the raw beat stream (packet stamp = last
+/// beat, walk back). Placing the array *forward* from `packet_ds` instead would put
+/// the newest sample up to a whole packet-span into the future of its own emission
+/// and shift the nocturnal HR/HRV series late by that span (≈30 min for a 7-sample
+/// 5-minute packet), desynchronising it from the motion stream and the hypnogram.
+pub(crate) fn packed_sample_ds(packet_ds: i64, i: usize, len: usize, step_ds: i64) -> i64 {
+    packet_ds - (len as i64 - 1 - i as i64) * step_ds
+}
+
 fn date_label(unix_s: f64, tz: impl Into<OffsetHours>) -> String {
     let tz = tz.into().0;
     let days = (unix_s as i64 + offset_seconds(tz)).div_euclid(86400);
@@ -1248,14 +1263,14 @@ pub fn stage_nights_from_signals(db: &Path, sleep_ranges: &[[i64; 3]]) -> Option
                     if let Some(a) = v["hr_bpm"].as_array() {
                         for (i, x) in a.iter().enumerate() {
                             if let Some(val) = x.as_f64().filter(|&v| v > 0.0) {
-                                hr_t.push((*ds + i as i64 * step_ds, val));
+                                hr_t.push((packed_sample_ds(*ds, i, a.len(), step_ds), val));
                             }
                         }
                     }
                     if let Some(a) = v["rmssd_ms"].as_array() {
                         for (i, x) in a.iter().enumerate() {
                             if let Some(val) = x.as_f64().filter(|&v| v > 0.0) {
-                                hrv_t.push((*ds + i as i64 * step_ds, val));
+                                hrv_t.push((packed_sample_ds(*ds, i, a.len(), step_ds), val));
                             }
                         }
                     }
@@ -2276,17 +2291,17 @@ pub fn build_summary(
         };
         match n {
             "hrv_event" => {
-                // Each array element is an `interval_min`-minute average starting at the
-                // event's ring timestamp, so element i sits at ds + i·interval (in
-                // deciseconds: minutes × 600). Keep both the flat vecs (mean/min) and the
-                // timestamped samples (stage-resolved autonomics).
+                // Each array element is an `interval_min`-minute average; the event's
+                // ring timestamp marks the packet's LAST sample, so the averages walk
+                // back from it (see `packed_sample_ds`). Keep both the flat vecs
+                // (mean/min) and the timestamped samples (stage-resolved autonomics).
                 let step_ds = v["interval_min"].as_i64().unwrap_or(5).max(1) * 600;
                 if let Some(a) = v["rmssd_ms"].as_array() {
                     for (i, x) in a.iter().enumerate() {
                         if let Some(val) = x.as_f64() {
                             if val > 0.0 {
                                 nights[idx].rmssd.push(val);
-                                nights[idx].hrv_t.push((*ds + i as i64 * step_ds, val));
+                                nights[idx].hrv_t.push((packed_sample_ds(*ds, i, a.len(), step_ds), val));
                             }
                         }
                     }
@@ -2296,7 +2311,7 @@ pub fn build_summary(
                         if let Some(val) = x.as_f64() {
                             if val > 0.0 {
                                 nights[idx].hr.push(val);
-                                nights[idx].hr_t.push((*ds + i as i64 * step_ds, val));
+                                nights[idx].hr_t.push((packed_sample_ds(*ds, i, a.len(), step_ds), val));
                             }
                         }
                     }
@@ -3079,6 +3094,28 @@ pub fn build_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_samples_walk_back_from_the_packet_stamp() {
+        // A packet's ring timestamp marks its LAST (newest) sample; earlier averages
+        // precede it by one step each. The newest must land exactly on the stamp and
+        // none may fall after it (a packet cannot carry a sample from its own future).
+        let packet_ds = 1_000_000;
+        let step_ds = 5 * 600; // a 5-minute average, in deciseconds
+        let len = 7; // the nocturnal HR/HRV stream packs 7 (see research_export)
+        let placed: Vec<i64> = (0..len)
+            .map(|i| packed_sample_ds(packet_ds, i, len, step_ds))
+            .collect();
+        assert_eq!(*placed.last().unwrap(), packet_ds, "newest sample is the stamp");
+        assert!(placed.iter().all(|&ds| ds <= packet_ds), "none after the stamp");
+        // Maxime's case: 7 five-minute averages span exactly 30 minutes ending at the
+        // stamp. The old forward placement put the oldest here and the newest 30 min
+        // late — the +30 min heart-rate shift he reported.
+        assert_eq!(placed[0], packet_ds - 30 * 60 * 10);
+        // A single-sample packet (or a beat event with step 0) sits on the stamp.
+        assert_eq!(packed_sample_ds(packet_ds, 0, 1, step_ds), packet_ds);
+        assert_eq!(packed_sample_ds(packet_ds, 0, 1, 0), packet_ds);
+    }
 
     #[test]
     fn fractional_timezone_preserves_minutes_and_day_boundaries() {

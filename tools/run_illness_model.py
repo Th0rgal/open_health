@@ -106,9 +106,13 @@ def nightly_biometrics(rows, unix_s, tz, windows):
             step = float(d.get("interval_min", 5)) * 60.0
             rm = d.get("rmssd_ms") or []
             hb = d.get("hr_bpm") or []
+            # `base` is the packet's LAST average; earlier ones walk back by `step`
+            # each (same rule as nssa_inputs/research_export). Walking forward would
+            # shift the series late by the packet span (~30 min for 7 samples).
+            n = len(rm)
             for i, r in enumerate(rm):
                 if r and r > 0:
-                    hrv_t.append(base + i * step)
+                    hrv_t.append(base - (n - 1 - i) * step)
                     hrv_rmssd.append(float(r))
                     hrv_hr.append(float(hb[i]) if i < len(hb) else float("nan"))
         elif tag in TEMP_TAGS:

@@ -127,9 +127,13 @@ def run_daily_medians(db, _tz):  # no wall-clock output → tz unused here
         if n == "hrv_event":
             iv = d.get("interval_min", 5) * 60
             rm = d.get("rmssd_ms", []); hb = d.get("hr_bpm", [])
+            # The event stamp `t` marks the packet's LAST average; earlier ones walk
+            # back by `iv` each (same rule as nssa_inputs/research_export). Placing them
+            # forward would shift the series late by the packet span (~30 min for 7).
+            n = len(rm)
             for k, v in enumerate(rm):
                 if v and v > 0:
-                    hrv.append(float(v)); hrv_t.append(int((t + k * iv) * 1000))
+                    hrv.append(float(v)); hrv_t.append(int((t - (n - 1 - k) * iv) * 1000))
                     hr_min.append(float(hb[k]) if k < len(hb) and hb[k] else 0.0)
         elif n == "temp_event":
             for v in d.get("temps_c", []):

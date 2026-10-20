@@ -164,18 +164,20 @@ pub fn hr_bins(
         let Some(bpms) = v["hr_bpm"].as_array() else {
             continue;
         };
-        // hrv_event packs `interval_min`-minute averages; element i is that much later.
+        // hrv_event packs `interval_min`-minute averages; the event's ring timestamp
+        // marks the packet's last sample, so the averages walk back from it.
         let step_ds = if name == "hrv_event" {
             v["interval_min"].as_i64().unwrap_or(5).max(1) * 600
         } else {
             0
         };
+        let len = bpms.len();
         for (i, x) in bpms.iter().enumerate() {
             let Some(bpm) = x.as_f64() else { continue };
             if !(MIN_BPM..=MAX_BPM).contains(&bpm) {
                 continue;
             }
-            let at = clock.unix_s(*ds + i as i64 * step_ds, *cu);
+            let at = clock.unix_s(crate::packed_sample_ds(*ds, i, len, step_ds), *cu);
             let bar = bins.entry(bucket_start(at, tz, span)).or_default();
             bar.add(bpm);
             if name == "hrv_event" {
@@ -370,11 +372,12 @@ mod tests {
                 72_000,
                 json!({ "hr_bpm": [50, 500] }),
             );
-            // +3 h: firmware 5-minute averages — both land in the same hour
+            // firmware 5-minute averages. The event stamp is the packet's last sample
+            // (+3:05), so [40, 45] walk back to +3:00 and +3:05 — both in hour +3.
             push(
                 0x5d,
                 "hrv_event",
-                108_000,
+                111_000,
                 json!({ "interval_min": 5, "hr_bpm": [40, 45] }),
             );
             // +3 h: raw beat-to-beat, deliberately ignored — a 170 bpm "beat" during
@@ -476,11 +479,12 @@ mod tests {
                 45_000,
                 json!({ "hr_bpm": [80] }),
             );
-            // +3:00, +3:05, +3:10: three 5-minute averages, all in the 3:00 slot
+            // Three 5-minute averages. The event stamp is the packet's LAST sample
+            // (+3:10), so they walk back to +3:00, +3:05, +3:10 — all in the 3:00 slot.
             push(
                 0x5d,
                 "hrv_event",
-                108_000,
+                114_000,
                 json!({ "interval_min": 5, "hr_bpm": [40, 45, 50] }),
             );
         }
