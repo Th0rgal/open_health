@@ -57,7 +57,7 @@ def decode_cva_ppg_bodies(bodies):
                 samples.append(acc)
                 i += 4
             else:
-                acc += np.int8(b).item()
+                acc += b - 256 if b > 127 else b
                 samples.append(acc)
                 i += 1
     return np.asarray(samples, dtype=np.float32)
