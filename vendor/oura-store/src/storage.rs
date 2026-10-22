@@ -114,6 +114,94 @@ pub fn decode_stored_event(
     None
 }
 
+/// Counts produced by [`Store::derive_readings`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DeriveStats {
+    /// Decoded event rows walked.
+    pub events_scanned: u64,
+    /// Rows whose `decoded_json` could not be parsed.
+    pub undecodable: u64,
+    pub heart_rate: u64,
+    pub hrv_rmssd: u64,
+    pub skin_temp: u64,
+}
+
+impl DeriveStats {
+    /// Total scalar readings written across all kinds.
+    pub fn total_readings(&self) -> u64 {
+        self.heart_rate + self.hrv_rmssd + self.skin_temp
+    }
+}
+
+impl std::ops::AddAssign for DeriveStats {
+    fn add_assign(&mut self, other: Self) {
+        self.events_scanned += other.events_scanned;
+        self.undecodable += other.undecodable;
+        self.heart_rate += other.heart_rate;
+        self.hrv_rmssd += other.hrv_rmssd;
+        self.skin_temp += other.skin_temp;
+    }
+}
+
+/// Insert a derived reading unless an identical one is already stored.
+///
+/// There is no unique index on `readings` (live samples legitimately repeat), so
+/// idempotency is enforced with a correlated `NOT EXISTS` on the natural key.
+fn insert_derived_reading(
+    conn: &Connection,
+    serial: &str,
+    kind: &str,
+    value: f64,
+    unit: &str,
+    captured_unix: i64,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "INSERT INTO readings (serial, kind, value, unit, captured_unix)
+         SELECT ?1, ?2, ?3, ?4, ?5
+         WHERE NOT EXISTS (
+             SELECT 1 FROM readings
+             WHERE serial = ?1 AND kind = ?2 AND value = ?3 AND captured_unix = ?5
+         )",
+        params![serial, kind, value, unit, captured_unix],
+    )?;
+    Ok(changed > 0)
+}
+
+/// RMSSD (ms) from beat-to-beat intervals, dropping implausible intervals,
+/// samples the ring flagged as low quality, and differences that are artifacts
+/// of a missed or extra beat (>20% jump, the standard ectopic filter).
+fn rmssd(ibi_ms: &[f64], quality: &[f64]) -> Option<f64> {
+    let usable: Vec<f64> = ibi_ms
+        .iter()
+        .enumerate()
+        .filter(|(i, v)| {
+            // 200..3000 ms covers 20-300 bpm; outside that it is noise.
+            **v >= 200.0
+                && **v <= 3000.0
+                && quality.get(*i).is_none_or(|q| *q >= 2.0)
+        })
+        .map(|(_, v)| *v)
+        .collect();
+    if usable.len() < 4 {
+        return None;
+    }
+    let mut sum_sq = 0.0;
+    let mut diffs = 0usize;
+    for pair in usable.windows(2) {
+        let d = pair[1] - pair[0];
+        if d.abs() > 0.2 * pair[0] {
+            continue;
+        }
+        sum_sq += d * d;
+        diffs += 1;
+    }
+    if diffs < 3 {
+        return None;
+    }
+    let value = (sum_sq / diffs as f64).sqrt();
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
 /// A SQLite-backed store for ring data.
 pub struct Store {
     conn: Connection,
@@ -374,6 +462,99 @@ impl Store {
         self.insert_reading(serial, "battery_percent", battery.percent as f64, "%")
     }
 
+    /// Derive scalar readings from already-decoded event bodies.
+    ///
+    /// `sync` only stores raw events; the scalar `readings` table was previously
+    /// fed exclusively by the live paths (`latest`, `live-hr`), so a sync-only
+    /// client left it permanently empty. This walks the decoded events and emits
+    /// the series the dashboard can actually plot:
+    ///
+    /// * `heart_rate` (bpm) from `hr_bpm` samples
+    /// * `hrv_rmssd` (ms) from successive differences of `ibi_ms`
+    /// * `hrv_rmssd` (ms) from an explicit `rmssd_ms` array when the ring sent one
+    /// * `skin_temp_c` (°C) from `temps_c` samples in a physiologic band
+    ///
+    /// Timestamps use `captured_unix` (sync arrival time). `ring_timestamp` is a
+    /// ring-relative tick that resets on reboot, so it cannot be used directly.
+    /// Idempotent: a reading identical in (kind, value, captured_unix) is skipped,
+    /// so re-running after every sync does not duplicate history.
+    pub fn derive_readings(&self, serial: &str) -> Result<DeriveStats> {
+        let mut stmt = self.conn.prepare(
+            "SELECT decoded_json, captured_unix FROM events
+             WHERE serial = ?1 AND decoded_json IS NOT NULL
+             ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map(params![serial], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let mut stats = DeriveStats {
+            events_scanned: rows.len() as u64,
+            ..Default::default()
+        };
+
+        let tx = self.conn.unchecked_transaction()?;
+        for (json, captured) in rows {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
+                stats.undecodable += 1;
+                continue;
+            };
+            let arr = |key: &str| -> Vec<f64> {
+                value
+                    .get(key)
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_f64()).collect())
+                    .unwrap_or_default()
+            };
+
+            let hr = arr("hr_bpm");
+            for bpm in &hr {
+                stats.heart_rate += u64::from(insert_derived_reading(
+                    &tx, serial, "heart_rate", *bpm, "bpm", captured,
+                )?);
+            }
+
+            let ibi = arr("ibi_ms");
+            let quality = arr("quality");
+            if let Some(rmssd) = rmssd(&ibi, &quality) {
+                stats.hrv_rmssd += u64::from(insert_derived_reading(
+                    &tx, serial, "hrv_rmssd", rmssd, "ms", captured,
+                )?);
+            }
+            // A ring-side RMSSD is authoritative when present; the IBI estimate
+            // above is only a fallback for events that carry raw intervals.
+            for rmssd_ms in arr("rmssd_ms") {
+                if rmssd_ms > 0.0 {
+                    stats.hrv_rmssd += u64::from(insert_derived_reading(
+                        &tx, serial, "hrv_rmssd", rmssd_ms, "ms", captured,
+                    )?);
+                }
+            }
+
+            for temp in arr("temps_c") {
+                if (30.0..=40.0).contains(&temp) {
+                    stats.skin_temp += u64::from(insert_derived_reading(
+                        &tx, serial, "skin_temp_c", temp, "°C", captured,
+                    )?);
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(stats)
+    }
+
+    /// Derive readings for every device serial present in the store.
+    pub fn derive_readings_all(&self) -> Result<DeriveStats> {
+        let mut total = DeriveStats::default();
+        for serial in self.device_serials()? {
+            total += self.derive_readings(&serial)?;
+        }
+        Ok(total)
+    }
+
     fn get_meta(&self, key: &str) -> Result<Option<String>> {
         let has_meta: bool = self
             .conn
@@ -612,6 +793,86 @@ mod tests {
             body: vec![1, 2, 3],
             decoded: None,
         }
+    }
+
+    #[test]
+    fn derive_readings_emits_series_and_is_idempotent() {
+        let store = Store::open_in_memory().unwrap();
+        let event = RingEvent {
+            tag: 0x80,
+            name: "green_ibi_quality_event",
+            timestamp: 10,
+            body: vec![9],
+            decoded: Some(serde_json::json!({
+                "hr_bpm": [61, 62],
+                "ibi_ms": [980, 970, 960, 950, 940],
+                "quality": [3, 3, 3, 3, 3],
+            })),
+        };
+        assert!(store.insert_event("S1", &event).unwrap());
+        let temp = RingEvent {
+            tag: 0x46,
+            name: "temp_event",
+            timestamp: 11,
+            body: vec![8],
+            decoded: Some(serde_json::json!({"temps_c": [33.5, 12.0]})),
+        };
+        assert!(store.insert_event("S1", &temp).unwrap());
+
+        let stats = store.derive_readings("S1").unwrap();
+        assert_eq!(stats.heart_rate, 2);
+        assert_eq!(stats.hrv_rmssd, 1);
+        // 12.0 °C is outside the physiologic band and must not become a reading.
+        assert_eq!(stats.skin_temp, 1);
+        assert_eq!(stats.undecodable, 0);
+
+        let rows: Vec<(String, f64)> = {
+            let mut stmt = store
+                .conn
+                .prepare("SELECT kind, value FROM readings ORDER BY kind, value")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(
+            rows,
+            vec![
+                ("heart_rate".to_string(), 61.0),
+                ("heart_rate".to_string(), 62.0),
+                ("hrv_rmssd".to_string(), 10.0),
+                ("skin_temp_c".to_string(), 33.5),
+            ]
+        );
+
+        // A second pass over the same events must not duplicate anything.
+        let again = store.derive_readings("S1").unwrap();
+        assert_eq!(again.total_readings(), 0);
+        let total: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM readings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 4);
+    }
+
+    #[test]
+    fn derive_readings_skips_unparseable_json() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+                 VALUES ('S1', 128, 'green_ibi_quality_event', 1, x'00', 'not json', 0)",
+                [],
+            )
+            .unwrap();
+        let stats = store.derive_readings("S1").unwrap();
+        assert_eq!(stats.events_scanned, 1);
+        assert_eq!(stats.undecodable, 1);
+        assert_eq!(stats.total_readings(), 0);
     }
 
     #[test]
