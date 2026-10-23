@@ -119,6 +119,8 @@ enum Command {
     Events,
     /// Re-run decoders over already-stored raw event bodies (offline).
     Redecode,
+    /// Derive scalar readings (HR, HRV, skin temp) from stored events (offline).
+    DeriveReadings,
     /// RData bulk raw-sampler control: `state` (read), `stop`/`clear` (teardown),
     /// `probe` (arm ACM-50 ~30 s, measure data rate + battery, auto-teardown).
     /// `probe` writes a persistent flash session but always tears itself down
@@ -476,6 +478,20 @@ async fn main() -> Result<()> {
             let store = Store::open(&cli.db)?;
             let (decoded, total) = store.redecode()?;
             println!("Re-decoded {decoded}/{total} stored events.");
+            Ok(())
+        }
+        Command::DeriveReadings => {
+            let store = Store::open(&cli.db)?;
+            let stats = store.derive_readings_all()?;
+            println!(
+                "Derived {} readings from {} events (HR {}, HRV {}, temp {}; {} undecodable).",
+                stats.total_readings(),
+                stats.events_scanned,
+                stats.heart_rate,
+                stats.hrv_rmssd,
+                stats.skin_temp,
+                stats.undecodable
+            );
             Ok(())
         }
         Command::Features {
@@ -1058,6 +1074,20 @@ async fn cmd_sync(cli: &Cli, key: &Option<[u8; 16]>, sync_time: bool) -> Result<
         inserted.get(),
         next_cursor
     );
+
+    // Backfill the scalar readings the dashboard's vitals cards read. Best-effort:
+    // a failure here must not invalidate a sync that already landed.
+    match store.derive_readings(&serial) {
+        Ok(stats) if stats.total_readings() > 0 => println!(
+            "Derived {} readings (HR {}, HRV {}, temp {}).",
+            stats.total_readings(),
+            stats.heart_rate,
+            stats.hrv_rmssd,
+            stats.skin_temp
+        ),
+        Ok(_) => {}
+        Err(e) => eprintln!("warning: could not derive readings ({e})"),
+    }
 
     // Same anchor the iOS sync writes (oura-core `phone_anchor_event`): without it a
     // CLI-synced DB has no wall-clock point on the near side of a battery brownout.

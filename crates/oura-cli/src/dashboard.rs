@@ -9,8 +9,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -218,12 +219,34 @@ impl ModelRunner for PythonRunner {
             }),
             _ => (None, None, None, None),
         };
-        let needs_fallback = sleep_batch
+        // A window the Python model could not stage comes back as `null` (no torch, no
+        // `.pt`), which is not a "batch present" signal: fill those windows from the
+        // ring's own signals so the dashboard still gets a hypnogram.
+        let staged: Vec<Value> = sleep_batch
             .as_ref()
             .and_then(|v| v.as_array())
-            .is_none_or(|a| a.is_empty());
-        if needs_fallback && !sleep_ranges.is_empty() {
-            sleep_batch = oura_summary::stage_nights_from_signals(db, sleep_ranges);
+            .cloned()
+            .unwrap_or_default();
+        let missing: Vec<[i64; 3]> = sleep_ranges
+            .iter()
+            .copied()
+            .filter(|r| {
+                staged
+                    .iter()
+                    .find(|h| h["start_ds"].as_i64() == Some(r[0]))
+                    .is_none_or(|h| {
+                        h["stages"]
+                            .as_array()
+                            .is_none_or(|s| s.is_empty())
+                    })
+            })
+            .collect();
+        if !missing.is_empty() {
+            if let Some(sig) = oura_summary::stage_nights_from_signals(db, &missing) {
+                let mut merged = staged;
+                merged.extend(sig.as_array().cloned().unwrap_or_default());
+                sleep_batch = Some(Value::Array(merged));
+            }
         }
         ModelOutputs {
             sleep_batch,
@@ -824,10 +847,95 @@ async fn handle(
 /// all for a few seconds after a disconnect), so a single short scan often misses a
 /// ring that is right there. We use a longer scan window and retry the transient
 /// "no matching ring" miss a couple of times before giving up.
+///
+/// The child is bounded by [`SYNC_ATTEMPT_TIMEOUT_SECS`]: oura-link's scan loop makes
+/// unbounded CoreBluetooth calls that can hang forever when the OS Bluetooth session
+/// is wedged, so the child must never be trusted to exit on its own.
+
+/// Hard per-attempt bound for the `sync` child, in seconds. The child's own scan
+/// timeout is 40 s times 3 internal retries plus a 30 s GATT bound, so anything over
+/// 120 s means the OS Bluetooth session is wedged, not the ring absent.
+const SYNC_ATTEMPT_TIMEOUT_SECS: u64 = 120;
+/// How often to poll the sync child while waiting for it to exit.
+const SYNC_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Total sync attempts per run_sync call (ScanMiss path).
+const SYNC_MAX_ATTEMPTS: usize = 3;
+/// Consecutive wedged syncs after which we exit(75) (opt-in via OURA_DASH_SELF_RESTART)
+/// so the supervisor launchd restarts us with a fresh Bluetooth session.
+const WEDGED_RESTART_THRESHOLD: usize = 3;
+
+/// Consecutive wedged sync outcomes, used to trigger the opt-in self-restart.
+static CONSECUTIVE_WEDGED: AtomicUsize = AtomicUsize::new(0);
+
+/// Outcome of a single `sync` child attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncFailure {
+    /// Child exited 0.
+    Success,
+    /// Transient scan miss ("no matching" / "not found" / "no device").
+    ScanMiss,
+    /// Child blew the 120 s hard bound: OS Bluetooth session is wedged.
+    Wedged,
+    /// Any other non-zero exit.
+    Failed,
+}
+
+/// Classify a sync child's stderr into an outcome.
+fn classify_sync_failure(stderr: &str) -> SyncFailure {
+    let l = stderr.to_lowercase();
+    // Wedge signals first: a hung child killed at the hard bound produces no stderr,
+    // but when the child does print a timeout of its own it still means the OS
+    // Bluetooth session is stuck (it already burned its internal retries).
+    if l.contains("timed out") || l.contains("timeout") {
+        return SyncFailure::Wedged;
+    }
+    if l.contains("no matching") || l.contains("not found") || l.contains("no device") {
+        return SyncFailure::ScanMiss;
+    }
+    SyncFailure::Failed
+}
+
+/// Retry policy per outcome: ScanMiss gets the full 3 attempts, Wedged is retried at
+/// most once (a wedged OS session will not un-wedge by re-scanning), Failed never.
+/// `attempt` is 0-based.
+fn should_retry(outcome: SyncFailure, attempt: usize) -> bool {
+    match outcome {
+        SyncFailure::ScanMiss => attempt < 2,
+        SyncFailure::Wedged => attempt < 1,
+        SyncFailure::Failed | SyncFailure::Success => false,
+    }
+}
+
+/// One-line diagnostic on stderr so /tmp/oura-dashboard.log carries sync telemetry.
+fn log_sync_diagnostic(attempt: usize, outcome: SyncFailure, elapsed: Duration, stderr: &str) {
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let snippet: String = stderr.chars().take(80).collect();
+    eprintln!(
+        "sync diagnostic: ts={ts} attempt={} outcome={outcome:?} duration={:.1}s stderr={snippet:?}",
+        attempt + 1,
+        elapsed.as_secs_f64()
+    );
+}
+
+/// Drain a child pipe to a String on its own thread so a chatty child cannot
+/// deadlock on a full pipe while we poll try_wait().
+fn drain_pipe<R: std::io::Read + Send + 'static>(pipe: R) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut buf = String::new();
+        let _ = pipe.read_to_string(&mut buf);
+        buf
+    })
+}
+
 fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
     let exe = std::env::current_exe().context("locating oura binary")?;
     let mut last = String::from("sync failed");
-    for attempt in 0..3 {
+    for attempt in 0..SYNC_MAX_ATTEMPTS {
+        let started = std::time::Instant::now();
         let mut c = Command::new(&exe);
         c.arg("--db")
             .arg(db)
@@ -839,31 +947,89 @@ fn run_sync(db: &Path, name: &str, key_file: Option<&Path>) -> Result<String> {
             c.arg("--key-file").arg(k);
         }
         c.arg("sync");
-        let out = c.output().context("running `oura sync`")?;
-        if out.status.success() {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            return Ok(stdout.lines().last().unwrap_or("synced").trim().to_string());
-        }
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        last = stderr
-            .lines()
-            .last()
-            .unwrap_or("sync failed")
-            .trim()
-            .to_string();
-        // only a scan miss is worth retrying; a real error (auth, etc.) is not
-        let transient = {
-            let l = last.to_lowercase();
-            l.contains("no matching")
-                || l.contains("not found")
-                || l.contains("no device")
-                || l.contains("timed out")
-                || l.contains("timeout")
+        // Pipes are drained by threads so a chatty child cannot deadlock on a full
+        // pipe while we poll try_wait().
+        c.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = c.spawn().context("running `oura sync`")?;
+        let stdout_pipe = child.stdout.take().context("sync child stdout")?;
+        let stderr_pipe = child.stderr.take().context("sync child stderr")?;
+        let stdout_handle = drain_pipe(stdout_pipe);
+        let stderr_handle = drain_pipe(stderr_pipe);
+
+        let mut timed_out = false;
+        let mut poll_error: Option<std::io::Error> = None;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break Some(st),
+                Ok(None) => {
+                    if started.elapsed() >= Duration::from_secs(SYNC_ATTEMPT_TIMEOUT_SECS) {
+                        timed_out = true;
+                        break None;
+                    }
+                    std::thread::sleep(SYNC_POLL_INTERVAL);
+                }
+                Err(e) => {
+                    poll_error = Some(e);
+                    break None;
+                }
+            }
         };
-        if !transient || attempt == 2 {
+        if timed_out {
+            // Kill then reap so no zombie lingers holding the BLE session.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let stdout_text = stdout_handle.join().unwrap_or_default();
+        let mut stderr_text = stderr_handle.join().unwrap_or_default();
+        if let Some(e) = poll_error {
+            stderr_text = format!("sync child poll error: {e}");
+        }
+
+        let outcome = if timed_out {
+            SyncFailure::Wedged
+        } else if status.map(|s| s.success()).unwrap_or(false) {
+            SyncFailure::Success
+        } else {
+            classify_sync_failure(&stderr_text)
+        };
+        let elapsed = started.elapsed();
+        log_sync_diagnostic(attempt, outcome, elapsed, &stderr_text);
+
+        if outcome == SyncFailure::Success {
+            CONSECUTIVE_WEDGED.store(0, Ordering::Relaxed);
+            return Ok(stdout_text.lines().last().unwrap_or("synced").trim().to_string());
+        }
+
+        last = if timed_out {
+            "sync child timed out (120s): the OS Bluetooth session appears wedged; the dashboard will self-restart".to_string()
+        } else {
+            stderr_text
+                .lines()
+                .last()
+                .unwrap_or("sync failed")
+                .trim()
+                .to_string()
+        };
+
+        if outcome == SyncFailure::Wedged {
+            let n = CONSECUTIVE_WEDGED.fetch_add(1, Ordering::Relaxed) + 1;
+            if n >= WEDGED_RESTART_THRESHOLD {
+                if std::env::var("OURA_DASH_SELF_RESTART").as_deref() == Ok("1") {
+                    eprintln!(
+                        "dashboard: 3 consecutive wedged syncs, exiting so the supervisor launchd restarts us with a fresh Bluetooth session"
+                    );
+                    std::process::exit(75);
+                }
+                eprintln!(
+                    "dashboard: warning: {n} consecutive wedged syncs (set OURA_DASH_SELF_RESTART=1 to enable automatic restart)"
+                );
+            }
+        }
+
+        if !should_retry(outcome, attempt) {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(2));
     }
     Err(anyhow!("{last}"))
 }
@@ -1112,5 +1278,41 @@ mod tests {
             parse_beat_line("No beats captured. Make sure the ring is worn."),
             None
         );
+    }
+    #[test]
+    fn classifies_sync_failures() {
+        assert_eq!(
+            classify_sync_failure("Error: no matching Oura ring found"),
+            SyncFailure::ScanMiss
+        );
+        assert_eq!(
+            classify_sync_failure("Error: no device found"),
+            SyncFailure::ScanMiss
+        );
+        assert_eq!(
+            classify_sync_failure("Error: GATT operation timed out"),
+            SyncFailure::Wedged
+        );
+        assert_eq!(
+            classify_sync_failure("Error: scan timeout after 40s"),
+            SyncFailure::Wedged
+        );
+        assert_eq!(
+            classify_sync_failure("Error: authentication failed"),
+            SyncFailure::Failed
+        );
+    }
+    #[test]
+    fn sync_retry_policy() {
+        // ScanMiss retries for the full 3 attempts (0-based attempt < 2).
+        assert!(should_retry(SyncFailure::ScanMiss, 0));
+        assert!(should_retry(SyncFailure::ScanMiss, 1));
+        assert!(!should_retry(SyncFailure::ScanMiss, 2));
+        // Wedged is retried at most once.
+        assert!(should_retry(SyncFailure::Wedged, 0));
+        assert!(!should_retry(SyncFailure::Wedged, 1));
+        // Failed and Success never retry.
+        assert!(!should_retry(SyncFailure::Failed, 0));
+        assert!(!should_retry(SyncFailure::Success, 0));
     }
 }
