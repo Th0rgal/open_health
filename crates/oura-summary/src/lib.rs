@@ -3149,6 +3149,40 @@ mod tests {
     }
 
     #[test]
+    fn signal_staging_fills_a_resolved_night_with_5min_physiology() {
+        // Maxime's Ring-5-on-PC report: an 8.4 h night that resolved its window and
+        // carried HR/HRV/motion, but Python emitted null (no torch / NSSA inputs) so
+        // the night showed no sleep at all. The signal fallback must still stage it.
+        // Reproduces the *shape* (not his biometrics): 5-min-spaced samples over the
+        // night, quiet but for a few movement bursts.
+        let start_ds = 0i64;
+        let end_ds = 302_400i64; // 8.4 h in deciseconds
+        let step = 3_000i64; // 5 min
+        let mut hr_t = Vec::new();
+        let mut hrv_t = Vec::new();
+        let mut motion_t = Vec::new();
+        let mut ds = start_ds;
+        let mut i = 0;
+        while ds <= end_ds {
+            // HR dips mid-night, HRV rises mid-night (deep-sleep signature).
+            let phase = (ds - start_ds) as f64 / (end_ds - start_ds) as f64;
+            hr_t.push((ds, 56.0 - 10.0 * (phase * std::f64::consts::PI).sin()));
+            hrv_t.push((ds, 45.0 + 30.0 * (phase * std::f64::consts::PI).sin()));
+            // mostly still, with a couple of brief arousals
+            let mo = if i % 37 == 0 { 9.0 } else { 1.0 };
+            motion_t.push((ds, mo));
+            ds += step;
+            i += 1;
+        }
+        let stages = stage_night_from_signals(start_ds, end_ds, &hr_t, &hrv_t, &motion_t);
+        assert!(!stages.is_empty(), "a resolved night with physiology must stage");
+        assert!(stages.len() > 900, "≈1008 30 s epochs, got {}", stages.len());
+        let asleep = stages.iter().filter(|&&c| (1..=3).contains(&c)).count();
+        assert!(asleep > stages.len() / 2, "most of the night should be scored asleep");
+        assert!(stages.contains(&1), "the HRV-surge mid-night should yield some N3");
+    }
+
+    #[test]
     fn packed_samples_walk_back_from_the_packet_stamp() {
         // A packet's ring timestamp marks its LAST (newest) sample; earlier averages
         // precede it by one step each. The newest must land exactly on the stamp and

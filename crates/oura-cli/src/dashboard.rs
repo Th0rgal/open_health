@@ -221,9 +221,10 @@ impl ModelRunner for PythonRunner {
         let needs_fallback = sleep_batch
             .as_ref()
             .and_then(|v| v.as_array())
-            .is_none_or(|a| a.is_empty());
+            .is_none_or(|a| a.is_empty() || a.iter().any(Value::is_null));
         if needs_fallback && !sleep_ranges.is_empty() {
-            sleep_batch = oura_summary::stage_nights_from_signals(db, sleep_ranges);
+            let signals = oura_summary::stage_nights_from_signals(db, sleep_ranges);
+            sleep_batch = merge_sleep_fallback(sleep_batch, signals);
         }
         ModelOutputs {
             sleep_batch,
@@ -231,6 +232,38 @@ impl ModelRunner for PythonRunner {
             activity,
             illness,
         }
+    }
+}
+
+/// Fill the Python sleep batch's missing per-night entries with the signal-derived
+/// fallback, index-aligned with `sleep_ranges`.
+///
+/// `run_sleep_model.py --batch` stages each window to a dict or emits `null` for a
+/// window it can't stage (no torch/models, or NSSA inputs missing), still exiting 0.
+/// A `null` must still receive the signal estimate — otherwise the night keeps its
+/// physiology but shows no sleep at all. Only null slots are replaced, so nights
+/// Python staged are preserved; if Python produced nothing usable the whole signal
+/// array is taken instead.
+fn merge_sleep_fallback(python: Option<Value>, signals: Option<Value>) -> Option<Value> {
+    let Some(sig) = signals.as_ref().and_then(|v| v.as_array()) else {
+        return python;
+    };
+    match python.as_ref().and_then(|v| v.as_array()) {
+        Some(py) if !py.is_empty() => {
+            let merged = py
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    if e.is_null() {
+                        sig.get(i).cloned().unwrap_or(Value::Null)
+                    } else {
+                        e.clone()
+                    }
+                })
+                .collect();
+            Some(Value::Array(merged))
+        }
+        _ => signals,
     }
 }
 
@@ -1074,6 +1107,48 @@ fn run_feature(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_fills_only_null_nights_and_keeps_python_stages() {
+        // Python staged night 0 and 2 but emitted null for night 1 (NSSA could not
+        // stage it, or no torch). The signal fallback must fill exactly night 1 and
+        // leave the Python results untouched — the Ring-5-on-PC "physiology but no
+        // sleep" report.
+        let python = json!([{"source": "nssa", "stages": [1, 2]}, Value::Null, {"source": "nssa"}]);
+        let signals = json!([{"source": "signals", "stages": [9]}, {"source": "signals", "stages": [2, 3]}, {"source": "signals"}]);
+        let out = merge_sleep_fallback(Some(python), Some(signals)).unwrap();
+        let a = out.as_array().unwrap();
+        assert_eq!(a[0]["source"], "nssa", "python night kept");
+        assert_eq!(a[1]["source"], "signals", "null night filled from signals");
+        assert_eq!(a[1]["stages"], json!([2, 3]));
+        assert_eq!(a[2]["source"], "nssa");
+    }
+
+    #[test]
+    fn fallback_takes_whole_signal_array_when_python_absent_or_empty() {
+        let signals = json!([{"source": "signals"}]);
+        // Python crashed (no torch) → None.
+        assert_eq!(
+            merge_sleep_fallback(None, Some(signals.clone())),
+            Some(signals.clone())
+        );
+        // Python returned an empty batch.
+        assert_eq!(
+            merge_sleep_fallback(Some(json!([])), Some(signals.clone())),
+            Some(signals)
+        );
+    }
+
+    #[test]
+    fn fallback_is_a_noop_when_signals_unavailable() {
+        // No events to stage from: keep whatever Python returned rather than blanking.
+        let python = json!([Value::Null]);
+        assert_eq!(
+            merge_sleep_fallback(Some(python.clone()), None),
+            Some(python)
+        );
+    }
+
     #[tokio::test]
     async fn live_stderr_is_drained_without_unbounded_retention() {
         let (mut writer, reader) = tokio::io::duplex(1024);
