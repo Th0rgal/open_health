@@ -1,13 +1,13 @@
 [package]
 name = "oura-store"
 description = "SQLite persistence for Oura ring events, samples, metrics and sync state"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Th0rgal/open_oura"
 
 [dependencies]
-oura-protocol = { path = "../oura-protocol" }
+oura-protocol = { git = "https://github.com/Th0rgal/open_oura", rev = "4f7957d3304c4084f0e1e703f3d84606bf10b781" }
 rusqlite = { version = "0.31", features = ["backup"] }
 serde_json = "1"
 thiserror = "1"

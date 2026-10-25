@@ -2219,6 +2219,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "oura-analysis"
 version = "0.1.0"
+source = "git+https://github.com/Th0rgal/open_oura?rev=4f7957d3304c4084f0e1e703f3d84606bf10b781#4f7957d3304c4084f0e1e703f3d84606bf10b781"
 dependencies = [
  "oura-protocol",
  "serde",
@@ -2291,6 +2292,7 @@ dependencies = [
 [[package]]
 name = "oura-link"
 version = "0.1.0"
+source = "git+https://github.com/Th0rgal/open_oura?rev=4f7957d3304c4084f0e1e703f3d84606bf10b781#4f7957d3304c4084f0e1e703f3d84606bf10b781"
 dependencies = [
  "async-trait",
  "btleplug",
@@ -2306,6 +2308,7 @@ dependencies = [
 [[package]]
 name = "oura-protocol"
 version = "0.1.0"
+source = "git+https://github.com/Th0rgal/open_oura?rev=4f7957d3304c4084f0e1e703f3d84606bf10b781#4f7957d3304c4084f0e1e703f3d84606bf10b781"
 dependencies = [
  "aes",
  "hex",
