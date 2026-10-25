@@ -1075,6 +1075,13 @@ function sleepSection(d, ymd, axis, cursor) {
   }
   if (staged && n.staging_complete === false)
     sec.append(el("p", "error", "Incomplete sleep analysis. Gaps mean no data, not awake time; sleep metrics are withheld."));
+  if (staged && n.staging_source === "signals") {
+    const note = el("p", "hr-note",
+      "Hypnogram from the local signal estimate (heart rate, HRV and motion), not Oura's sleep-staging model. " +
+      "To use Oura's validated model instead, install Python + torch and place the model files under notes/models/ " +
+      "(or set OURA_MODELS_DIR); see dashboard/README.md.");
+    sec.append(note);
+  }
   if (staged) sec.append(stageLegend());
   else sec.append(el("p", "hr-note", "Sleep stages are unavailable for this night. The lanes below are what the ring recorded overnight."));
 

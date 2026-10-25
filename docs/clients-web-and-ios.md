@@ -216,6 +216,11 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
   (`hr_bins`, with a 15 min / 1 h switch); iOS `HeartRate.swift` still shows hourly bars.
 - **Live heart rate** panel: `POST /api/live-hr` streams beats from `oura live-hr`
   (one minute per session, stoppable) as newline-delimited JSON.
+- **"Signal estimate" staging notice**: when a night is staged by the Rust signal
+  fallback (`staging_source === "signals"`, i.e. Python/torch or the `.pt` model is
+  absent on this machine), the web day view shows a note saying so and how to enable
+  Oura's model. iOS bundles the on-device model, so this condition is rare there and
+  has no matching label yet.
 
 - **Advanced & debugging**: on-ring feature toggles (`/api/feature`) and the per-type
   event stream. Profile editing is now native on iOS, including optional Apple Health
