@@ -16,6 +16,49 @@ oura dashboard --tz-offset 1 --age 30 --sex M --height 1.78 --weight 75
 
 Default port `8090`; loopback-only.
 
+## Enable Oura's models on desktop
+
+Without the private model files the dashboard still works — each night falls back to
+the built-in **signal estimate** (heart rate, HRV and motion), and the day view says
+so. To stage with Oura's own validated model instead:
+
+1. **Place the models.** Put your locally-decrypted desktop `.pt` files (plus the
+   sleep classifier) in `notes/models/` at the repo root — the first place the runners
+   look. Use the desktop `.pt` / `.bin` files, not the `mobile/*.ptl` (those are for
+   iOS). At minimum, for the hypnogram:
+
+   ```
+   notes/models/
+     sleepstaging_2_6_0.pt
+     sleepstaging_2_6_0_classifier.bin   # required — the NSSA stager loads both
+   ```
+
+   and, for the other panels, `cva_2_1_0.pt`, `daily_medians_1_1_0.pt`,
+   `sleepnet_bdi_0_4_0.pt`, `automatic_activity_detection_3_1_11.pt`,
+   `illness_detection_0_5_1.pt`. `notes/models/` is gitignored. Any other layout:
+   `export OURA_MODELS_DIR=/absolute/path/to/models` (a sibling
+   `../open_oura/notes/models/` is detected automatically).
+
+2. **Create a venv with torch** (torch is *not* in `requirements.txt`):
+
+   ```bash
+   python3 -m venv .venv
+   .venv/bin/pip install -r requirements.txt   # bleak + pycryptodome (BLE sync)
+   .venv/bin/pip install torch numpy           # torch 2.9 recommended
+   ```
+
+   The CLI auto-discovers `./.venv/bin/python` (or `.venv/Scripts/python.exe` on
+   Windows); override with `OURA_PYTHON=/absolute/path/to/python`.
+
+3. **Verify** the model is actually running:
+
+   ```bash
+   .venv/bin/python tools/run_sleep_model.py oura.db 1 --json
+   ```
+
+   A hypnogram with no error means NSSA is live; a complaint names the missing file.
+   In the dashboard, a night with no "signal estimate" note is staged by Oura's model.
+
 ## In the dashboard
 
 - **Sync button** (header): drains the ring over Bluetooth without leaving the page
