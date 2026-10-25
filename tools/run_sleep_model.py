@@ -29,7 +29,7 @@ from ibi_correction import correct_ibis
 REPO = Path(__file__).resolve().parent.parent
 TZ = 1.0
 STAGE = {1: "DEEP", 2: "LIGHT", 3: "REM", 4: "WAKE"}
-CACHE_VERSION = "nssa-2.6.0-r1"
+CACHE_VERSION = "nssa-2.6.0-r2"
 EPOCH_MS = 30000
 
 JSON = "--json" in sys.argv
@@ -140,8 +140,8 @@ def stage_bedtime(b_start, b_end, cu, demo):
     inputs = collect_nssa_inputs(decoded_rows(), b_start, b_end, cu, ms, correct_ibis)
     key = hashlib.sha256(json.dumps([CACHE_VERSION, demo, inputs], sort_keys=True).encode()).hexdigest()
     hit = cache()["nights"].get(key)
-    if hit is not None:
-        return (hit["t"], hit["s"]) if hit else None
+    if hit:  # truthy check: failures are cached as {}, which must not short-circuit
+        return (hit["t"], hit["s"])
     try:
         ts, codes = stager().stage(inputs, demo)
     except (ValueError, RuntimeError):
