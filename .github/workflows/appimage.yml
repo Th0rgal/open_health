@@ -1,0 +1,84 @@
+name: Linux AppImage
+on:
+  pull_request:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: appimage-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build AppImage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: appimage-rust-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: appimage-rust-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            pkg-config \
+            file
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          OUTPUT_DIR: dist
+        run: |
+          bash packaging/appimage/build_appimage.sh
+          cp dist/OpenHealth.AppImage dist/OpenHealth-x86_64.AppImage
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenHealth-x86_64.AppImage
+          path: dist/OpenHealth-x86_64.AppImage
+
+  release:
+    name: Release AppImage
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download AppImage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: OpenHealth-x86_64.AppImage
+          path: dist
+      - name: Publish release asset
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          ASSET_FILE="dist/OpenHealth-x86_64.AppImage"
+          if [ ! -f "$ASSET_FILE" ]; then
+            FOUND=$(find dist -name "*AppImage" | head -n 1)
+            cp "$FOUND" "$ASSET_FILE"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ASSET_FILE" --clobber
+          else
+            gh release create "$TAG" "$ASSET_FILE" --title "$TAG" --generate-notes
+          fi
