@@ -33,8 +33,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 getrandom = "0.3"
 tch = { version = "=0.22.0", optional = true } # pinned to libtorch 2.9.0 (repo venv)
+wry = { version = "0.57", optional = true }
+tao = { version = "0.37", optional = true }
 
 [features]
+default = []
+appimage = ["dep:wry", "dep:tao"]
 # Run the activity model in-process via LibTorch instead of shelling out to
 # tools/run_activity_model.py. On Apple Silicon the only libtorch is the pip
 # wheel, so the repo venv is aligned to torch 2.9.0 — the exact version tch 0.22

@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Determine AppDir location
+if [ -z "${APPDIR:-}" ]; then
+    APPDIR="$(dirname "$(readlink -f "${0}")")"
+fi
+
+export PATH="$APPDIR/usr/bin:$PATH"
+
+# Ensure Bluetooth pairing agent is running on Linux if available
+if command -v bt-agent >/dev/null 2>&1; then
+    if ! pgrep -x bt-agent >/dev/null 2>&1; then
+        bt-agent -c NoInputNoOutput -d 2>/dev/null || true
+    fi
+fi
+
+# Detect database path if not explicitly provided
+if [ -z "${OURA_DB_FILE:-}" ]; then
+    if [ -f "$HOME/.bashrc" ]; then
+        VAL=$(grep -E '^\s*export\s+OURA_DB_FILE=' "$HOME/.bashrc" | tail -n 1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
+        VAL="${VAL/#\$HOME/$HOME}"
+        VAL="${VAL/#\~/$HOME}"
+        if [ -n "$VAL" ] && [ -f "$VAL" ]; then
+            OURA_DB_FILE="$VAL"
+        fi
+    fi
+fi
+
+if [ -z "${OURA_DB_FILE:-}" ] || [ ! -f "${OURA_DB_FILE:-}" ]; then
+    if [ -f "$HOME/Dropbox/open_health/oura.db" ]; then
+        OURA_DB_FILE="$HOME/Dropbox/open_health/oura.db"
+    elif [ -f "$HOME/.local/share/open_health/oura.db" ]; then
+        OURA_DB_FILE="$HOME/.local/share/open_health/oura.db"
+    elif [ -f "$HOME/open_health/oura.db" ]; then
+        OURA_DB_FILE="$HOME/open_health/oura.db"
+    fi
+fi
+
+# Detect key file path if not explicitly provided
+if [ -z "${OURA_KEY_FILE:-}" ]; then
+    if [ -f "$HOME/.bashrc" ]; then
+        VAL=$(grep -E '^\s*export\s+OURA_KEY_FILE=' "$HOME/.bashrc" | tail -n 1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
+        VAL="${VAL/#\$HOME/$HOME}"
+        VAL="${VAL/#\~/$HOME}"
+        if [ -n "$VAL" ] && [ -f "$VAL" ]; then
+            OURA_KEY_FILE="$VAL"
+        fi
+    fi
+fi
+
+if [ -z "${OURA_KEY_FILE:-}" ] || [ ! -f "${OURA_KEY_FILE:-}" ]; then
+    if [ -f "$HOME/Dropbox/open_health/oura.key" ]; then
+        OURA_KEY_FILE="$HOME/Dropbox/open_health/oura.key"
+    elif [ -n "${OURA_DB_FILE:-}" ] && [ -f "$(dirname "$OURA_DB_FILE")/oura.key" ]; then
+        OURA_KEY_FILE="$(dirname "$OURA_DB_FILE")/oura.key"
+    elif [ -f "$HOME/open_health/oura.key" ]; then
+        OURA_KEY_FILE="$HOME/open_health/oura.key"
+    fi
+fi
+
+if [ -n "${OURA_DB_FILE:-}" ]; then
+    export OURA_DB_FILE
+fi
+if [ -n "${OURA_KEY_FILE:-}" ]; then
+    export OURA_KEY_FILE
+fi
+
+# If arguments are passed:
+if [ "$#" -eq 0 ]; then
+    exec "$APPDIR/usr/bin/oura" app
+fi
+
+case "$1" in
+    -h|--help|-V|--version)
+        exec "$APPDIR/usr/bin/oura" "$@"
+        ;;
+    -*)
+        exec "$APPDIR/usr/bin/oura" app "$@"
+        ;;
+    *)
+        exec "$APPDIR/usr/bin/oura" "$@"
+        ;;
+esac
