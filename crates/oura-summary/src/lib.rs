@@ -3150,36 +3150,35 @@ mod tests {
 
     #[test]
     fn signal_staging_fills_a_resolved_night_with_5min_physiology() {
-        // Maxime's Ring-5-on-PC report: an 8.4 h night that resolved its window and
-        // carried HR/HRV/motion, but Python emitted null (no torch / NSSA inputs) so
-        // the night showed no sleep at all. The signal fallback must still stage it.
-        // Reproduces the *shape* (not his biometrics): 5-min-spaced samples over the
-        // night, quiet but for a few movement bursts.
+        // Characterization of the fallback the web dashboard relies on when the model
+        // can't stage a night: a resolved 8.4 h window carrying HR/HRV/motion must come
+        // back as a full per-epoch hypnogram with some sleep, never blank. Reproduces
+        // the *shape* only (5-min-spaced samples, quiet but for a few movement bursts),
+        // not any real recording. (The estimator itself is exercised elsewhere; this
+        // pins "not blank", which is the behaviour the dashboard fix depends on.)
         let start_ds = 0i64;
         let end_ds = 302_400i64; // 8.4 h in deciseconds
         let step = 3_000i64; // 5 min
         let mut hr_t = Vec::new();
         let mut hrv_t = Vec::new();
         let mut motion_t = Vec::new();
-        let mut ds = start_ds;
-        let mut i = 0;
-        while ds <= end_ds {
-            // HR dips mid-night, HRV rises mid-night (deep-sleep signature).
+        for (i, ds) in (start_ds..=end_ds).step_by(step as usize).enumerate() {
+            // HR dips mid-night, HRV rises mid-night (a sleep-like autonomic profile).
             let phase = (ds - start_ds) as f64 / (end_ds - start_ds) as f64;
             hr_t.push((ds, 56.0 - 10.0 * (phase * std::f64::consts::PI).sin()));
             hrv_t.push((ds, 45.0 + 30.0 * (phase * std::f64::consts::PI).sin()));
-            // mostly still, with a couple of brief arousals
-            let mo = if i % 37 == 0 { 9.0 } else { 1.0 };
+            let mo = if i % 37 == 0 { 9.0 } else { 1.0 }; // mostly still, brief arousals
             motion_t.push((ds, mo));
-            ds += step;
-            i += 1;
         }
         let stages = stage_night_from_signals(start_ds, end_ds, &hr_t, &hrv_t, &motion_t);
-        assert!(!stages.is_empty(), "a resolved night with physiology must stage");
-        assert!(stages.len() > 900, "≈1008 30 s epochs, got {}", stages.len());
-        let asleep = stages.iter().filter(|&&c| (1..=3).contains(&c)).count();
-        assert!(asleep > stages.len() / 2, "most of the night should be scored asleep");
-        assert!(stages.contains(&1), "the HRV-surge mid-night should yield some N3");
+        // One cell per 30 s epoch across the whole window — the night is not blank.
+        assert_eq!(stages.len(), ((end_ds - start_ds) / 300) as usize);
+        // And some of it is scored as sleep rather than all wake (the reported bug left
+        // the night with no sleep at all). Which sleep stage is the estimator's call.
+        assert!(
+            stages.iter().any(|&c| (1..=3).contains(&c)),
+            "a quiet low-HR night must score at least some sleep, not all wake"
+        );
     }
 
     #[test]
