@@ -47,6 +47,16 @@ def metrics_for(day, prev):
     }
 
 
+def _num(v, spec, unit=""):
+    return "—" if v is None else f"{v:{spec}}{unit}"
+
+
+def format_inputs(day):
+    return (f"  inputs: HRV {_num(day['hrv_avg'], '.0f')}/{_num(day['hrv_baseline'], '.0f')}ms  "
+            f"RHR {day['rhr_low']}/{day['rhr_avg']}bpm  recovery {day['recovery_index_h']}h  "
+            f"tempΔ {_num(day['temp_dev'], '+.2f', '°C')}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Live Readiness Score from ring data")
     ap.add_argument("db", nargs="?")
@@ -81,9 +91,7 @@ def main():
     print(f"Readiness Score (live from ring, calibrated on {params.get('n_days', '?')} export days)")
     print(f"  night ds {day['start_ds']}   history {n_hist} day(s)"
           f"{'  ⚠ baselines still maturing (<14d) — provisional' if cold else ''}")
-    print(f"  inputs: HRV {day['hrv_avg']:.0f}/{day['hrv_baseline'] or float('nan'):.0f}ms  "
-          f"RHR {day['rhr_low']}/{day['rhr_avg']}bpm  recovery {day['recovery_index_h']}h  "
-          f"tempΔ {day['temp_dev']:+.2f}°C\n")
+    print(format_inputs(day) + "\n")
     print(f"  {'contributor':28s}{'weight':>7}{'sub':>6}{'pts':>7}")
     for c, w in params["weights"]["Readiness Score"].items():
         flag = " ~baseline-cold" if (cold and c in baseline_relative) else \
