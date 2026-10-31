@@ -4,6 +4,14 @@ import SwiftUI
 // temperature) for a chosen window, as a ZIP of CSVs on the corrected clock. Built by the
 // shared Rust `oura_summary::research_export`, so a window gives the same bytes as the web
 // dashboard's "Research export" panel and `oura research-export`.
+/// Saves a marker off the main thread: the write can wait seconds on a sync's SQLite lock.
+/// The Rust side stamps the marker before it waits, so the time is still the tap's.
+enum ResearchMarker {
+    static func save(label: String, write: @escaping @Sendable (String) throws -> Double) async -> Result<Double, Error> {
+        await Task.detached { Result { try write(label) } }.value
+    }
+}
+
 struct ResearchExportView: View {
     struct Option: Identifiable {
         let id: String
@@ -27,6 +35,7 @@ struct ResearchExportView: View {
     @State private var file: URL?
     @State private var markerLabel = ""
     @State private var lastMarker: Date?
+    @State private var marking = false
 
     var body: some View {
         Form {
@@ -56,7 +65,7 @@ struct ResearchExportView: View {
                 // Before the first sync there is no synced store to write to (creating one
                 // would hide the bundled seed), so markers wait for a sync.
                 Button("Mark now") { mark() }
-                    .disabled(!FileManager.default.fileExists(atPath: DB.url.path))
+                    .disabled(marking || !FileManager.default.fileExists(atPath: DB.url.path))
                 if let lastMarker {
                     Text("Marked at \(lastMarker.formatted(date: .omitted, time: .standard))")
                         .font(.footnote).foregroundStyle(Obs.muted)
@@ -102,13 +111,19 @@ struct ResearchExportView: View {
     }
 
     private func mark() {
-        do {
-            let unix = try addResearchMarker(dbPath: DB.url.path, label: markerLabel)
-            lastMarker = Date(timeIntervalSince1970: unix)
-            markerLabel = ""
-            message = nil
-        } catch {
-            message = "Could not save the marker: \(error.localizedDescription)"
+        let path = DB.url.path
+        marking = true
+        Task {
+            let result = await ResearchMarker.save(label: markerLabel) { try addResearchMarker(dbPath: path, label: $0) }
+            marking = false
+            switch result {
+            case .success(let unix):
+                lastMarker = Date(timeIntervalSince1970: unix)
+                markerLabel = ""
+                message = nil
+            case .failure(let error):
+                message = "Could not save the marker: \(error.localizedDescription)"
+            }
         }
     }
 

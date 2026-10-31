@@ -72,7 +72,7 @@ def _dominant_freq(seg: np.ndarray):
     if not band.any():
         return None
     bp = power[band]
-    if bp.max() < 4.0 * np.median(bp):  # require a real peak
+    if bp.max() <= 0 or bp.max() < 4.0 * np.median(bp):  # require a real peak (flat → all zero)
         return None
     return float(freqs[band][np.argmax(bp)])
 

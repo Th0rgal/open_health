@@ -38,3 +38,4 @@ nssa_cache.json
 # Python research/test bytecode
 __pycache__/
 apps/ios/OuraApp/project-model-validation.yml
+tools/oura_tokens.txt

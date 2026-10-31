@@ -23,4 +23,18 @@ final class ResearchExportTests: XCTestCase {
         XCTAssertEqual(cal.component(.hour, from: ResearchExportView.defaultEnd()), 12)
         XCTAssertLessThan(ResearchExportView.defaultStart(), ResearchExportView.defaultEnd())
     }
+
+    @MainActor
+    func testMarkerWriteRunsOffTheMainThreadWithTheTypedLabel() async throws {
+        final class Seen: @unchecked Sendable { var onMain: Bool?; var label: String? }
+        let seen = Seen()
+        let result = await ResearchMarker.save(label: "audio started") { label in
+            seen.onMain = Thread.isMainThread
+            seen.label = label
+            return 1_793_000_000
+        }
+        XCTAssertEqual(try result.get(), 1_793_000_000)
+        XCTAssertEqual(seen.onMain, false)
+        XCTAssertEqual(seen.label, "audio started")
+    }
 }

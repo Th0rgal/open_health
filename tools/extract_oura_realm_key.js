@@ -16,6 +16,17 @@ try {
   Realm = require(require.resolve("realm", { paths: [process.cwd()] }));
 }
 
+// `mode` on open only applies to new files: restrict an existing one before the key touches it.
+function writeKeyFile(outPath, hex) {
+  const fd = fs.openSync(outPath, "w", 0o600);
+  try {
+    fs.fchmodSync(fd, 0o600);
+    fs.writeSync(fd, `${hex}\n`);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function usage() {
   console.error(
     "usage: extract_oura_realm_key.js <assa-store.realm> <serial> <out-key-file>"
@@ -44,8 +55,7 @@ try {
   }
 
   const hex = Buffer.from(active.auth_key).toString("hex");
-  fs.writeFileSync(outPath, `${hex}\n`, { mode: 0o600 });
-  fs.chmodSync(outPath, 0o600);
+  writeKeyFile(outPath, hex);
 
   console.log(
     JSON.stringify({

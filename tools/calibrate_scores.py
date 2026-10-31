@@ -66,6 +66,7 @@ def main():
     rows = engineer_seq(engineer(list(csv.DictReader(open(csv_path)))))
     params = {"source": csv_path.name, "weights": WEIGHTS, "contributors": {}}
     n_used = 0
+    skipped = []
     for score, weights in WEIGHTS.items():
         for c in weights:
             drivers, kind = LIVE_DRIVERS[c]
@@ -73,6 +74,7 @@ def main():
             data = [d for d in data if all(v is not None for v in d.values())]
             if len(data) < 20:
                 print(f"  skip {c}: only {len(data)} rows")
+                skipped.append(c)
                 continue
             y = np.array([d[c] for d in data])
             if kind == "mean":
@@ -85,10 +87,14 @@ def main():
             params["contributors"][c] = {"drivers": drivers, "kind": kind, "curve": curve.to_dict()}
             n_used = max(n_used, len(data))
 
+    # A skipped contributor keeps its weight but scores nothing, silently deflating every score.
+    if skipped:
+        raise SystemExit(f"not enough data for {', '.join(skipped)}; calibration not written "
+                         "(export more days and re-run)")
     params["n_days"] = n_used
     Path(args.out).write_text(json.dumps(params, indent=1))
     print(f"calibrated {len(params['contributors'])} contributors from {csv_path.name} "
-          f"(≤{n_used} days) → {Path(args.out).relative_to(REPO)}")
+          f"(≤{n_used} days) → {args.out}")
 
 
 if __name__ == "__main__":

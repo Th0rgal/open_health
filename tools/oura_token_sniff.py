@@ -10,6 +10,7 @@ to tools/oura_tokens.txt (gitignored).
 """
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -28,7 +29,10 @@ def _emit(label: str, value: str, host: str) -> None:
         return
     _seen.add(key)
     ctx.log.alert(f"[OURA TOKEN] {host} {label}: {value}")
-    with OUT.open("a") as f:
+    # Credentials: create owner-only, and restrict a pre-existing file before appending.
+    fd = os.open(OUT, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "a") as f:
         f.write(f"{host}\t{label}\t{value}\n")
 
 
