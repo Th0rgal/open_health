@@ -42,12 +42,20 @@ def main():
 
     where, params = "name='spo2_r_pi_event'", ()
     if args.night:
-        bt = con.execute("SELECT decoded_json FROM events WHERE tag=118 ORDER BY ring_timestamp DESC").fetchone()
+        # ring_timestamp restarts on every reboot (ring_start, tag 65): order by sync order
+        # and keep samples inside the bedtime's own boot.
+        bt = con.execute("SELECT id, serial, decoded_json FROM events WHERE tag=118 ORDER BY id DESC").fetchone()
         if bt is None:
             sys.exit("no bedtime_period — drop --night or sync overnight data")
-        v = json.loads(bt[0])
-        where += " AND ring_timestamp BETWEEN ? AND ?"
-        params = (v["bedtime_start_ds"], v["bedtime_end_ds"])
+        bt_id, serial, js = bt
+        v = json.loads(js)
+        boot_start = con.execute("SELECT COALESCE(MAX(id), 0) FROM events WHERE serial=? AND tag=65 AND id < ?",
+                                 (serial, bt_id)).fetchone()[0]
+        boot_end = con.execute("SELECT MIN(id) FROM events WHERE serial=? AND tag=65 AND id > ?",
+                               (serial, bt_id)).fetchone()[0]
+        where += " AND serial=? AND id > ? AND id < ? AND ring_timestamp BETWEEN ? AND ?"
+        params = (serial, boot_start, boot_end if boot_end is not None else 2**63 - 1,
+                  v["bedtime_start_ds"], v["bedtime_end_ds"])
 
     R = []
     for (j,) in con.execute(f"SELECT decoded_json FROM events WHERE {where}", params):
