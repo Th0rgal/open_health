@@ -469,6 +469,47 @@ async fn json_resp(sock: &mut TcpStream, v: &Value) -> Result<()> {
     .await
 }
 
+/// Largest request (headers + body) the dashboard accepts.
+const MAX_REQUEST: usize = 1 << 20;
+
+/// Read one HTTP request: keep reading until the header block ends, then until
+/// `Content-Length` body bytes have arrived. A browser `fetch` POST often sends the
+/// headers and the JSON body in separate TCP segments, so a single `read` can miss
+/// the body entirely (→ "EOF while parsing a value").
+async fn read_request(sock: &mut TcpStream) -> Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 8192];
+    let mut want: Option<usize> = None; // total bytes = header end + Content-Length
+    loop {
+        if let Some(total) = want {
+            if buf.len() >= total {
+                buf.truncate(total);
+                return Ok(buf);
+            }
+        }
+        let n = sock.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(buf); // peer closed; route whatever arrived
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > MAX_REQUEST {
+            return Err(anyhow!("request too large"));
+        }
+        if want.is_none() {
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&buf[..pos]);
+                let len = header(&head, "content-length")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(0);
+                if pos + 4 + len > MAX_REQUEST {
+                    return Err(anyhow!("request too large"));
+                }
+                want = Some(pos + 4 + len);
+            }
+        }
+    }
+}
+
 async fn handle(
     mut sock: TcpStream,
     port: u16,
@@ -477,9 +518,8 @@ async fn handle(
     name: String,
     key_file: Option<PathBuf>,
 ) -> Result<()> {
-    let mut buf = [0u8; 8192];
-    let n = sock.read(&mut buf).await?;
-    let req = String::from_utf8_lossy(&buf[..n]);
+    let raw = read_request(&mut sock).await?;
+    let req = String::from_utf8_lossy(&raw);
     let method = req.split_whitespace().next().unwrap_or("GET");
     let target = req.split_whitespace().nth(1).unwrap_or("/");
     // route on the path only — a query string (e.g. cache-buster) must not 404 the API
