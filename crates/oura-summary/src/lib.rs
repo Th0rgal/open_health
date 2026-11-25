@@ -2121,6 +2121,12 @@ pub fn build_summary(
     // sweeps in an older epoch that happens to share a high raw ds.
     let recent_cut_unix = anchor_unix as f64 - 10.0 * 86_400.0;
     let name_of = |tag: u8| oura_protocol::events::event_name(tag);
+    // Gen3 (Horizon) rings report SpO2 as a direct percentage in `spo2_event` and
+    // never emit `spo2_r_pi_event`. Use it only when no R/PI events exist, so a
+    // ring that emits both is never counted twice.
+    let gen3_spo2 = !events
+        .iter()
+        .any(|(_, tag, _, _)| name_of(*tag) == "spo2_r_pi_event");
     for (ds, tag, jstr, cu) in &events {
         let n = name_of(*tag);
         let dated = is_dated(*ds, *cu);
@@ -2386,6 +2392,18 @@ pub fn build_summary(
                         .filter_map(|x| x.as_f64())
                         .filter(|&x| x > 0.0)
                         .map(spo2_pct)
+                        .collect();
+                    nights[idx].spo2_t.extend(pcts.iter().map(|&p| (*ds, p)));
+                    nights[idx].spo2.extend(pcts);
+                }
+            }
+            "spo2_event" if gen3_spo2 => {
+                if let Some(a) = v["spo2_percent"].as_array() {
+                    // 1 Hz percentages; 0 and >100 (e.g. 101) are not valid readings.
+                    let pcts: Vec<f64> = a
+                        .iter()
+                        .filter_map(|x| x.as_f64())
+                        .filter(|&x| (70.0..=100.0).contains(&x))
                         .collect();
                     nights[idx].spo2_t.extend(pcts.iter().map(|&p| (*ds, p)));
                     nights[idx].spo2.extend(pcts);
@@ -2879,7 +2897,7 @@ pub fn build_summary(
             ),
             "daytime_hr"
         ),
-        feat("SpO2", cap_on("spo2", has("spo2_r_pi_event")), "spo2"),
+        feat("SpO2", cap_on("spo2", has("spo2_r_pi_event") || has("spo2_event")), "spo2"),
         feat(
             "Exercise HR",
             cap_on("exercise_hr", has("ehr_trace_event")),
@@ -2903,7 +2921,7 @@ pub fn build_summary(
     let mut sc: std::collections::BTreeMap<&str, i64> = Default::default();
     for (_ds, tag, _j, _) in &events {
         let cat = match name_of(*tag) {
-            "spo2_r_pi_event" => Some("Blood oxygen"),
+            "spo2_r_pi_event" | "spo2_event" => Some("Blood oxygen"),
             "ibi_and_amplitude_event" | "green_ibi_quality_event" => Some("Heart beats"),
             "ehr_trace_event" | "ehr_acm_intensity_event" => Some("Exercise HR"),
             "motion_event" | "sleep_acm_period" => Some("Motion"),
@@ -2946,7 +2964,7 @@ pub fn build_summary(
             has("cva_raw_ppg_data"),
             "enable cva_ppg"
         ),
-        insight("SpO2", has("spo2_r_pi_event"), "enable spo2"),
+        insight("SpO2", has("spo2_r_pi_event") || has("spo2_event"), "enable spo2"),
         insight("Activity sessions", true, ""),
         insight("HRV / resting HR", true, ""),
         insight(
